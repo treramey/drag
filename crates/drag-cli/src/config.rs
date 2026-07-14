@@ -50,6 +50,17 @@ pub struct Credentials {
     pub hostname: String,
 }
 
+pub(crate) struct JiraCredentials {
+    pub atlassian_user_email: String,
+    pub atlassian_token: String,
+    pub hostname: String,
+}
+
+pub(crate) struct TempoCredentials {
+    pub tempo_token: String,
+    pub account_id: String,
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self, CliError> {
         match fs::read_to_string(path) {
@@ -106,38 +117,51 @@ impl Config {
         &self,
         mut environment: impl FnMut(&str) -> Option<String>,
     ) -> Result<Credentials, CliError> {
-        fn value(configured: &Option<String>, environment: Option<String>) -> Option<String> {
-            environment
-                .map(|value| value.trim().to_owned())
-                .filter(|value| !value.is_empty())
-                .or_else(|| {
-                    configured
-                        .as_ref()
-                        .filter(|value| !value.is_empty())
-                        .cloned()
-                })
-        }
+        let jira = self.jira_credentials_from_source(&mut environment)?;
+        let tempo = self.tempo_credentials_from_source(&mut environment)?;
+        Ok(Credentials {
+            tempo_token: tempo.tempo_token,
+            account_id: tempo.account_id,
+            atlassian_user_email: jira.atlassian_user_email,
+            atlassian_token: jira.atlassian_token,
+            hostname: jira.hostname,
+        })
+    }
 
-        let missing = |field: &str, variable: &str| {
-            CliError::NotConfigured(format!(
-                "missing {field}; run `drag setup` or set {variable}"
-            ))
-        };
+    pub(crate) fn jira_credentials_from_source(
+        &self,
+        mut environment: impl FnMut(&str) -> Option<String>,
+    ) -> Result<JiraCredentials, CliError> {
         let hostname = match environment("ATLASSIAN_HOST").filter(|value| !value.trim().is_empty())
         {
             Some(hostname) => Some(normalize_jira_site(&hostname)?),
             None => self.hostname.clone(),
         };
-        Ok(Credentials {
-            tempo_token: value(&self.tempo_token, environment("TEMPO_TOKEN"))
-                .ok_or_else(|| missing("Tempo token", "TEMPO_TOKEN"))?,
-            account_id: value(&self.account_id, environment("TEMPO_ACCOUNT_ID"))
-                .ok_or_else(|| missing("account ID", "TEMPO_ACCOUNT_ID"))?,
-            atlassian_user_email: value(&self.atlassian_user_email, environment("ATLASSIAN_EMAIL"))
-                .ok_or_else(|| missing("Atlassian email", "ATLASSIAN_EMAIL"))?,
-            atlassian_token: value(&self.atlassian_token, environment("ATLASSIAN_TOKEN"))
-                .ok_or_else(|| missing("Atlassian token", "ATLASSIAN_TOKEN"))?,
-            hostname: hostname.ok_or_else(|| missing("Atlassian hostname", "ATLASSIAN_HOST"))?,
+        Ok(JiraCredentials {
+            atlassian_user_email: credential_value(
+                &self.atlassian_user_email,
+                environment("ATLASSIAN_EMAIL"),
+            )
+            .ok_or_else(|| missing_credential("Atlassian email", "ATLASSIAN_EMAIL"))?,
+            atlassian_token: credential_value(
+                &self.atlassian_token,
+                environment("ATLASSIAN_TOKEN"),
+            )
+            .ok_or_else(|| missing_credential("Atlassian token", "ATLASSIAN_TOKEN"))?,
+            hostname: hostname
+                .ok_or_else(|| missing_credential("Atlassian hostname", "ATLASSIAN_HOST"))?,
+        })
+    }
+
+    pub(crate) fn tempo_credentials_from_source(
+        &self,
+        mut environment: impl FnMut(&str) -> Option<String>,
+    ) -> Result<TempoCredentials, CliError> {
+        Ok(TempoCredentials {
+            tempo_token: credential_value(&self.tempo_token, environment("TEMPO_TOKEN"))
+                .ok_or_else(|| missing_credential("Tempo token", "TEMPO_TOKEN"))?,
+            account_id: credential_value(&self.account_id, environment("TEMPO_ACCOUNT_ID"))
+                .ok_or_else(|| missing_credential("account ID", "TEMPO_ACCOUNT_ID"))?,
         })
     }
 
@@ -147,6 +171,24 @@ impl Config {
             .cloned()
             .unwrap_or_else(|| issue_or_alias.to_owned())
     }
+}
+
+fn credential_value(configured: &Option<String>, environment: Option<String>) -> Option<String> {
+    environment
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            configured
+                .as_ref()
+                .filter(|value| !value.is_empty())
+                .cloned()
+        })
+}
+
+fn missing_credential(field: &str, variable: &str) -> CliError {
+    CliError::NotConfigured(format!(
+        "missing {field}; run `drag setup` or set {variable}"
+    ))
 }
 
 pub(crate) fn normalize_jira_site(input: &str) -> Result<String, CliError> {
@@ -375,6 +417,30 @@ mod tests {
         assert_eq!(credentials.atlassian_user_email, "person@example.com");
         assert_eq!(credentials.atlassian_token, "jira-secret");
         assert_eq!(credentials.hostname, "example.atlassian.net");
+        Ok(())
+    }
+
+    #[test]
+    fn service_credentials_preserve_persisted_values_used_by_runtime_commands(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config {
+            tempo_token: Some(" tempo-secret ".to_owned()),
+            account_id: Some(" account-1 ".to_owned()),
+            atlassian_user_email: Some(" person@example.com ".to_owned()),
+            atlassian_token: Some(" jira-secret ".to_owned()),
+            hostname: Some("https://example.atlassian.net/jira".to_owned()),
+            ..Config::default()
+        };
+
+        let runtime = config.credentials_from_source(|_| None)?;
+        let jira = config.jira_credentials_from_source(|_| None)?;
+        let tempo = config.tempo_credentials_from_source(|_| None)?;
+
+        assert_eq!(jira.atlassian_user_email, runtime.atlassian_user_email);
+        assert_eq!(jira.atlassian_token, runtime.atlassian_token);
+        assert_eq!(jira.hostname, runtime.hostname);
+        assert_eq!(tempo.tempo_token, runtime.tempo_token);
+        assert_eq!(tempo.account_id, runtime.account_id);
         Ok(())
     }
 }

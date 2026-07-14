@@ -16,6 +16,15 @@ fn command(config: &std::path::Path) -> Result<Command, Box<dyn std::error::Erro
         "--output",
         "json",
     ]);
+    for variable in [
+        "TEMPO_TOKEN",
+        "TEMPO_ACCOUNT_ID",
+        "ATLASSIAN_EMAIL",
+        "ATLASSIAN_TOKEN",
+        "ATLASSIAN_HOST",
+    ] {
+        command.env_remove(variable);
+    }
     Ok(command)
 }
 
@@ -176,7 +185,10 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         false
     );
     assert_eq!(body["data"]["commands"]["doctor"]["remote"], true);
-    assert_eq!(body["data"]["commands"]["doctor"]["failedCheckExitCode"], 1);
+    assert_eq!(
+        body["data"]["commands"]["doctor"]["failureExitCodes"]["remoteFailure"],
+        1
+    );
     assert_eq!(body["data"]["schemaVersion"], 1);
     Ok(())
 }
@@ -197,14 +209,33 @@ fn doctor_defaults_to_network_free_local_diagnostics() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn doctor_preserves_configured_presence_semantics_for_empty_environment_values(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+
+    let output = command(&path)?
+        .arg("doctor")
+        .env("TEMPO_TOKEN", "")
+        .output()?;
+
+    assert!(output.status.success());
+    let body: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(body["data"]["configured"]["tempoToken"], true);
+    Ok(())
+}
+
+#[test]
 fn doctor_remote_reports_missing_services_and_exits_unsuccessfully(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = directory.path().join("config.json");
 
-    let output = command(&path)?.args(["doctor", "--remote"]).output()?;
+    let output = command(&path)?
+        .args(["doctor", "--remote", "--debug"])
+        .output()?;
 
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let body: Value = serde_json::from_slice(&output.stderr)?;
     assert_eq!(body["ok"], false);

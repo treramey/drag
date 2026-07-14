@@ -16,7 +16,7 @@ pub struct Cli {
     #[arg(long, global = true, value_enum, default_value_t = OutputMode::Auto)]
     pub output: OutputMode,
 
-    /// Print request diagnostics to stderr (credentials are always redacted).
+    /// Print request diagnostics to stderr in human output (credentials are redacted).
     #[arg(long, global = true)]
     pub debug: bool,
 

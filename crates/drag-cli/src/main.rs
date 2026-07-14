@@ -94,6 +94,7 @@ pub struct Rendered {
 struct RenderedFailure {
     code: &'static str,
     message: &'static str,
+    exit_code: u8,
 }
 
 impl Rendered {
@@ -105,21 +106,36 @@ impl Rendered {
         }
     }
 
-    pub fn failed(data: Value, human: String, code: &'static str, message: &'static str) -> Self {
+    pub fn failed(
+        data: Value,
+        human: String,
+        code: &'static str,
+        message: &'static str,
+        exit_code: u8,
+    ) -> Self {
         Self {
             data,
             human,
-            failure: Some(RenderedFailure { code, message }),
+            failure: Some(RenderedFailure {
+                code,
+                message,
+                exit_code,
+            }),
         }
     }
 
     const fn exit_code(&self) -> u8 {
-        if self.failure.is_some() {
-            EXIT_FAILURE
-        } else {
-            0
+        match &self.failure {
+            Some(failure) => failure.exit_code,
+            None => 0,
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolvedOutputMode {
+    Human,
+    Json,
 }
 
 #[derive(Serialize)]
@@ -162,7 +178,7 @@ async fn main() -> ExitCode {
         Err(error) => return handle_parse_error(error, requested_mode),
     };
     let mode = resolve_mode(cli.output);
-    match run(cli).await {
+    match run(cli, mode).await {
         Ok(result) => {
             let exit_code = result.exit_code();
             match emit_result(result, mode) {
@@ -180,10 +196,11 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli) -> Result<Rendered, CliError> {
+async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<Rendered, CliError> {
     let timezone = default_timezone(cli.timezone.as_deref())?;
     let path = cli.config.unwrap_or(config::config_path()?);
-    let app = App::new(path.clone(), timezone, cli.debug);
+    let debug = request_debug_enabled(cli.debug, mode);
+    let app = App::new(path.clone(), timezone, debug);
     match cli.command {
         Command::Log(args) => app.log(args).await,
         Command::List(args) => app.list(args).await,
@@ -226,6 +243,10 @@ async fn run(cli: Cli) -> Result<Rendered, CliError> {
     }
 }
 
+fn request_debug_enabled(requested: bool, mode: ResolvedOutputMode) -> bool {
+    requested && mode == ResolvedOutputMode::Human
+}
+
 fn schema() -> Rendered {
     let data = json!({
         "schemaVersion": 1,
@@ -250,7 +271,10 @@ fn schema() -> Rendered {
                 "defaultNetworkAccess": false,
                 "remoteChecks": {"jira": "read-only", "tempo": "read-only"},
                 "remoteStatuses": ["connected", "notConfigured", "failed"],
-                "failedCheckExitCode": 1
+                "failureExitCodes": {
+                    "remoteFailure": 1,
+                    "notConfiguredOrInvalid": 2
+                }
             },
             "schema": {}
         },
@@ -265,19 +289,19 @@ fn schema() -> Rendered {
     )
 }
 
-fn resolve_mode(mode: OutputMode) -> OutputMode {
+fn resolve_mode(mode: OutputMode) -> ResolvedOutputMode {
     match mode {
-        OutputMode::Auto if io::stdout().is_terminal() => OutputMode::Human,
-        OutputMode::Auto => OutputMode::Json,
-        mode => mode,
+        OutputMode::Human => ResolvedOutputMode::Human,
+        OutputMode::Auto if io::stdout().is_terminal() => ResolvedOutputMode::Human,
+        OutputMode::Auto | OutputMode::Json => ResolvedOutputMode::Json,
     }
 }
 
-fn emit_result(result: Rendered, mode: OutputMode) -> Result<(), CliError> {
+fn emit_result(result: Rendered, mode: ResolvedOutputMode) -> Result<(), CliError> {
     if let Some(failure) = result.failure {
         match mode {
-            OutputMode::Human => eprintln!("{}", result.human),
-            OutputMode::Json | OutputMode::Auto => write_json(
+            ResolvedOutputMode::Human => eprintln!("{}", result.human),
+            ResolvedOutputMode::Json => write_json(
                 &mut io::stderr().lock(),
                 &DiagnosticFailure {
                     ok: false,
@@ -292,8 +316,8 @@ fn emit_result(result: Rendered, mode: OutputMode) -> Result<(), CliError> {
         return Ok(());
     }
     match mode {
-        OutputMode::Human => println!("{}", result.human),
-        OutputMode::Json | OutputMode::Auto => write_json(
+        ResolvedOutputMode::Human => println!("{}", result.human),
+        ResolvedOutputMode::Json => write_json(
             &mut io::stdout().lock(),
             &Success {
                 ok: true,
@@ -304,8 +328,8 @@ fn emit_result(result: Rendered, mode: OutputMode) -> Result<(), CliError> {
     Ok(())
 }
 
-fn emit_error(error: &CliError, mode: OutputMode) {
-    if mode == OutputMode::Json {
+fn emit_error(error: &CliError, mode: ResolvedOutputMode) {
+    if mode == ResolvedOutputMode::Json {
         let message = error.to_string();
         let body = Failure {
             ok: false,
@@ -332,7 +356,7 @@ fn handle_parse_error(error: clap::Error, requested: OutputMode) -> ExitCode {
         let _ = error.print();
         return ExitCode::SUCCESS;
     }
-    if resolve_mode(requested) == OutputMode::Json {
+    if resolve_mode(requested) == ResolvedOutputMode::Json {
         let message = error.to_string();
         let body = Failure {
             ok: false,
@@ -387,5 +411,15 @@ fn detect_shell() -> clap_complete::Shell {
         Some("elvish") => clap_complete::Shell::Elvish,
         Some("powershell" | "pwsh") => clap_complete::Shell::PowerShell,
         _ => clap_complete::Shell::Bash,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{request_debug_enabled, ResolvedOutputMode};
+
+    #[test]
+    fn json_output_suppresses_plain_text_request_diagnostics() {
+        assert!(!request_debug_enabled(true, ResolvedOutputMode::Json));
     }
 }

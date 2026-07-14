@@ -58,8 +58,9 @@ debug logs.
 `drag doctor` reports local configuration and runtime diagnostics without
 network access. Run `drag doctor --remote` to repeat the same read-only Jira
 and Tempo connection checks used by setup. Remote results are reported for
-both services when possible, and a failed check exits with status 1 without
-changing the configuration.
+both services when possible. Remote request failures exit with status 1;
+missing or invalid connection settings exit with status 2. Doctor never
+changes the configuration.
 
 ## Usage
 

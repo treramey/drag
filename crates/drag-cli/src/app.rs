@@ -23,14 +23,15 @@ use crate::cli::{
     AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, LogInput, SetupArgs,
     TrackerIssueArgs, TrackerStartArgs, TrackerStopArgs,
 };
-use crate::config::{normalize_jira_site, Config, Credentials};
-use crate::{CliError, Rendered};
+use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
+use crate::{CliError, Rendered, EXIT_USAGE};
 
 pub struct App {
     path: PathBuf,
     timezone: Tz,
     debug: bool,
     connection_verifier: Box<dyn ConnectionVerifier>,
+    connection_environment: Box<dyn ConnectionEnvironment>,
     setup_prompter: Box<dyn SetupPrompter>,
 }
 
@@ -41,26 +42,46 @@ type VerificationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>
 trait ConnectionVerifier: Send + Sync {
     fn verify_jira<'a>(
         &'a self,
-        connection: &'a JiraConnection,
+        connection: &'a JiraCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, String>;
 
     fn verify_tempo<'a>(
         &'a self,
-        connection: &'a TempoConnection,
+        connection: &'a TempoCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, ()>;
 }
 
-struct JiraConnection {
-    atlassian_user_email: String,
-    atlassian_token: String,
-    hostname: String,
+trait ConnectionEnvironment: Send + Sync {
+    fn value(&self, name: &str) -> Option<String>;
+    fn is_set(&self, name: &str) -> bool;
 }
 
-struct TempoConnection {
-    tempo_token: String,
-    account_id: String,
+struct ProcessConnectionEnvironment;
+
+impl ConnectionEnvironment for ProcessConnectionEnvironment {
+    fn value(&self, name: &str) -> Option<String> {
+        env::var(name).ok()
+    }
+
+    fn is_set(&self, name: &str) -> bool {
+        env::var_os(name).is_some()
+    }
+}
+
+#[cfg(test)]
+struct EmptyConnectionEnvironment;
+
+#[cfg(test)]
+impl ConnectionEnvironment for EmptyConnectionEnvironment {
+    fn value(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn is_set(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 struct RemoteConnectionVerifier;
@@ -68,7 +89,7 @@ struct RemoteConnectionVerifier;
 impl ConnectionVerifier for RemoteConnectionVerifier {
     fn verify_jira<'a>(
         &'a self,
-        connection: &'a JiraConnection,
+        connection: &'a JiraCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, String> {
         Box::pin(async move {
@@ -79,7 +100,7 @@ impl ConnectionVerifier for RemoteConnectionVerifier {
 
     fn verify_tempo<'a>(
         &'a self,
-        connection: &'a TempoConnection,
+        connection: &'a TempoCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, ()> {
         Box::pin(async move {
@@ -89,7 +110,7 @@ impl ConnectionVerifier for RemoteConnectionVerifier {
     }
 }
 
-impl JiraConnection {
+impl JiraCredentials {
     fn to_credentials(&self) -> Credentials {
         Credentials {
             tempo_token: String::new(),
@@ -101,7 +122,7 @@ impl JiraConnection {
     }
 }
 
-impl TempoConnection {
+impl TempoCredentials {
     fn to_credentials(&self) -> Credentials {
         Credentials {
             tempo_token: self.tempo_token.clone(),
@@ -214,8 +235,8 @@ impl SetupCredentials {
         }
     }
 
-    fn jira_connection(&self) -> JiraConnection {
-        JiraConnection {
+    fn jira_connection(&self) -> JiraCredentials {
+        JiraCredentials {
             atlassian_user_email: self.atlassian_user_email.clone(),
             atlassian_token: self.atlassian_token.clone(),
             hostname: self.hostname.clone(),
@@ -223,7 +244,7 @@ impl SetupCredentials {
     }
 }
 
-impl From<&Credentials> for TempoConnection {
+impl From<&Credentials> for TempoCredentials {
     fn from(credentials: &Credentials) -> Self {
         Self {
             tempo_token: credentials.tempo_token.clone(),
@@ -234,8 +255,8 @@ impl From<&Credentials> for TempoConnection {
 
 struct ServiceCheck {
     status: ServiceStatus,
-    missing: Vec<&'static str>,
     error_code: Option<&'static str>,
+    exit_code: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -259,24 +280,32 @@ impl ServiceCheck {
     fn connected() -> Self {
         Self {
             status: ServiceStatus::Connected,
-            missing: Vec::new(),
             error_code: None,
+            exit_code: 0,
         }
     }
 
-    fn not_configured(missing: Vec<&'static str>) -> Self {
+    fn not_configured() -> Self {
         Self {
             status: ServiceStatus::NotConfigured,
-            missing,
             error_code: None,
+            exit_code: EXIT_USAGE,
         }
     }
 
     fn failed(error: &CliError) -> Self {
         Self {
             status: ServiceStatus::Failed,
-            missing: Vec::new(),
             error_code: Some(error.code()),
+            exit_code: error.exit_code(),
+        }
+    }
+
+    fn preparation_failed(error: &CliError) -> Self {
+        if matches!(error, CliError::NotConfigured(_)) {
+            Self::not_configured()
+        } else {
+            Self::failed(error)
         }
     }
 
@@ -286,9 +315,6 @@ impl ServiceCheck {
 
     fn json(&self) -> serde_json::Value {
         let mut value = json!({"status": self.status.as_str()});
-        if !self.missing.is_empty() {
-            value["missing"] = json!(self.missing);
-        }
         if let Some(error_code) = self.error_code {
             value["errorCode"] = json!(error_code);
         }
@@ -298,12 +324,7 @@ impl ServiceCheck {
     fn human(&self, service: &str) -> String {
         match self.status {
             ServiceStatus::Connected => format!("{service}: connected"),
-            ServiceStatus::NotConfigured => {
-                format!(
-                    "{service}: not configured (missing {})",
-                    self.missing.join(", ")
-                )
-            }
+            ServiceStatus::NotConfigured => format!("{service}: not configured"),
             ServiceStatus::Failed => format!(
                 "{service}: failed ({})",
                 self.error_code.unwrap_or("runtime_failure")
@@ -319,6 +340,7 @@ impl App {
             timezone,
             debug,
             connection_verifier: Box::new(RemoteConnectionVerifier),
+            connection_environment: Box::new(ProcessConnectionEnvironment),
             setup_prompter: Box::new(TerminalSetupPrompter),
         }
     }
@@ -333,6 +355,7 @@ impl App {
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
+            connection_environment: Box::new(EmptyConnectionEnvironment),
             setup_prompter: Box::new(TerminalSetupPrompter),
         }
     }
@@ -348,6 +371,7 @@ impl App {
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
+            connection_environment: Box::new(EmptyConnectionEnvironment),
             setup_prompter: Box::new(setup_prompter),
         }
     }
@@ -374,7 +398,7 @@ impl App {
 
     pub async fn doctor(&self, args: DoctorArgs) -> Result<Rendered, CliError> {
         let config = Config::load(&self.path)?;
-        let configured = configured_fields(&config);
+        let configured = configured_fields(&config, self.connection_environment.as_ref());
         let jira_configured = configured["atlassianHost"].as_bool() == Some(true)
             && configured["atlassianEmail"].as_bool() == Some(true)
             && configured["atlassianToken"].as_bool() == Some(true);
@@ -408,7 +432,9 @@ impl App {
             return Ok(Rendered::new(report, human));
         }
 
-        let jira = match jira_connection(&config) {
+        let jira = match config
+            .jira_credentials_from_source(|name| self.connection_environment.value(name))
+        {
             Ok(connection) => match self
                 .connection_verifier
                 .verify_jira(&connection, self.debug)
@@ -417,9 +443,11 @@ impl App {
                 Ok(_) => ServiceCheck::connected(),
                 Err(error) => ServiceCheck::failed(&error),
             },
-            Err(check) => check,
+            Err(error) => ServiceCheck::preparation_failed(&error),
         };
-        let tempo = match tempo_connection(&config) {
+        let tempo = match config
+            .tempo_credentials_from_source(|name| self.connection_environment.value(name))
+        {
             Ok(connection) => match self
                 .connection_verifier
                 .verify_tempo(&connection, self.debug)
@@ -428,9 +456,10 @@ impl App {
                 Ok(()) => ServiceCheck::connected(),
                 Err(error) => ServiceCheck::failed(&error),
             },
-            Err(check) => check,
+            Err(error) => ServiceCheck::preparation_failed(&error),
         };
         let successful = jira.is_connected() && tempo.is_connected();
+        let failure_exit_code = jira.exit_code.max(tempo.exit_code);
         report["remoteChecks"] = json!({
             "jira": jira.json(),
             "tempo": tempo.json(),
@@ -449,6 +478,7 @@ impl App {
                 human,
                 "remote_check_failed",
                 "one or more remote connection checks failed",
+                failure_exit_code,
             ))
         }
     }
@@ -463,7 +493,7 @@ impl App {
             .await?;
         let credentials = setup_credentials.to_credentials(account_id);
         self.connection_verifier
-            .verify_tempo(&TempoConnection::from(&credentials), self.debug)
+            .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
             .await?;
 
         self.save_setup_credentials(credentials)?;
@@ -568,7 +598,7 @@ impl App {
             let credentials = setup_credentials.to_credentials(account_id.clone());
             match self
                 .connection_verifier
-                .verify_tempo(&TempoConnection::from(&credentials), self.debug)
+                .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
                 .await
             {
                 Ok(()) => return Ok(credentials),
@@ -1084,72 +1114,17 @@ fn configured_label(configured: bool) -> &'static str {
     }
 }
 
-fn configured_fields(config: &Config) -> serde_json::Value {
+fn configured_fields(
+    config: &Config,
+    connection_environment: &dyn ConnectionEnvironment,
+) -> serde_json::Value {
     json!({
-        "tempoToken": resolved_value(config.tempo_token.as_deref(), "TEMPO_TOKEN").is_some(),
-        "accountId": resolved_value(config.account_id.as_deref(), "TEMPO_ACCOUNT_ID").is_some(),
-        "atlassianEmail": resolved_value(config.atlassian_user_email.as_deref(), "ATLASSIAN_EMAIL").is_some(),
-        "atlassianToken": resolved_value(config.atlassian_token.as_deref(), "ATLASSIAN_TOKEN").is_some(),
-        "atlassianHost": resolved_value(config.hostname.as_deref(), "ATLASSIAN_HOST").is_some(),
+        "tempoToken": config.tempo_token.is_some() || connection_environment.is_set("TEMPO_TOKEN"),
+        "accountId": config.account_id.is_some() || connection_environment.is_set("TEMPO_ACCOUNT_ID"),
+        "atlassianEmail": config.atlassian_user_email.is_some() || connection_environment.is_set("ATLASSIAN_EMAIL"),
+        "atlassianToken": config.atlassian_token.is_some() || connection_environment.is_set("ATLASSIAN_TOKEN"),
+        "atlassianHost": config.hostname.is_some() || connection_environment.is_set("ATLASSIAN_HOST"),
     })
-}
-
-fn jira_connection(config: &Config) -> Result<JiraConnection, ServiceCheck> {
-    let hostname = resolved_value(config.hostname.as_deref(), "ATLASSIAN_HOST");
-    let email = resolved_value(config.atlassian_user_email.as_deref(), "ATLASSIAN_EMAIL");
-    let token = resolved_value(config.atlassian_token.as_deref(), "ATLASSIAN_TOKEN");
-    let mut missing = Vec::new();
-    if hostname.is_none() {
-        missing.push("atlassianHost");
-    }
-    if email.is_none() {
-        missing.push("atlassianEmail");
-    }
-    if token.is_none() {
-        missing.push("atlassianToken");
-    }
-    if !missing.is_empty() {
-        return Err(ServiceCheck::not_configured(missing));
-    }
-    let hostname = normalize_jira_site(hostname.as_deref().unwrap_or_default())
-        .map_err(|error| ServiceCheck::failed(&error))?;
-    Ok(JiraConnection {
-        atlassian_user_email: email.unwrap_or_default(),
-        atlassian_token: token.unwrap_or_default(),
-        hostname,
-    })
-}
-
-fn tempo_connection(config: &Config) -> Result<TempoConnection, ServiceCheck> {
-    let token = resolved_value(config.tempo_token.as_deref(), "TEMPO_TOKEN");
-    let account_id = resolved_value(config.account_id.as_deref(), "TEMPO_ACCOUNT_ID");
-    let mut missing = Vec::new();
-    if token.is_none() {
-        missing.push("tempoToken");
-    }
-    if account_id.is_none() {
-        missing.push("accountId");
-    }
-    if !missing.is_empty() {
-        return Err(ServiceCheck::not_configured(missing));
-    }
-    Ok(TempoConnection {
-        tempo_token: token.unwrap_or_default(),
-        account_id: account_id.unwrap_or_default(),
-    })
-}
-
-fn resolved_value(configured: Option<&str>, variable: &str) -> Option<String> {
-    env::var(variable)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            configured
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        })
 }
 
 struct ResolvedLogInput {
@@ -1384,13 +1359,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        normalize_jira_site, App, Config, ConnectionVerifier, JiraConnection, SetupCredentials,
-        SetupPrompter, TempoConnection, VerificationFuture, ATLASSIAN_TOKEN_URL,
+        normalize_jira_site, App, Config, ConnectionVerifier, JiraCredentials, SetupCredentials,
+        SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
-    #[cfg(unix)]
-    use crate::cli::OutputMode;
     use crate::cli::{DoctorArgs, SetupArgs};
     use crate::CliError;
+    #[cfg(unix)]
+    use crate::ResolvedOutputMode;
 
     struct FakeVerifier {
         jira_error: Option<String>,
@@ -1487,7 +1462,7 @@ mod tests {
     impl ConnectionVerifier for SequenceVerifier {
         fn verify_jira<'a>(
             &'a self,
-            _connection: &'a JiraConnection,
+            _connection: &'a JiraCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, String> {
             Box::pin(async move {
@@ -1502,7 +1477,7 @@ mod tests {
 
         fn verify_tempo<'a>(
             &'a self,
-            _connection: &'a TempoConnection,
+            _connection: &'a TempoCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, ()> {
             Box::pin(async move {
@@ -1519,7 +1494,7 @@ mod tests {
     impl ConnectionVerifier for DoctorVerifier {
         fn verify_jira<'a>(
             &'a self,
-            _connection: &'a JiraConnection,
+            _connection: &'a JiraCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, String> {
             Box::pin(async move {
@@ -1538,7 +1513,7 @@ mod tests {
 
         fn verify_tempo<'a>(
             &'a self,
-            _connection: &'a TempoConnection,
+            _connection: &'a TempoCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, ()> {
             Box::pin(async move {
@@ -1649,8 +1624,8 @@ mod tests {
         );
 
         match app.setup(SetupArgs { from_env: false }).await {
-            Ok(result) => crate::emit_result(result, OutputMode::Json)?,
-            Err(error) => crate::emit_error(&error, OutputMode::Json),
+            Ok(result) => crate::emit_result(result, ResolvedOutputMode::Json)?,
+            Err(error) => crate::emit_error(&error, ResolvedOutputMode::Json),
         }
         Ok(())
     }
@@ -1658,7 +1633,7 @@ mod tests {
     impl ConnectionVerifier for FakeVerifier {
         fn verify_jira<'a>(
             &'a self,
-            _connection: &'a JiraConnection,
+            _connection: &'a JiraCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, String> {
             let error = self.jira_error.clone();
@@ -1672,7 +1647,7 @@ mod tests {
 
         fn verify_tempo<'a>(
             &'a self,
-            connection: &'a TempoConnection,
+            connection: &'a TempoCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, ()> {
             let account_id = connection.account_id.clone();
@@ -1793,6 +1768,7 @@ mod tests {
             result.failure.as_ref().map(|failure| failure.code),
             Some("remote_check_failed")
         );
+        assert_eq!(result.exit_code(), 1);
         assert_eq!(result.data["remoteChecks"]["jira"]["status"], "failed");
         assert_eq!(
             result.data["remoteChecks"]["jira"]["errorCode"],
@@ -1828,6 +1804,7 @@ mod tests {
         let result = app.doctor(DoctorArgs { remote: true }).await?;
 
         assert!(result.failure.is_some());
+        assert_eq!(result.exit_code(), 1);
         assert_eq!(result.data["remoteChecks"]["jira"]["status"], "connected");
         assert_eq!(result.data["remoteChecks"]["tempo"]["status"], "failed");
         assert_eq!(
@@ -1858,6 +1835,7 @@ mod tests {
         let result = app.doctor(DoctorArgs { remote: true }).await?;
 
         assert!(result.failure.is_some());
+        assert_eq!(result.exit_code(), 2);
         assert_eq!(
             result.data["remoteChecks"]["jira"]["status"],
             "notConfigured"
