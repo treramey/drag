@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Browser-assisted Atlassian and Tempo token generation during interactive
+  setup, with visible fallback links and a `--no-open` option.
 - Guided interactive setup that verifies Jira and Tempo before saving, derives
   the Atlassian account ID, and safely reuses existing connection values.
 - Opt-in `doctor --remote` checks for read-only Jira and Tempo connectivity,

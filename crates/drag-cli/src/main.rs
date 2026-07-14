@@ -255,8 +255,15 @@ fn schema() -> Rendered {
         "commands": {
             "setup": {
                 "sideEffects": true,
+                "interactive": true,
                 "fromEnv": true,
+                "noOpen": true,
                 "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
+                "browser": {
+                    "default": "openTokenPages",
+                    "failure": "warning",
+                    "fromEnv": false
+                },
                 "verification": {"jira": "read-only", "tempo": "read-only"},
                 "derivesAccountId": true
             },

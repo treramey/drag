@@ -180,6 +180,11 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     let body: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(body["data"]["commands"]["log"]["dryRun"], true);
     assert_eq!(body["data"]["commands"]["setup"]["fromEnv"], true);
+    assert_eq!(body["data"]["commands"]["setup"]["noOpen"], true);
+    assert_eq!(
+        body["data"]["commands"]["setup"]["browser"]["fromEnv"],
+        false
+    );
     assert_eq!(
         body["data"]["commands"]["doctor"]["defaultNetworkAccess"],
         false
@@ -190,6 +195,19 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         1
     );
     assert_eq!(body["data"]["schemaVersion"], 1);
+    Ok(())
+}
+
+#[test]
+fn setup_help_documents_browser_suppression() -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::cargo_bin("drag")?
+        .args(["setup", "--help"])
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("--no-open"));
+    assert!(stdout.contains("without opening them in a browser"));
     Ok(())
 }
 
