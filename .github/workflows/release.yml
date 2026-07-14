@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+permissions:
+  contents: write
+  attestations: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@ad397744b0d591a723ab90405b7247fac0e6b8db # v2
+        with:
+          key: release-${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} --package tempomat-cli
+
+      - name: Package Unix archive
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          artifact="tempomat-${{ matrix.target }}"
+          mkdir -p "dist/$artifact"
+          cp "target/${{ matrix.target }}/release/tempo" "dist/$artifact/"
+          cp LICENSE README.md CHANGELOG.md "dist/$artifact/"
+          tar -czf "dist/$artifact.tar.gz" -C dist "$artifact"
+          (cd dist && shasum -a 256 "$artifact.tar.gz" > "$artifact.tar.gz.sha256")
+
+      - name: Package Windows archive
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $artifact = "tempomat-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path "dist/$artifact"
+          Copy-Item "target/${{ matrix.target }}/release/tempo.exe" "dist/$artifact/"
+          Copy-Item LICENSE, README.md, CHANGELOG.md "dist/$artifact/"
+          Compress-Archive -Path "dist/$artifact" -DestinationPath "dist/$artifact.zip"
+          $hash = (Get-FileHash "dist/$artifact.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $artifact.zip" | Out-File -Encoding ascii "dist/$artifact.zip.sha256"
+
+      - name: Attest artifact
+        uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with:
+          subject-path: dist/tempomat-${{ matrix.target }}.${{ matrix.archive }}
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: tempomat-${{ matrix.target }}
+          path: |
+            dist/tempomat-${{ matrix.target }}.${{ matrix.archive }}
+            dist/tempomat-${{ matrix.target }}.${{ matrix.archive }}.sha256
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: tempomat-*
+          path: artifacts
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes artifacts/*

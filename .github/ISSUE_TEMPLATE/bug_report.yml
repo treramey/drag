@@ -1,0 +1,26 @@
+name: Bug report
+description: Report reproducible incorrect behavior
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Include the command, expected result, and actual result.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste the output of `tempo --output json doctor` after checking it contains no private paths.
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true

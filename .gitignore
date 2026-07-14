@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+lcov.info
+
+# Local agent tooling
+/.pi/
+/VENT.md
+
+# IDE and editor files
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Local environment and test artifacts
+.env
+.env.*
+*.log
+/coverage/
