@@ -138,6 +138,7 @@ impl App {
 
     pub async fn setup(&self, args: SetupArgs) -> Result<Rendered, CliError> {
         if args.from_env {
+            // Validate before network requests; reload afterward to preserve concurrent updates.
             Config::load(&self.path)?;
             let setup_credentials = SetupCredentials::from_environment()?;
             return self

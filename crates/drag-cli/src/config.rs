@@ -113,9 +113,7 @@ impl Config {
                 "missing {field}; run `drag setup` or set {variable}"
             ))
         };
-        let hostname = match environment("ATLASSIAN_HOST")
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
+        let hostname = match environment("ATLASSIAN_HOST").filter(|value| !value.trim().is_empty())
         {
             Some(hostname) => Some(normalize_jira_site(&hostname)?),
             None => self.hostname.clone(),
