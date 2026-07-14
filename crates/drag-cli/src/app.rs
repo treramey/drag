@@ -20,17 +20,18 @@ use url::Url;
 
 use crate::api::ApiClient;
 use crate::cli::{
-    AliasDeleteArgs, AliasSetArgs, DeleteArgs, ListArgs, LogArgs, LogInput, SetupArgs,
+    AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, LogInput, SetupArgs,
     TrackerIssueArgs, TrackerStartArgs, TrackerStopArgs,
 };
-use crate::config::{normalize_jira_site, Config, Credentials};
-use crate::{CliError, Rendered};
+use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
+use crate::{CliError, Rendered, EXIT_USAGE};
 
 pub struct App {
     path: PathBuf,
     timezone: Tz,
     debug: bool,
     connection_verifier: Box<dyn ConnectionVerifier>,
+    connection_environment: Box<dyn ConnectionEnvironment>,
     setup_prompter: Box<dyn SetupPrompter>,
 }
 
@@ -41,15 +42,46 @@ type VerificationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>
 trait ConnectionVerifier: Send + Sync {
     fn verify_jira<'a>(
         &'a self,
-        credentials: &'a SetupCredentials,
+        connection: &'a JiraCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, String>;
 
     fn verify_tempo<'a>(
         &'a self,
-        credentials: &'a Credentials,
+        connection: &'a TempoCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, ()>;
+}
+
+trait ConnectionEnvironment: Send + Sync {
+    fn value(&self, name: &str) -> Option<String>;
+    fn is_set(&self, name: &str) -> bool;
+}
+
+struct ProcessConnectionEnvironment;
+
+impl ConnectionEnvironment for ProcessConnectionEnvironment {
+    fn value(&self, name: &str) -> Option<String> {
+        env::var(name).ok()
+    }
+
+    fn is_set(&self, name: &str) -> bool {
+        env::var_os(name).is_some()
+    }
+}
+
+#[cfg(test)]
+struct EmptyConnectionEnvironment;
+
+#[cfg(test)]
+impl ConnectionEnvironment for EmptyConnectionEnvironment {
+    fn value(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    fn is_set(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 struct RemoteConnectionVerifier;
@@ -57,24 +89,48 @@ struct RemoteConnectionVerifier;
 impl ConnectionVerifier for RemoteConnectionVerifier {
     fn verify_jira<'a>(
         &'a self,
-        credentials: &'a SetupCredentials,
+        connection: &'a JiraCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, String> {
         Box::pin(async move {
-            let api = ApiClient::new(credentials.to_credentials(String::new()), debug)?;
+            let api = ApiClient::new(connection.to_credentials(), debug)?;
             api.get_current_user_account_id().await
         })
     }
 
     fn verify_tempo<'a>(
         &'a self,
-        credentials: &'a Credentials,
+        connection: &'a TempoCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, ()> {
         Box::pin(async move {
-            let api = ApiClient::new(credentials.clone(), debug)?;
+            let api = ApiClient::new(connection.to_credentials(), debug)?;
             api.verify_tempo_connection().await
         })
+    }
+}
+
+impl JiraCredentials {
+    fn to_credentials(&self) -> Credentials {
+        Credentials {
+            tempo_token: String::new(),
+            account_id: String::new(),
+            atlassian_user_email: self.atlassian_user_email.clone(),
+            atlassian_token: self.atlassian_token.clone(),
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
+impl TempoCredentials {
+    fn to_credentials(&self) -> Credentials {
+        Credentials {
+            tempo_token: self.tempo_token.clone(),
+            account_id: self.account_id.clone(),
+            atlassian_user_email: String::new(),
+            atlassian_token: String::new(),
+            hostname: String::new(),
+        }
     }
 }
 
@@ -178,6 +234,103 @@ impl SetupCredentials {
             hostname: self.hostname.clone(),
         }
     }
+
+    fn jira_connection(&self) -> JiraCredentials {
+        JiraCredentials {
+            atlassian_user_email: self.atlassian_user_email.clone(),
+            atlassian_token: self.atlassian_token.clone(),
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
+impl From<&Credentials> for TempoCredentials {
+    fn from(credentials: &Credentials) -> Self {
+        Self {
+            tempo_token: credentials.tempo_token.clone(),
+            account_id: credentials.account_id.clone(),
+        }
+    }
+}
+
+struct ServiceCheck {
+    status: ServiceStatus,
+    error_code: Option<&'static str>,
+    exit_code: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceStatus {
+    Connected,
+    NotConfigured,
+    Failed,
+}
+
+impl ServiceStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::NotConfigured => "notConfigured",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+impl ServiceCheck {
+    fn connected() -> Self {
+        Self {
+            status: ServiceStatus::Connected,
+            error_code: None,
+            exit_code: 0,
+        }
+    }
+
+    fn not_configured() -> Self {
+        Self {
+            status: ServiceStatus::NotConfigured,
+            error_code: None,
+            exit_code: EXIT_USAGE,
+        }
+    }
+
+    fn failed(error: &CliError) -> Self {
+        Self {
+            status: ServiceStatus::Failed,
+            error_code: Some(error.code()),
+            exit_code: error.exit_code(),
+        }
+    }
+
+    fn preparation_failed(error: &CliError) -> Self {
+        if matches!(error, CliError::NotConfigured(_)) {
+            Self::not_configured()
+        } else {
+            Self::failed(error)
+        }
+    }
+
+    fn is_connected(&self) -> bool {
+        self.status == ServiceStatus::Connected
+    }
+
+    fn json(&self) -> serde_json::Value {
+        let mut value = json!({"status": self.status.as_str()});
+        if let Some(error_code) = self.error_code {
+            value["errorCode"] = json!(error_code);
+        }
+        value
+    }
+
+    fn human(&self, service: &str) -> String {
+        match self.status {
+            ServiceStatus::Connected => format!("{service}: connected"),
+            ServiceStatus::NotConfigured => format!("{service}: not configured"),
+            ServiceStatus::Failed => format!(
+                "{service}: failed ({})",
+                self.error_code.unwrap_or("runtime_failure")
+            ),
+        }
+    }
 }
 
 impl App {
@@ -187,6 +340,7 @@ impl App {
             timezone,
             debug,
             connection_verifier: Box::new(RemoteConnectionVerifier),
+            connection_environment: Box::new(ProcessConnectionEnvironment),
             setup_prompter: Box::new(TerminalSetupPrompter),
         }
     }
@@ -201,6 +355,7 @@ impl App {
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
+            connection_environment: Box::new(EmptyConnectionEnvironment),
             setup_prompter: Box::new(TerminalSetupPrompter),
         }
     }
@@ -216,6 +371,7 @@ impl App {
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
+            connection_environment: Box::new(EmptyConnectionEnvironment),
             setup_prompter: Box::new(setup_prompter),
         }
     }
@@ -240,17 +396,104 @@ impl App {
         self.run_interactive_setup(&config).await
     }
 
+    pub async fn doctor(&self, args: DoctorArgs) -> Result<Rendered, CliError> {
+        let config = Config::load(&self.path)?;
+        let configured = configured_fields(&config, self.connection_environment.as_ref());
+        let jira_configured = configured["atlassianHost"].as_bool() == Some(true)
+            && configured["atlassianEmail"].as_bool() == Some(true)
+            && configured["atlassianToken"].as_bool() == Some(true);
+        let tempo_configured = configured["tempoToken"].as_bool() == Some(true)
+            && configured["accountId"].as_bool() == Some(true);
+        let mut report = json!({
+            "name": "drag",
+            "version": env!("CARGO_PKG_VERSION"),
+            "configPath": self.path,
+            "configured": configured,
+            "aliases": config.aliases.len(),
+            "trackers": config.trackers.len(),
+            "timezone": self.timezone.name(),
+            "target": {
+                "architecture": std::env::consts::ARCH,
+                "operatingSystem": std::env::consts::OS
+            }
+        });
+        let mut human = format!(
+            "drag {}\nconfig: {}\ntimezone: {}\naliases: {}\ntrackers: {}\nJira: {}\nTempo: {}",
+            env!("CARGO_PKG_VERSION"),
+            self.path.display(),
+            self.timezone.name(),
+            config.aliases.len(),
+            config.trackers.len(),
+            configured_label(jira_configured),
+            configured_label(tempo_configured),
+        );
+
+        if !args.remote {
+            return Ok(Rendered::new(report, human));
+        }
+
+        let jira = match config
+            .jira_credentials_from_source(|name| self.connection_environment.value(name))
+        {
+            Ok(connection) => match self
+                .connection_verifier
+                .verify_jira(&connection, self.debug)
+                .await
+            {
+                Ok(_) => ServiceCheck::connected(),
+                Err(error) => ServiceCheck::failed(&error),
+            },
+            Err(error) => ServiceCheck::preparation_failed(&error),
+        };
+        let tempo = match config
+            .tempo_credentials_from_source(|name| self.connection_environment.value(name))
+        {
+            Ok(connection) => match self
+                .connection_verifier
+                .verify_tempo(&connection, self.debug)
+                .await
+            {
+                Ok(()) => ServiceCheck::connected(),
+                Err(error) => ServiceCheck::failed(&error),
+            },
+            Err(error) => ServiceCheck::preparation_failed(&error),
+        };
+        let successful = jira.is_connected() && tempo.is_connected();
+        let failure_exit_code = jira.exit_code.max(tempo.exit_code);
+        report["remoteChecks"] = json!({
+            "jira": jira.json(),
+            "tempo": tempo.json(),
+        });
+        human.push_str(&format!(
+            "\n\nRemote checks (read-only)\n{}\n{}",
+            jira.human("Jira"),
+            tempo.human("Tempo")
+        ));
+
+        if successful {
+            Ok(Rendered::new(report, human))
+        } else {
+            Ok(Rendered::failed(
+                report,
+                human,
+                "remote_check_failed",
+                "one or more remote connection checks failed",
+                failure_exit_code,
+            ))
+        }
+    }
+
     async fn verify_and_save_environment_setup(
         &self,
         setup_credentials: SetupCredentials,
     ) -> Result<Rendered, CliError> {
         let account_id = self
             .connection_verifier
-            .verify_jira(&setup_credentials, self.debug)
+            .verify_jira(&setup_credentials.jira_connection(), self.debug)
             .await?;
         let credentials = setup_credentials.to_credentials(account_id);
         self.connection_verifier
-            .verify_tempo(&credentials, self.debug)
+            .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
             .await?;
 
         self.save_setup_credentials(credentials)?;
@@ -323,7 +566,7 @@ impl App {
             };
             match self
                 .connection_verifier
-                .verify_jira(&setup_credentials, self.debug)
+                .verify_jira(&setup_credentials.jira_connection(), self.debug)
                 .await
             {
                 Ok(account_id) => return Ok((setup_credentials, account_id)),
@@ -355,7 +598,7 @@ impl App {
             let credentials = setup_credentials.to_credentials(account_id.clone());
             match self
                 .connection_verifier
-                .verify_tempo(&credentials, self.debug)
+                .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
                 .await
             {
                 Ok(()) => return Ok(credentials),
@@ -863,6 +1106,27 @@ impl App {
     }
 }
 
+fn configured_label(configured: bool) -> &'static str {
+    if configured {
+        "configured"
+    } else {
+        "not configured"
+    }
+}
+
+fn configured_fields(
+    config: &Config,
+    connection_environment: &dyn ConnectionEnvironment,
+) -> serde_json::Value {
+    json!({
+        "tempoToken": config.tempo_token.is_some() || connection_environment.is_set("TEMPO_TOKEN"),
+        "accountId": config.account_id.is_some() || connection_environment.is_set("TEMPO_ACCOUNT_ID"),
+        "atlassianEmail": config.atlassian_user_email.is_some() || connection_environment.is_set("ATLASSIAN_EMAIL"),
+        "atlassianToken": config.atlassian_token.is_some() || connection_environment.is_set("ATLASSIAN_TOKEN"),
+        "atlassianHost": config.hostname.is_some() || connection_environment.is_set("ATLASSIAN_HOST"),
+    })
+}
+
 struct ResolvedLogInput {
     value: LogInput,
     dry_run: bool,
@@ -1095,13 +1359,13 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        normalize_jira_site, App, Config, ConnectionVerifier, Credentials, SetupCredentials,
-        SetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
+        normalize_jira_site, App, Config, ConnectionVerifier, JiraCredentials, SetupCredentials,
+        SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
-    #[cfg(unix)]
-    use crate::cli::OutputMode;
-    use crate::cli::SetupArgs;
+    use crate::cli::{DoctorArgs, SetupArgs};
     use crate::CliError;
+    #[cfg(unix)]
+    use crate::ResolvedOutputMode;
 
     struct FakeVerifier {
         jira_error: Option<String>,
@@ -1175,6 +1439,12 @@ mod tests {
         tempo_results: Mutex<VecDeque<Result<(), VerificationFailure>>>,
     }
 
+    struct DoctorVerifier {
+        jira_result: Mutex<Option<Result<String, VerificationFailure>>>,
+        tempo_result: Mutex<Option<Result<(), VerificationFailure>>>,
+        calls: Arc<Mutex<Vec<&'static str>>>,
+    }
+
     enum VerificationFailure {
         Authentication(String),
         Fatal(String),
@@ -1192,7 +1462,7 @@ mod tests {
     impl ConnectionVerifier for SequenceVerifier {
         fn verify_jira<'a>(
             &'a self,
-            _credentials: &'a SetupCredentials,
+            _connection: &'a JiraCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, String> {
             Box::pin(async move {
@@ -1207,7 +1477,7 @@ mod tests {
 
         fn verify_tempo<'a>(
             &'a self,
-            _credentials: &'a Credentials,
+            _connection: &'a TempoCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, ()> {
             Box::pin(async move {
@@ -1219,6 +1489,63 @@ mod tests {
                     .map_err(VerificationFailure::into_cli_error)
             })
         }
+    }
+
+    impl ConnectionVerifier for DoctorVerifier {
+        fn verify_jira<'a>(
+            &'a self,
+            _connection: &'a JiraCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, String> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
+                    .push("jira");
+                self.jira_result
+                    .lock()
+                    .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
+                    .take()
+                    .ok_or_else(|| CliError::Api("unexpected Jira verification".to_owned()))?
+                    .map_err(VerificationFailure::into_cli_error)
+            })
+        }
+
+        fn verify_tempo<'a>(
+            &'a self,
+            _connection: &'a TempoCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, ()> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
+                    .push("tempo");
+                self.tempo_result
+                    .lock()
+                    .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
+                    .take()
+                    .ok_or_else(|| CliError::Api("unexpected Tempo verification".to_owned()))?
+                    .map_err(VerificationFailure::into_cli_error)
+            })
+        }
+    }
+
+    fn doctor_app(
+        path: PathBuf,
+        jira_result: Result<String, VerificationFailure>,
+        tempo_result: Result<(), VerificationFailure>,
+    ) -> (App, Arc<Mutex<Vec<&'static str>>>) {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let app = App::with_connection_verifier(
+            path,
+            DoctorVerifier {
+                jira_result: Mutex::new(Some(jira_result)),
+                tempo_result: Mutex::new(Some(tempo_result)),
+                calls: Arc::clone(&calls),
+            },
+        );
+        (app, calls)
     }
 
     fn interactive_app(
@@ -1297,8 +1624,8 @@ mod tests {
         );
 
         match app.setup(SetupArgs { from_env: false }).await {
-            Ok(result) => crate::emit_result(result, OutputMode::Json)?,
-            Err(error) => crate::emit_error(&error, OutputMode::Json),
+            Ok(result) => crate::emit_result(result, ResolvedOutputMode::Json)?,
+            Err(error) => crate::emit_error(&error, ResolvedOutputMode::Json),
         }
         Ok(())
     }
@@ -1306,7 +1633,7 @@ mod tests {
     impl ConnectionVerifier for FakeVerifier {
         fn verify_jira<'a>(
             &'a self,
-            _credentials: &'a SetupCredentials,
+            _connection: &'a JiraCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, String> {
             let error = self.jira_error.clone();
@@ -1320,10 +1647,10 @@ mod tests {
 
         fn verify_tempo<'a>(
             &'a self,
-            credentials: &'a Credentials,
+            connection: &'a TempoCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, ()> {
-            let account_id = credentials.account_id.clone();
+            let account_id = connection.account_id.clone();
             let error = self.tempo_error.clone();
             let accounts = Arc::clone(&self.tempo_accounts);
             let config_update = self.config_update.clone();
@@ -1365,6 +1692,226 @@ mod tests {
                 Tracker::new("ABC-2".to_owned(), Some("work".to_owned()), 123),
             )]),
         }
+    }
+
+    #[tokio::test]
+    async fn doctor_without_remote_checks_never_calls_the_verifier(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let (app, calls) = doctor_app(
+            path,
+            Err(VerificationFailure::Fatal(
+                "Jira must not be called".to_owned(),
+            )),
+            Err(VerificationFailure::Fatal(
+                "Tempo must not be called".to_owned(),
+            )),
+        );
+
+        let result = app.doctor(DoctorArgs { remote: false }).await?;
+
+        assert!(result.failure.is_none());
+        assert!(result.data.get("remoteChecks").is_none());
+        assert!(result.human.contains("Jira: configured"));
+        assert!(result.human.contains("Tempo: configured"));
+        assert!(calls
+            .lock()
+            .map_err(|_| "test verifier lock was poisoned")?
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn doctor_remote_checks_report_both_connected_without_writing_config(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let before = fs::read(&path)?;
+        let (app, calls) = doctor_app(path.clone(), Ok("verified-account".to_owned()), Ok(()));
+
+        let result = app.doctor(DoctorArgs { remote: true }).await?;
+
+        assert!(result.failure.is_none());
+        assert_eq!(result.data["remoteChecks"]["jira"]["status"], "connected");
+        assert_eq!(result.data["remoteChecks"]["tempo"]["status"], "connected");
+        assert_eq!(
+            calls
+                .lock()
+                .map_err(|_| "test verifier lock was poisoned")?
+                .as_slice(),
+            ["jira", "tempo"]
+        );
+        assert_eq!(fs::read(path)?, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn doctor_remote_checks_report_tempo_after_jira_failure_without_leaking_secrets(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let (app, calls) = doctor_app(
+            path,
+            Err(VerificationFailure::Authentication(
+                "old-jira-token old-tempo-token Basic-secret".to_owned(),
+            )),
+            Ok(()),
+        );
+
+        let result = app.doctor(DoctorArgs { remote: true }).await?;
+
+        assert_eq!(
+            result.failure.as_ref().map(|failure| failure.code),
+            Some("remote_check_failed")
+        );
+        assert_eq!(result.exit_code(), 1);
+        assert_eq!(result.data["remoteChecks"]["jira"]["status"], "failed");
+        assert_eq!(
+            result.data["remoteChecks"]["jira"]["errorCode"],
+            "api_error"
+        );
+        assert_eq!(result.data["remoteChecks"]["tempo"]["status"], "connected");
+        assert_eq!(
+            calls
+                .lock()
+                .map_err(|_| "test verifier lock was poisoned")?
+                .as_slice(),
+            ["jira", "tempo"]
+        );
+        let output = format!("{} {}", result.human, result.data);
+        assert!(!output.contains("old-jira-token"));
+        assert!(!output.contains("old-tempo-token"));
+        assert!(!output.contains("Basic-secret"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn doctor_remote_checks_report_jira_after_tempo_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let (app, calls) = doctor_app(
+            path,
+            Ok("verified-account".to_owned()),
+            Err(VerificationFailure::Fatal("Tempo unavailable".to_owned())),
+        );
+
+        let result = app.doctor(DoctorArgs { remote: true }).await?;
+
+        assert!(result.failure.is_some());
+        assert_eq!(result.exit_code(), 1);
+        assert_eq!(result.data["remoteChecks"]["jira"]["status"], "connected");
+        assert_eq!(result.data["remoteChecks"]["tempo"]["status"], "failed");
+        assert_eq!(
+            calls
+                .lock()
+                .map_err(|_| "test verifier lock was poisoned")?
+                .as_slice(),
+            ["jira", "tempo"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn doctor_remote_checks_report_each_missing_service_without_network_access(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let (app, calls) = doctor_app(
+            path,
+            Err(VerificationFailure::Fatal(
+                "Jira must not be called".to_owned(),
+            )),
+            Err(VerificationFailure::Fatal(
+                "Tempo must not be called".to_owned(),
+            )),
+        );
+
+        let result = app.doctor(DoctorArgs { remote: true }).await?;
+
+        assert!(result.failure.is_some());
+        assert_eq!(result.exit_code(), 2);
+        assert_eq!(
+            result.data["remoteChecks"]["jira"]["status"],
+            "notConfigured"
+        );
+        assert_eq!(
+            result.data["remoteChecks"]["tempo"]["status"],
+            "notConfigured"
+        );
+        assert!(calls
+            .lock()
+            .map_err(|_| "test verifier lock was poisoned")?
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn doctor_remote_checks_run_a_configured_service_when_the_other_is_missing(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let mut config = existing_config();
+        config.hostname = None;
+        config.atlassian_user_email = None;
+        config.atlassian_token = None;
+        config.save(&path)?;
+        let (app, calls) = doctor_app(
+            path,
+            Err(VerificationFailure::Fatal(
+                "Jira must not be called".to_owned(),
+            )),
+            Ok(()),
+        );
+
+        let result = app.doctor(DoctorArgs { remote: true }).await?;
+
+        assert_eq!(
+            result.data["remoteChecks"]["jira"]["status"],
+            "notConfigured"
+        );
+        assert_eq!(result.data["remoteChecks"]["tempo"]["status"], "connected");
+        assert_eq!(
+            calls
+                .lock()
+                .map_err(|_| "test verifier lock was poisoned")?
+                .as_slice(),
+            ["tempo"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn doctor_remote_checks_reject_malformed_config_before_network_access(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        fs::write(&path, "{not valid json")?;
+        let (app, calls) = doctor_app(
+            path,
+            Err(VerificationFailure::Fatal(
+                "Jira must not be called".to_owned(),
+            )),
+            Err(VerificationFailure::Fatal(
+                "Tempo must not be called".to_owned(),
+            )),
+        );
+
+        let Err(error) = app.doctor(DoctorArgs { remote: true }).await else {
+            return Err("malformed config should fail doctor".into());
+        };
+
+        assert!(matches!(error, CliError::Config { .. }));
+        assert!(calls
+            .lock()
+            .map_err(|_| "test verifier lock was poisoned")?
+            .is_empty());
+        Ok(())
     }
 
     #[test]

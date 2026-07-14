@@ -9,6 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 - Guided interactive setup that verifies Jira and Tempo before saving, derives
   the Atlassian account ID, and safely reuses existing connection values.
+- Opt-in `doctor --remote` checks for read-only Jira and Tempo connectivity,
+  with stable per-service human and JSON results.
 - Verified headless setup using four environment variables, read-only Jira and
   Tempo checks, and automatic Atlassian account-ID discovery.
 - Worklog, alias, schedule, and tracker behavior.
