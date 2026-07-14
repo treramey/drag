@@ -185,10 +185,7 @@ impl ApiClient {
     }
 
     fn atlassian_request(&self, url: Url) -> RequestBuilder {
-        let basic = STANDARD.encode(format!(
-            "{}:{}",
-            self.credentials.atlassian_user_email, self.credentials.atlassian_token
-        ));
+        let basic = self.atlassian_basic_auth();
         self.client
             .get(url)
             .header(reqwest::header::AUTHORIZATION, format!("Basic {basic}"))
@@ -218,14 +215,7 @@ impl ApiClient {
             eprintln!("debug: response {status}");
         }
         if !status.is_success() {
-            return Err(api_error(
-                status,
-                &bytes,
-                &[
-                    &self.credentials.tempo_token,
-                    &self.credentials.atlassian_token,
-                ],
-            ));
+            return Err(api_error(status, &bytes, &self.redaction_secrets()));
         }
         serde_json::from_slice(&bytes).map_err(CliError::Json)
     }
@@ -241,15 +231,23 @@ impl ApiClient {
         if status.is_success() {
             Ok(())
         } else {
-            Err(api_error(
-                status,
-                &bytes,
-                &[
-                    &self.credentials.tempo_token,
-                    &self.credentials.atlassian_token,
-                ],
-            ))
+            Err(api_error(status, &bytes, &self.redaction_secrets()))
         }
+    }
+
+    fn atlassian_basic_auth(&self) -> String {
+        STANDARD.encode(format!(
+            "{}:{}",
+            self.credentials.atlassian_user_email, self.credentials.atlassian_token
+        ))
+    }
+
+    fn redaction_secrets(&self) -> Vec<String> {
+        vec![
+            self.credentials.tempo_token.clone(),
+            self.credentials.atlassian_token.clone(),
+            self.atlassian_basic_auth(),
+        ]
     }
 }
 
@@ -268,7 +266,7 @@ fn safe_segment(value: &str) -> Result<String, CliError> {
     Ok(value.to_owned())
 }
 
-fn api_error(status: StatusCode, body: &[u8], secrets: &[&str]) -> CliError {
+fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
     if status == StatusCode::UNAUTHORIZED {
         return CliError::Api(
             "unauthorized; tokens are invalid or expired (run `drag setup`)".to_owned(),
@@ -302,7 +300,12 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[&str]) -> CliError {
                 .filter(|value| !value.is_empty())
         });
     let redact = |mut value: String| {
-        for secret in secrets.iter().filter(|secret| !secret.is_empty()) {
+        let mut secrets = secrets
+            .iter()
+            .filter(|secret| !secret.is_empty())
+            .collect::<Vec<_>>();
+        secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+        for secret in secrets {
             value = value.replace(secret, "[REDACTED]");
         }
         value
@@ -351,12 +354,51 @@ mod tests {
         let error = api_error(
             StatusCode::BAD_REQUEST,
             br#"{"errors":[{"message":"rejected tempo-secret and jira-secret"}]}"#,
-            &["tempo-secret", "jira-secret"],
+            &["tempo-secret".to_owned(), "jira-secret".to_owned()],
         );
         let message = error.to_string();
         assert!(!message.contains("tempo-secret"));
         assert!(!message.contains("jira-secret"));
         assert!(message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_overlapping_tokens_longest_first() {
+        let error = api_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"errors":[{"message":"rejected token-with-suffix"}]}"#,
+            &["token".to_owned(), "token-with-suffix".to_owned()],
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "API request failed: server returned 400 Bad Request: rejected [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_encoded_basic_credentials() -> Result<(), Box<dyn std::error::Error>> {
+        let api = ApiClient::new(
+            Credentials {
+                tempo_token: "tempo-secret".to_owned(),
+                account_id: "account-1".to_owned(),
+                atlassian_user_email: "person@example.com".to_owned(),
+                atlassian_token: "jira-secret".to_owned(),
+                hostname: "example.atlassian.net".to_owned(),
+            },
+            false,
+        )?;
+        let basic = api.atlassian_basic_auth();
+        let body = format!(r#"{{"errors":[{{"message":"rejected Basic {basic}"}}]}}"#);
+
+        let error = api_error(
+            StatusCode::BAD_REQUEST,
+            body.as_bytes(),
+            &api.redaction_secrets(),
+        );
+
+        assert!(!error.to_string().contains(&basic));
+        Ok(())
     }
 
     #[test]
