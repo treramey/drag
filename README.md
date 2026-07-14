@@ -37,6 +37,10 @@ permissions:
 drag setup
 ```
 
+The guided setup prints the Atlassian and Tempo token URLs and opens each one
+in the default browser before asking for its token. Use `drag setup --no-open`
+to keep the same guided flow without launching a browser, such as over SSH.
+
 For headless use, provide the four connection variables and run `drag setup
 --from-env`. Setup verifies Jira and Tempo with read-only requests, derives the
 Atlassian account ID from Jira, and saves only after both checks succeed:

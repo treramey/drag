@@ -33,9 +33,12 @@ pub struct App {
     connection_verifier: Box<dyn ConnectionVerifier>,
     connection_environment: Box<dyn ConnectionEnvironment>,
     setup_prompter: Box<dyn SetupPrompter>,
+    browser_launcher: Box<dyn BrowserLauncher>,
 }
 
 const ATLASSIAN_TOKEN_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
+const TEMPO_TOKEN_PATH: &str =
+    "/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration";
 
 type VerificationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
 
@@ -51,6 +54,28 @@ trait ConnectionVerifier: Send + Sync {
         connection: &'a TempoCredentials,
         debug: bool,
     ) -> VerificationFuture<'a, ()>;
+}
+
+trait BrowserLauncher: Send + Sync {
+    fn open(&self, url: &Url) -> io::Result<()>;
+}
+
+struct SystemBrowserLauncher;
+
+impl BrowserLauncher for SystemBrowserLauncher {
+    fn open(&self, url: &Url) -> io::Result<()> {
+        webbrowser::open(url.as_str())
+    }
+}
+
+#[cfg(test)]
+struct NoopBrowserLauncher;
+
+#[cfg(test)]
+impl BrowserLauncher for NoopBrowserLauncher {
+    fn open(&self, _url: &Url) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 trait ConnectionEnvironment: Send + Sync {
@@ -206,8 +231,8 @@ struct SetupCredentials {
 }
 
 impl SetupCredentials {
-    fn from_environment() -> Result<Self, CliError> {
-        Self::from_source(required_setup_environment)
+    fn from_environment(environment: &dyn ConnectionEnvironment) -> Result<Self, CliError> {
+        Self::from_source(|name| required_setup_environment(environment, name))
     }
 
     fn from_source(
@@ -342,6 +367,7 @@ impl App {
             connection_verifier: Box::new(RemoteConnectionVerifier),
             connection_environment: Box::new(ProcessConnectionEnvironment),
             setup_prompter: Box::new(TerminalSetupPrompter),
+            browser_launcher: Box::new(SystemBrowserLauncher),
         }
     }
 
@@ -357,6 +383,7 @@ impl App {
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
             setup_prompter: Box::new(TerminalSetupPrompter),
+            browser_launcher: Box::new(NoopBrowserLauncher),
         }
     }
 
@@ -365,6 +392,7 @@ impl App {
         path: PathBuf,
         connection_verifier: impl ConnectionVerifier + 'static,
         setup_prompter: impl SetupPrompter + 'static,
+        browser_launcher: impl BrowserLauncher + 'static,
     ) -> Self {
         Self {
             path,
@@ -373,6 +401,7 @@ impl App {
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
             setup_prompter: Box::new(setup_prompter),
+            browser_launcher: Box::new(browser_launcher),
         }
     }
 
@@ -380,7 +409,8 @@ impl App {
         if args.from_env {
             // Validate before network requests; reload afterward to preserve concurrent updates.
             Config::load(&self.path)?;
-            let setup_credentials = SetupCredentials::from_environment()?;
+            let setup_credentials =
+                SetupCredentials::from_environment(self.connection_environment.as_ref())?;
             return self
                 .verify_and_save_environment_setup(setup_credentials)
                 .await;
@@ -393,7 +423,7 @@ impl App {
                     .to_owned(),
             ));
         }
-        self.run_interactive_setup(&config).await
+        self.run_interactive_setup(&config, !args.no_open).await
     }
 
     pub async fn doctor(&self, args: DoctorArgs) -> Result<Rendered, CliError> {
@@ -512,14 +542,18 @@ impl App {
         ))
     }
 
-    async fn run_interactive_setup(&self, existing: &Config) -> Result<Rendered, CliError> {
+    async fn run_interactive_setup(
+        &self,
+        existing: &Config,
+        open_browser: bool,
+    ) -> Result<Rendered, CliError> {
         self.setup_prompter.message(
             "Connect Jira, connect Tempo, then save. Nothing is saved until both connections succeed.",
         )?;
 
-        let (jira_credentials, account_id) = self.connect_jira(existing).await?;
+        let (jira_credentials, account_id) = self.connect_jira(existing, open_browser).await?;
         let credentials = self
-            .connect_tempo(existing, jira_credentials, account_id)
+            .connect_tempo(existing, jira_credentials, account_id, open_browser)
             .await?;
 
         self.setup_prompter.message("\nSave")?;
@@ -544,18 +578,24 @@ impl App {
     async fn connect_jira(
         &self,
         existing: &Config,
+        open_browser: bool,
     ) -> Result<(SetupCredentials, String), CliError> {
         self.setup_prompter.message("\nConnect Jira")?;
         let mut hostname_default = existing.hostname.clone();
         let mut email_default = existing.atlassian_user_email.clone();
+        let token_url = Url::parse(ATLASSIAN_TOKEN_URL)?;
+        let mut should_open_browser = open_browser;
         loop {
             let hostname = self.prompt_jira_site(hostname_default.as_deref())?;
             let email = self.prompt_non_empty_text("Atlassian email", email_default.as_deref())?;
             hostname_default = Some(hostname.clone());
             email_default = Some(email.clone());
-            self.setup_prompter.message(&format!(
-                "Create or manage your Atlassian API token:\n{ATLASSIAN_TOKEN_URL}"
-            ))?;
+            self.present_token_page(
+                "Create or manage your Atlassian API token:",
+                &token_url,
+                should_open_browser,
+            )?;
+            should_open_browser = false;
             let atlassian_token =
                 self.prompt_token("Atlassian API token", existing.atlassian_token.as_deref())?;
             let setup_credentials = SetupCredentials {
@@ -583,16 +623,21 @@ impl App {
         existing: &Config,
         mut setup_credentials: SetupCredentials,
         account_id: String,
+        open_browser: bool,
     ) -> Result<Credentials, CliError> {
         self.setup_prompter.message("\nConnect Tempo")?;
-        let tempo_url = format!(
-            "https://{}/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration",
+        let tempo_url = Url::parse(&format!(
+            "https://{}{TEMPO_TOKEN_PATH}",
             setup_credentials.hostname
-        );
+        ))?;
+        let mut should_open_browser = open_browser;
         loop {
-            self.setup_prompter.message(&format!(
-                "Create or manage your Tempo API token:\n{tempo_url}"
-            ))?;
+            self.present_token_page(
+                "Create or manage your Tempo API token:",
+                &tempo_url,
+                should_open_browser,
+            )?;
+            should_open_browser = false;
             setup_credentials.tempo_token =
                 self.prompt_token("Tempo API token", existing.tempo_token.as_deref())?;
             let credentials = setup_credentials.to_credentials(account_id.clone());
@@ -610,6 +655,24 @@ impl App {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn present_token_page(
+        &self,
+        instruction: &str,
+        url: &Url,
+        open_browser: bool,
+    ) -> Result<(), CliError> {
+        self.setup_prompter
+            .message(&format!("{instruction}\n{url}"))?;
+        if open_browser {
+            if let Err(error) = self.browser_launcher.open(url) {
+                self.setup_prompter.message(&format!(
+                    "Warning: could not open this page in your browser: {error}. Continue with the URL above."
+                ))?;
+            }
+        }
+        Ok(())
     }
 
     fn prompt_jira_site(&self, default: Option<&str>) -> Result<String, CliError> {
@@ -1162,14 +1225,20 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
     })
 }
 
-fn required_setup_environment(name: &str) -> Result<String, CliError> {
-    match env::var(name) {
-        Ok(value) if !value.trim().is_empty() => Ok(value),
-        Ok(_) | Err(env::VarError::NotPresent) => Err(CliError::InvalidInput(format!(
+fn required_setup_environment(
+    environment: &dyn ConnectionEnvironment,
+    name: &str,
+) -> Result<String, CliError> {
+    match environment.value(name) {
+        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(_) => Err(CliError::InvalidInput(format!(
             "{name} must be set and non-empty for `drag setup --from-env`"
         ))),
-        Err(env::VarError::NotUnicode(_)) => Err(CliError::InvalidInput(format!(
+        None if environment.is_set(name) => Err(CliError::InvalidInput(format!(
             "{name} must contain valid Unicode for `drag setup --from-env`"
+        ))),
+        None => Err(CliError::InvalidInput(format!(
+            "{name} must be set and non-empty for `drag setup --from-env`"
         ))),
     }
 }
@@ -1359,8 +1428,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        normalize_jira_site, App, Config, ConnectionVerifier, JiraCredentials, SetupCredentials,
-        SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
+        normalize_jira_site, App, BrowserLauncher, Config, ConnectionVerifier, JiraCredentials,
+        SetupCredentials, SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
     use crate::cli::{DoctorArgs, SetupArgs};
     use crate::CliError;
@@ -1381,11 +1450,47 @@ mod tests {
         text_prompts: Vec<(String, Option<String>)>,
         secret_prompts: Vec<(String, bool)>,
         messages: Vec<String>,
+        browser_urls: Vec<String>,
+        browser_failure: Option<String>,
+        events: Vec<String>,
     }
 
     struct FakePrompter {
         terminal: bool,
         state: Arc<Mutex<PromptState>>,
+    }
+
+    struct FakeBrowserLauncher {
+        state: Arc<Mutex<PromptState>>,
+    }
+
+    struct FakeConnectionEnvironment {
+        values: BTreeMap<String, String>,
+    }
+
+    impl super::ConnectionEnvironment for FakeConnectionEnvironment {
+        fn value(&self, name: &str) -> Option<String> {
+            self.values.get(name).cloned()
+        }
+
+        fn is_set(&self, name: &str) -> bool {
+            self.values.contains_key(name)
+        }
+    }
+
+    impl BrowserLauncher for FakeBrowserLauncher {
+        fn open(&self, url: &url::Url) -> std::io::Result<()> {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| std::io::Error::other("test browser lock poisoned"))?;
+            state.browser_urls.push(url.as_str().to_owned());
+            state.events.push(format!("browser:{url}"));
+            match &state.browser_failure {
+                Some(message) => Err(std::io::Error::other(message.clone())),
+                None => Ok(()),
+            }
+        }
     }
 
     impl SetupPrompter for FakePrompter {
@@ -1394,11 +1499,12 @@ mod tests {
         }
 
         fn message(&self, message: &str) -> Result<(), CliError> {
-            self.state
+            let mut state = self
+                .state
                 .lock()
-                .map_err(|_| CliError::Io(std::io::Error::other("test prompt lock poisoned")))?
-                .messages
-                .push(message.to_owned());
+                .map_err(|_| CliError::Io(std::io::Error::other("test prompt lock poisoned")))?;
+            state.messages.push(message.to_owned());
+            state.events.push(format!("message:{message}"));
             Ok(())
         }
 
@@ -1427,6 +1533,7 @@ mod tests {
                 .lock()
                 .map_err(|_| CliError::Io(std::io::Error::other("test prompt lock poisoned")))?;
             state.secret_prompts.push((label.to_owned(), can_retain));
+            state.events.push(format!("secret:{label}"));
             state
                 .secret_responses
                 .pop_front()
@@ -1554,6 +1661,7 @@ mod tests {
         jira_results: impl IntoIterator<Item = Result<String, VerificationFailure>>,
         tempo_results: impl IntoIterator<Item = Result<(), VerificationFailure>>,
     ) -> App {
+        let browser_state = Arc::clone(&state);
         App::with_setup_dependencies(
             path,
             SequenceVerifier {
@@ -1563,6 +1671,9 @@ mod tests {
             FakePrompter {
                 terminal: true,
                 state,
+            },
+            FakeBrowserLauncher {
+                state: browser_state,
             },
         )
     }
@@ -1623,7 +1734,13 @@ mod tests {
             },
         );
 
-        match app.setup(SetupArgs { from_env: false }).await {
+        match app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await
+        {
             Ok(result) => crate::emit_result(result, ResolvedOutputMode::Json)?,
             Err(error) => crate::emit_error(&error, ResolvedOutputMode::Json),
         }
@@ -2094,7 +2211,12 @@ mod tests {
             [Ok(())],
         );
 
-        let result = app.setup(SetupArgs { from_env: false }).await?;
+        let result = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await?;
 
         let saved = Config::load(&path)?;
         assert_eq!(saved.hostname.as_deref(), Some("example.atlassian.net"));
@@ -2108,6 +2230,7 @@ mod tests {
         assert!(!output.contains("derived-account"));
         assert!(!output.contains("jira-secret"));
         assert!(!output.contains("tempo-secret"));
+        assert!(!output.contains(ATLASSIAN_TOKEN_URL));
         let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
         assert_eq!(
             state
@@ -2124,6 +2247,165 @@ mod tests {
         assert!(state.messages.iter().any(|message| message.contains(
             "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration"
         )));
+        assert_eq!(
+            state.browser_urls,
+            [
+                ATLASSIAN_TOKEN_URL,
+                "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration"
+            ]
+        );
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| {
+                    event.starts_with("message:Create or manage")
+                        || event.starts_with("browser:")
+                        || event.starts_with("secret:")
+                })
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [
+                "message:Create or manage your Atlassian API token:\nhttps://id.atlassian.com/manage-profile/security/api-tokens",
+                "browser:https://id.atlassian.com/manage-profile/security/api-tokens",
+                "secret:Atlassian API token",
+                "message:Create or manage your Tempo API token:\nhttps://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration",
+                "browser:https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration",
+                "secret:Tempo API token"
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interactive_setup_no_open_prints_links_without_launching_browser(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let state = Arc::new(Mutex::new(PromptState {
+            text_responses: VecDeque::from([
+                "example.atlassian.net".to_owned(),
+                "person@example.com".to_owned(),
+            ]),
+            secret_responses: VecDeque::from([
+                Some("jira-secret".to_owned()),
+                Some("tempo-secret".to_owned()),
+            ]),
+            ..PromptState::default()
+        }));
+        let app = interactive_app(
+            path,
+            Arc::clone(&state),
+            [Ok("derived-account".to_owned())],
+            [Ok(())],
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
+        assert!(state.browser_urls.is_empty());
+        assert!(state
+            .messages
+            .iter()
+            .any(|message| message.contains(ATLASSIAN_TOKEN_URL)));
+        assert!(state.messages.iter().any(|message| message.contains(
+            "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration"
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn browser_launch_failure_warns_and_allows_setup_to_finish(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let state = Arc::new(Mutex::new(PromptState {
+            text_responses: VecDeque::from([
+                "example.atlassian.net".to_owned(),
+                "person@example.com".to_owned(),
+            ]),
+            secret_responses: VecDeque::from([
+                Some("jira-secret".to_owned()),
+                Some("tempo-secret".to_owned()),
+            ]),
+            browser_failure: Some("no default browser".to_owned()),
+            ..PromptState::default()
+        }));
+        let app = interactive_app(
+            path.clone(),
+            Arc::clone(&state),
+            [Ok("derived-account".to_owned())],
+            [Ok(())],
+        );
+
+        let result = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await?;
+
+        assert!(path.exists());
+        let output = format!("{} {}", result.human, result.data);
+        assert!(!output.contains("no default browser"));
+        assert!(!output.contains(ATLASSIAN_TOKEN_URL));
+        let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
+        assert_eq!(state.browser_urls.len(), 2);
+        assert_eq!(
+            state
+                .messages
+                .iter()
+                .filter(|message| message.starts_with("Warning: could not open"))
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn environment_setup_never_launches_or_prompts_with_any_no_open_value(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for no_open in [false, true] {
+            let directory = TempDir::new()?;
+            let path = directory.path().join("config.json");
+            let state = Arc::new(Mutex::new(PromptState::default()));
+            let mut app = interactive_app(
+                path,
+                Arc::clone(&state),
+                [Ok("derived-account".to_owned())],
+                [Ok(())],
+            );
+            app.connection_environment = Box::new(FakeConnectionEnvironment {
+                values: BTreeMap::from([
+                    (
+                        "ATLASSIAN_HOST".to_owned(),
+                        "example.atlassian.net".to_owned(),
+                    ),
+                    (
+                        "ATLASSIAN_EMAIL".to_owned(),
+                        "person@example.com".to_owned(),
+                    ),
+                    ("ATLASSIAN_TOKEN".to_owned(), "jira-secret".to_owned()),
+                    ("TEMPO_TOKEN".to_owned(), "tempo-secret".to_owned()),
+                ]),
+            });
+
+            app.setup(SetupArgs {
+                from_env: true,
+                no_open,
+            })
+            .await?;
+
+            let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
+            assert!(state.browser_urls.is_empty());
+            assert!(state.text_prompts.is_empty());
+            assert!(state.secret_prompts.is_empty());
+            assert!(state.messages.is_empty());
+        }
         Ok(())
     }
 
@@ -2148,7 +2430,11 @@ mod tests {
             [Ok(())],
         );
 
-        app.setup(SetupArgs { from_env: false }).await?;
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: false,
+        })
+        .await?;
 
         let saved = Config::load(&path)?;
         assert_eq!(saved.atlassian_token.as_deref(), Some("old-jira-token"));
@@ -2217,7 +2503,11 @@ mod tests {
             ],
         );
 
-        app.setup(SetupArgs { from_env: false }).await?;
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: false,
+        })
+        .await?;
 
         let saved = Config::load(&path)?;
         assert_eq!(saved.atlassian_token.as_deref(), Some("good-jira"));
@@ -2246,6 +2536,13 @@ mod tests {
                 )
             ]
         );
+        assert_eq!(
+            state.browser_urls,
+            [
+                ATLASSIAN_TOKEN_URL,
+                "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration"
+            ]
+        );
         Ok(())
     }
 
@@ -2271,7 +2568,13 @@ mod tests {
             std::iter::empty(),
         );
 
-        let error = match app.setup(SetupArgs { from_env: false }).await {
+        let error = match app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await
+        {
             Ok(_) => return Err("setup should propagate the network error".into()),
             Err(error) => error,
         };
@@ -2312,7 +2615,13 @@ mod tests {
             ))],
         );
 
-        let error = match app.setup(SetupArgs { from_env: false }).await {
+        let error = match app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await
+        {
             Ok(_) => return Err("setup should propagate the response error".into()),
             Err(error) => error,
         };
@@ -2338,7 +2647,13 @@ mod tests {
         let state = Arc::new(Mutex::new(PromptState::default()));
         let app = interactive_app(path.clone(), state, std::iter::empty(), std::iter::empty());
 
-        let error = match app.setup(SetupArgs { from_env: false }).await {
+        let error = match app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await
+        {
             Ok(_) => return Err("setup should be cancelled when input ends".into()),
             Err(error) => error,
         };
@@ -2372,7 +2687,13 @@ mod tests {
             std::iter::empty(),
         );
 
-        assert!(app.setup(SetupArgs { from_env: false }).await.is_err());
+        assert!(app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await
+            .is_err());
 
         assert_eq!(fs::read(path)?, before);
         Ok(())

@@ -167,6 +167,10 @@ pub struct SetupArgs {
     /// Verify and save four environment-provided connection values without prompting.
     #[arg(long)]
     pub from_env: bool,
+
+    /// Print token URLs without opening them in a browser.
+    #[arg(long)]
+    pub no_open: bool,
 }
 
 #[derive(Debug, Args)]
