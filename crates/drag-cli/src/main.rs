@@ -36,6 +36,8 @@ pub enum CliError {
     },
     #[error("API request failed: {0}")]
     Api(String),
+    #[error("API request failed: {0}")]
+    Authentication(String),
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
     #[error("invalid URL: {0}")]
@@ -55,7 +57,7 @@ impl CliError {
             Self::InvalidInput(_) => "invalid_input",
             Self::NotConfigured(_) => "not_configured",
             Self::Config { .. } => "config_error",
-            Self::Api(_) => "api_error",
+            Self::Api(_) | Self::Authentication(_) => "api_error",
             Self::Http(_) => "http_error",
             Self::Url(_) => "invalid_url",
             Self::Json(_) => "invalid_json",
@@ -71,9 +73,12 @@ impl CliError {
             | Self::NotConfigured(_)
             | Self::Json(_)
             | Self::Url(_) => EXIT_USAGE,
-            Self::Config { .. } | Self::Api(_) | Self::Http(_) | Self::Io(_) | Self::Utf8(_) => {
-                EXIT_FAILURE
-            }
+            Self::Config { .. }
+            | Self::Api(_)
+            | Self::Authentication(_)
+            | Self::Http(_)
+            | Self::Io(_)
+            | Self::Utf8(_) => EXIT_FAILURE,
         }
     }
 }

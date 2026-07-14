@@ -34,5 +34,11 @@ assert_cmd = "2.0"
 predicates = "3.1"
 tempfile = "3.20"
 
+[target.'cfg(unix)'.dev-dependencies]
+expectrl = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+atomicwrites = "0.4"
+
 [lints]
 workspace = true

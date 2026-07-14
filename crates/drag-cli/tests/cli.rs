@@ -255,3 +255,21 @@ fn headless_setup_parses_existing_config_before_reading_credentials(
     assert_eq!(fs::read(path)?, before);
     Ok(())
 }
+
+#[test]
+fn interactive_setup_without_a_terminal_points_automation_to_from_env(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let output = command(&path)?.arg("setup").output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("setup --from-env")));
+    assert!(!path.exists());
+    Ok(())
+}

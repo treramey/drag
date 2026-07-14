@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Guided interactive setup that verifies Jira and Tempo before saving, derives
+  the Atlassian account ID, and safely reuses existing connection values.
 - Verified headless setup using four environment variables, read-only Jira and
   Tempo checks, and automatic Atlassian account-ID discovery.
 - Worklog, alias, schedule, and tracker behavior.
