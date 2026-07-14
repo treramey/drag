@@ -1,0 +1,17 @@
+[package]
+name = "drag"
+description = "Domain types and time-tracking logic for the Tempo.io CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

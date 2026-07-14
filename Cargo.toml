@@ -1,0 +1,33 @@
+[workspace]
+members = ["crates/drag", "crates/drag-cli"]
+default-members = ["crates/drag-cli"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Szymon Kozak", "Drag contributors"]
+
+[workspace.dependencies]
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+chrono-tz = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
