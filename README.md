@@ -37,20 +37,23 @@ permissions:
 drag setup
 ```
 
-For headless use, set all variables and persist them with `drag setup
---from-env`, or leave them in the environment to override stored values:
+For headless use, provide the four connection variables and run `drag setup
+--from-env`. Setup verifies Jira and Tempo with read-only requests, derives the
+Atlassian account ID from Jira, and saves only after both checks succeed:
 
 ```bash
 export TEMPO_TOKEN=...
-export TEMPO_ACCOUNT_ID=...
 export ATLASSIAN_EMAIL=you@example.com
 export ATLASSIAN_TOKEN=...
-export ATLASSIAN_HOST=yourcompany.atlassian.net
+export ATLASSIAN_HOST=https://yourcompany.atlassian.net/jira/software
 drag setup --from-env
 ```
 
-Use `--config <PATH>` to select another config file. Tokens are never included
-in JSON output or debug logs.
+`ATLASSIAN_HOST` may be a bare hostname or any HTTPS URL on the Jira site. The
+runtime `TEMPO_ACCOUNT_ID` override remains supported for compatibility, but
+setup ignores it in favor of Jira's verified account ID. Use `--config <PATH>`
+to select another config file. Tokens are never included in JSON output or
+debug logs.
 
 ## Usage
 

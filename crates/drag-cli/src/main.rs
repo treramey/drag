@@ -212,7 +212,13 @@ fn schema() -> Rendered {
         "name": "drag",
         "output": {"modes": ["auto", "human", "json"], "errorsOn": "stderr"},
         "commands": {
-            "setup": {"sideEffects": true},
+            "setup": {
+                "sideEffects": true,
+                "fromEnv": true,
+                "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
+                "verification": {"jira": "read-only", "tempo": "read-only"},
+                "derivesAccountId": true
+            },
             "log": {"aliases": ["l"], "rawJson": true, "dryRun": true},
             "list": {"aliases": ["ls"]},
             "delete": {"aliases": ["d"], "dryRun": true},

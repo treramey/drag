@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use chrono::Utc;
 use drag::models::{AddWorklogRequest, ScheduleEntity, WorklogEntity};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize};
@@ -129,6 +130,29 @@ impl ApiClient {
         Ok(response.key)
     }
 
+    pub async fn get_current_user_account_id(&self) -> Result<String, CliError> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct CurrentUser {
+            account_id: String,
+        }
+
+        let response: CurrentUser = self.json(self.atlassian_current_user()?).await?;
+        let account_id = response.account_id.trim();
+        if account_id.is_empty() {
+            return Err(CliError::Api(
+                "Jira returned an empty account ID".to_owned(),
+            ));
+        }
+        Ok(account_id.to_owned())
+    }
+
+    pub async fn verify_tempo_connection(&self) -> Result<(), CliError> {
+        let request = self.tempo_verification_request()?;
+        let _: Page<Value> = self.json(request).await?;
+        Ok(())
+    }
+
     fn tempo(&self, method: Method, url: Url) -> RequestBuilder {
         self.client
             .request(method, url)
@@ -137,22 +161,46 @@ impl ApiClient {
 
     fn atlassian(&self, issue: &str) -> Result<RequestBuilder, CliError> {
         let issue = safe_segment(issue)?;
+        let url = self.atlassian_url(&format!("issue/{issue}"))?;
+        Ok(self.atlassian_request(url))
+    }
+
+    fn atlassian_current_user(&self) -> Result<RequestBuilder, CliError> {
+        Ok(self.atlassian_request(self.atlassian_url("myself")?))
+    }
+
+    fn atlassian_url(&self, endpoint: &str) -> Result<Url, CliError> {
         let hostname = self.credentials.hostname.trim();
-        if hostname.contains(['/', '?', '#']) || hostname.is_empty() {
+        if hostname.is_empty()
+            || hostname
+                .chars()
+                .any(|character| character.is_control() || character.is_whitespace())
+            || hostname.contains(['/', '?', '#', '@', ':', '%'])
+        {
             return Err(CliError::InvalidInput(
                 "invalid Atlassian hostname".to_owned(),
             ));
         }
-        let url = Url::parse(&format!("https://{hostname}/rest/api/3/issue/{issue}"))
-            .map_err(CliError::Url)?;
-        let basic = STANDARD.encode(format!(
-            "{}:{}",
-            self.credentials.atlassian_user_email, self.credentials.atlassian_token
-        ));
-        Ok(self
-            .client
+        Url::parse(&format!("https://{hostname}/rest/api/3/{endpoint}")).map_err(CliError::Url)
+    }
+
+    fn atlassian_request(&self, url: Url) -> RequestBuilder {
+        let basic = self.atlassian_basic_auth();
+        self.client
             .get(url)
-            .header(reqwest::header::AUTHORIZATION, format!("Basic {basic}")))
+            .header(reqwest::header::AUTHORIZATION, format!("Basic {basic}"))
+    }
+
+    fn tempo_verification_request(&self) -> Result<RequestBuilder, CliError> {
+        let account = safe_segment(&self.credentials.account_id)?;
+        let url =
+            Url::parse(&format!("{TEMPO_BASE}worklogs/user/{account}")).map_err(CliError::Url)?;
+        let today = Utc::now().date_naive().to_string();
+        Ok(self.tempo(Method::GET, url).query(&[
+            ("from", today.as_str()),
+            ("to", today.as_str()),
+            ("limit", "1"),
+        ]))
     }
 
     async fn json<T: DeserializeOwned>(&self, builder: RequestBuilder) -> Result<T, CliError> {
@@ -167,7 +215,7 @@ impl ApiClient {
             eprintln!("debug: response {status}");
         }
         if !status.is_success() {
-            return Err(api_error(status, &bytes));
+            return Err(api_error(status, &bytes, &self.redaction_secrets()));
         }
         serde_json::from_slice(&bytes).map_err(CliError::Json)
     }
@@ -183,16 +231,33 @@ impl ApiClient {
         if status.is_success() {
             Ok(())
         } else {
-            Err(api_error(status, &bytes))
+            Err(api_error(status, &bytes, &self.redaction_secrets()))
         }
+    }
+
+    fn atlassian_basic_auth(&self) -> String {
+        STANDARD.encode(format!(
+            "{}:{}",
+            self.credentials.atlassian_user_email, self.credentials.atlassian_token
+        ))
+    }
+
+    fn redaction_secrets(&self) -> Vec<String> {
+        vec![
+            self.credentials.tempo_token.clone(),
+            self.credentials.atlassian_token.clone(),
+            self.atlassian_basic_auth(),
+        ]
     }
 }
 
 fn safe_segment(value: &str) -> Result<String, CliError> {
     if value.is_empty()
-        || value
-            .chars()
-            .any(|character| character.is_control() || matches!(character, '/' | '?' | '#' | '%'))
+        || value.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(character, '/' | '?' | '#' | '%')
+        })
     {
         return Err(CliError::InvalidInput(format!(
             "unsafe issue or account identifier: {value:?}"
@@ -201,7 +266,7 @@ fn safe_segment(value: &str) -> Result<String, CliError> {
     Ok(value.to_owned())
 }
 
-fn api_error(status: StatusCode, body: &[u8]) -> CliError {
+fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
     if status == StatusCode::UNAUTHORIZED {
         return CliError::Api(
             "unauthorized; tokens are invalid or expired (run `drag setup`)".to_owned(),
@@ -234,21 +299,41 @@ fn api_error(status: StatusCode, body: &[u8]) -> CliError {
                 })
                 .filter(|value| !value.is_empty())
         });
+    let redact = |mut value: String| {
+        let mut secrets = secrets
+            .iter()
+            .filter(|secret| !secret.is_empty())
+            .collect::<Vec<_>>();
+        secrets.sort_unstable_by_key(|secret| std::cmp::Reverse(secret.len()));
+        for secret in secrets {
+            value = value.replace(secret, "[REDACTED]");
+        }
+        value
+    };
     match details {
-        Some(details) => CliError::Api(format!("server returned {status}: {details}")),
+        Some(details) => CliError::Api(format!("server returned {status}: {}", redact(details))),
         None => CliError::Api(format!("server returned {status}")),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use reqwest::StatusCode;
+    use reqwest::{Method, StatusCode};
 
-    use super::{api_error, safe_segment};
+    use super::{api_error, safe_segment, ApiClient};
+    use crate::config::Credentials;
 
     #[test]
     fn rejects_identifiers_that_can_change_a_url() {
-        for value in ["", "ABC/1", "ABC?x=1", "ABC#fragment", "ABC%2F1", "ABC\n1"] {
+        for value in [
+            "",
+            "ABC/1",
+            "ABC?x=1",
+            "ABC#fragment",
+            "ABC%2F1",
+            "ABC 1",
+            "ABC\n1",
+        ] {
             assert!(safe_segment(value).is_err(), "{value:?}");
         }
         assert!(safe_segment("ABC-123").is_ok());
@@ -259,7 +344,94 @@ mod tests {
         let error = api_error(
             StatusCode::BAD_REQUEST,
             br#"{"errors":[{"message":"bad worklog"}]}"#,
+            &[],
         );
         assert!(error.to_string().contains("bad worklog"));
+    }
+
+    #[test]
+    fn redacts_tokens_echoed_by_a_server() {
+        let error = api_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"errors":[{"message":"rejected tempo-secret and jira-secret"}]}"#,
+            &["tempo-secret".to_owned(), "jira-secret".to_owned()],
+        );
+        let message = error.to_string();
+        assert!(!message.contains("tempo-secret"));
+        assert!(!message.contains("jira-secret"));
+        assert!(message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redacts_overlapping_tokens_longest_first() {
+        let error = api_error(
+            StatusCode::BAD_REQUEST,
+            br#"{"errors":[{"message":"rejected token-with-suffix"}]}"#,
+            &["token".to_owned(), "token-with-suffix".to_owned()],
+        );
+
+        assert_eq!(
+            error.to_string(),
+            "API request failed: server returned 400 Bad Request: rejected [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn redacts_encoded_basic_credentials() -> Result<(), Box<dyn std::error::Error>> {
+        let api = ApiClient::new(
+            Credentials {
+                tempo_token: "tempo-secret".to_owned(),
+                account_id: "account-1".to_owned(),
+                atlassian_user_email: "person@example.com".to_owned(),
+                atlassian_token: "jira-secret".to_owned(),
+                hostname: "example.atlassian.net".to_owned(),
+            },
+            false,
+        )?;
+        let basic = api.atlassian_basic_auth();
+        let body = format!(r#"{{"errors":[{{"message":"rejected Basic {basic}"}}]}}"#);
+
+        let error = api_error(
+            StatusCode::BAD_REQUEST,
+            body.as_bytes(),
+            &api.redaction_secrets(),
+        );
+
+        assert!(!error.to_string().contains(&basic));
+        Ok(())
+    }
+
+    #[test]
+    fn verification_requests_are_read_only() -> Result<(), Box<dyn std::error::Error>> {
+        let api = ApiClient::new(
+            Credentials {
+                tempo_token: "tempo-secret".to_owned(),
+                account_id: "account-1".to_owned(),
+                atlassian_user_email: "person@example.com".to_owned(),
+                atlassian_token: "jira-secret".to_owned(),
+                hostname: "example.atlassian.net".to_owned(),
+            },
+            false,
+        )?;
+
+        let jira = api.atlassian_current_user()?.build()?;
+        assert_eq!(jira.method(), Method::GET);
+        assert_eq!(
+            jira.url().as_str(),
+            "https://example.atlassian.net/rest/api/3/myself"
+        );
+
+        let tempo = api.tempo_verification_request()?.build()?;
+        assert_eq!(tempo.method(), Method::GET);
+        assert_eq!(tempo.url().path(), "/4/worklogs/user/account-1");
+        assert_eq!(
+            tempo
+                .url()
+                .query_pairs()
+                .find(|(key, _)| key == "limit")
+                .map(|(_, value)| value.into_owned()),
+            Some("1".to_owned())
+        );
+        Ok(())
     }
 }

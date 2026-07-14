@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use drag::tracker::Tracker;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use url::Url;
 
 use crate::CliError;
 
@@ -35,7 +36,7 @@ pub struct Config {
     pub trackers: BTreeMap<String, Tracker>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
     #[serde(skip_serializing)]
@@ -88,9 +89,16 @@ impl Config {
     }
 
     pub fn credentials(&self) -> Result<Credentials, CliError> {
-        fn value(configured: &Option<String>, environment: &str) -> Option<String> {
-            std::env::var(environment)
-                .ok()
+        self.credentials_from_source(|name| std::env::var(name).ok())
+    }
+
+    fn credentials_from_source(
+        &self,
+        mut environment: impl FnMut(&str) -> Option<String>,
+    ) -> Result<Credentials, CliError> {
+        fn value(configured: &Option<String>, environment: Option<String>) -> Option<String> {
+            environment
+                .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
                 .or_else(|| {
                     configured
@@ -105,17 +113,21 @@ impl Config {
                 "missing {field}; run `drag setup` or set {variable}"
             ))
         };
+        let hostname = match environment("ATLASSIAN_HOST").filter(|value| !value.trim().is_empty())
+        {
+            Some(hostname) => Some(normalize_jira_site(&hostname)?),
+            None => self.hostname.clone(),
+        };
         Ok(Credentials {
-            tempo_token: value(&self.tempo_token, "TEMPO_TOKEN")
+            tempo_token: value(&self.tempo_token, environment("TEMPO_TOKEN"))
                 .ok_or_else(|| missing("Tempo token", "TEMPO_TOKEN"))?,
-            account_id: value(&self.account_id, "TEMPO_ACCOUNT_ID")
+            account_id: value(&self.account_id, environment("TEMPO_ACCOUNT_ID"))
                 .ok_or_else(|| missing("account ID", "TEMPO_ACCOUNT_ID"))?,
-            atlassian_user_email: value(&self.atlassian_user_email, "ATLASSIAN_EMAIL")
+            atlassian_user_email: value(&self.atlassian_user_email, environment("ATLASSIAN_EMAIL"))
                 .ok_or_else(|| missing("Atlassian email", "ATLASSIAN_EMAIL"))?,
-            atlassian_token: value(&self.atlassian_token, "ATLASSIAN_TOKEN")
+            atlassian_token: value(&self.atlassian_token, environment("ATLASSIAN_TOKEN"))
                 .ok_or_else(|| missing("Atlassian token", "ATLASSIAN_TOKEN"))?,
-            hostname: value(&self.hostname, "ATLASSIAN_HOST")
-                .ok_or_else(|| missing("Atlassian hostname", "ATLASSIAN_HOST"))?,
+            hostname: hostname.ok_or_else(|| missing("Atlassian hostname", "ATLASSIAN_HOST"))?,
         })
     }
 
@@ -125,6 +137,71 @@ impl Config {
             .cloned()
             .unwrap_or_else(|| issue_or_alias.to_owned())
     }
+}
+
+pub(crate) fn normalize_jira_site(input: &str) -> Result<String, CliError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(CliError::InvalidInput(
+            "ATLASSIAN_HOST must be a Jira hostname or HTTPS URL".to_owned(),
+        ));
+    }
+
+    let url = if input.contains("://") {
+        Url::parse(input).map_err(|_| {
+            CliError::InvalidInput(
+                "ATLASSIAN_HOST must be a valid Jira hostname or HTTPS URL".to_owned(),
+            )
+        })?
+    } else {
+        if input.contains(['/', '?', '#', '@', ':']) {
+            return Err(CliError::InvalidInput(
+                "ATLASSIAN_HOST must be a bare hostname or a complete HTTPS URL".to_owned(),
+            ));
+        }
+        Url::parse(&format!("https://{input}")).map_err(|_| {
+            CliError::InvalidInput("ATLASSIAN_HOST is not a valid hostname".to_owned())
+        })?
+    };
+
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return Err(CliError::InvalidInput(
+            "ATLASSIAN_HOST must use HTTPS without credentials or a custom port".to_owned(),
+        ));
+    }
+
+    let domain = match url.host() {
+        Some(url::Host::Domain(domain)) => domain,
+        _ => {
+            return Err(CliError::InvalidInput(
+                "ATLASSIAN_HOST must contain a valid Jira hostname".to_owned(),
+            ));
+        }
+    };
+    let valid_domain = domain.split('.').all(|label| {
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            && label
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+            && label
+                .chars()
+                .last()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+    });
+    if !valid_domain {
+        return Err(CliError::InvalidInput(
+            "ATLASSIAN_HOST must contain a valid Jira hostname".to_owned(),
+        ));
+    }
+    Ok(domain.to_owned())
 }
 
 pub fn config_path() -> Result<PathBuf, CliError> {
@@ -218,6 +295,8 @@ mod trackers_compat {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::{CliError, Config};
 
     #[test]
@@ -243,6 +322,31 @@ mod tests {
         let path = directory.path().join("config.json");
         std::fs::write(&path, "not json")?;
         assert!(matches!(Config::load(&path), Err(CliError::Config { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn environment_credentials_are_trimmed_and_jira_url_is_normalized(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let values = BTreeMap::from([
+            ("TEMPO_TOKEN", " tempo-secret\n"),
+            ("TEMPO_ACCOUNT_ID", " account-1\n"),
+            ("ATLASSIAN_EMAIL", " person@example.com\n"),
+            ("ATLASSIAN_TOKEN", " jira-secret\n"),
+            (
+                "ATLASSIAN_HOST",
+                " https://Example.atlassian.net/jira/software\n",
+            ),
+        ]);
+
+        let credentials = Config::default()
+            .credentials_from_source(|name| values.get(name).map(|value| (*value).to_owned()))?;
+
+        assert_eq!(credentials.tempo_token, "tempo-secret");
+        assert_eq!(credentials.account_id, "account-1");
+        assert_eq!(credentials.atlassian_user_email, "person@example.com");
+        assert_eq!(credentials.atlassian_token, "jira-secret");
+        assert_eq!(credentials.hostname, "example.atlassian.net");
         Ok(())
     }
 }
