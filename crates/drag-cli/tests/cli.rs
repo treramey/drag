@@ -179,17 +179,60 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(body["data"]["commands"]["log"]["dryRun"], true);
+    assert_eq!(body["data"]["commands"]["setup"]["interactive"], true);
+    assert_eq!(body["data"]["commands"]["setup"]["sideEffects"], true);
     assert_eq!(body["data"]["commands"]["setup"]["fromEnv"], true);
+    assert_eq!(
+        body["data"]["commands"]["setup"]["fromEnvInteractive"],
+        false
+    );
     assert_eq!(body["data"]["commands"]["setup"]["noOpen"], true);
+    assert_eq!(
+        body["data"]["commands"]["setup"]["fromEnvRequired"],
+        serde_json::json!([
+            "ATLASSIAN_HOST",
+            "ATLASSIAN_EMAIL",
+            "ATLASSIAN_TOKEN",
+            "TEMPO_TOKEN"
+        ])
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["accountId"]["setup"],
+        "derivedFromVerifiedJiraUser"
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["accountId"]["runtimeCompatibilityEnvironment"],
+        "TEMPO_ACCOUNT_ID"
+    );
     assert_eq!(
         body["data"]["commands"]["setup"]["browser"]["fromEnv"],
         false
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["browser"]["noOpen"],
+        "printLinksWithoutOpening"
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["writesConfiguration"],
+        "onceAfterVerification"
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["preservesConfiguration"],
+        serde_json::json!(["aliases", "trackers"])
     );
     assert_eq!(
         body["data"]["commands"]["doctor"]["defaultNetworkAccess"],
         false
     );
     assert_eq!(body["data"]["commands"]["doctor"]["remote"], true);
+    assert_eq!(
+        body["data"]["commands"]["doctor"]["remoteNetworkAccess"],
+        "read-only"
+    );
+    assert_eq!(
+        body["data"]["commands"]["doctor"]["remoteChecks"],
+        serde_json::json!({"jira": "read-only", "tempo": "read-only"})
+    );
     assert_eq!(
         body["data"]["commands"]["doctor"]["failureExitCodes"]["remoteFailure"],
         1
@@ -199,15 +242,32 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
-fn setup_help_documents_browser_suppression() -> Result<(), Box<dyn std::error::Error>> {
+fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std::error::Error>> {
     let output = Command::cargo_bin("drag")?
         .args(["setup", "--help"])
         .output()?;
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("Connect Jira, Connect Tempo, and Save"));
+    assert!(stdout.contains("--from-env"));
     assert!(stdout.contains("--no-open"));
-    assert!(stdout.contains("without opening them in a browser"));
+    assert!(stdout.contains("Print token URLs without launching a browser"));
+    Ok(())
+}
+
+#[test]
+fn doctor_help_documents_opt_in_read_only_remote_checks() -> Result<(), Box<dyn std::error::Error>>
+{
+    let output = Command::cargo_bin("drag")?
+        .args(["doctor", "--help"])
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("without network access"));
+    assert!(stdout.contains("opt-in, read-only"));
+    assert!(stdout.contains("--remote"));
     Ok(())
 }
 

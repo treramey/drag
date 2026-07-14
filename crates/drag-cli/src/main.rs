@@ -259,13 +259,21 @@ fn schema() -> Rendered {
                 "fromEnv": true,
                 "noOpen": true,
                 "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
+                "fromEnvInteractive": false,
                 "browser": {
                     "default": "openTokenPages",
                     "failure": "warning",
+                    "noOpen": "printLinksWithoutOpening",
                     "fromEnv": false
                 },
                 "verification": {"jira": "read-only", "tempo": "read-only"},
-                "derivesAccountId": true
+                "accountId": {
+                    "setup": "derivedFromVerifiedJiraUser",
+                    "runtimeCompatibilityEnvironment": "TEMPO_ACCOUNT_ID"
+                },
+                "derivesAccountId": true,
+                "writesConfiguration": "onceAfterVerification",
+                "preservesConfiguration": ["aliases", "trackers"]
             },
             "log": {"aliases": ["l"], "rawJson": true, "dryRun": true},
             "list": {"aliases": ["ls"]},
@@ -276,6 +284,7 @@ fn schema() -> Rendered {
             "doctor": {
                 "remote": true,
                 "defaultNetworkAccess": false,
+                "remoteNetworkAccess": "read-only",
                 "remoteChecks": {"jira": "read-only", "tempo": "read-only"},
                 "remoteStatuses": ["connected", "notConfigured", "failed"],
                 "failureExitCodes": {

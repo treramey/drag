@@ -7,14 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
-- Browser-assisted Atlassian and Tempo token generation during interactive
-  setup, with visible fallback links and a `--no-open` option.
-- Guided interactive setup that verifies Jira and Tempo before saving, derives
-  the Atlassian account ID, and safely reuses existing connection values.
+- Guided Jira and Tempo setup with read-only credential verification,
+  automatic Atlassian account-ID discovery, safe credential reuse, and one
+  transactional save.
+- Browser-assisted Atlassian and Tempo token generation, with visible fallback
+  links and a `--no-open` option.
 - Opt-in `doctor --remote` checks for read-only Jira and Tempo connectivity,
   with stable per-service human and JSON results.
-- Verified headless setup using four environment variables, read-only Jira and
-  Tempo checks, and automatic Atlassian account-ID discovery.
+- Verified headless setup using a reduced set of four environment variables.
 - Worklog, alias, schedule, and tracker behavior.
 - Tempo API v4 and Atlassian API v3 clients using Rustls.
 - Compatibility with the original map and tracker format.
