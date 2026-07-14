@@ -583,17 +583,19 @@ impl App {
         self.setup_prompter.message("\nConnect Jira")?;
         let mut hostname_default = existing.hostname.clone();
         let mut email_default = existing.atlassian_user_email.clone();
+        let token_url = Url::parse(ATLASSIAN_TOKEN_URL)?;
+        let mut should_open_browser = open_browser;
         loop {
             let hostname = self.prompt_jira_site(hostname_default.as_deref())?;
             let email = self.prompt_non_empty_text("Atlassian email", email_default.as_deref())?;
             hostname_default = Some(hostname.clone());
             email_default = Some(email.clone());
-            let token_url = Url::parse(ATLASSIAN_TOKEN_URL)?;
             self.present_token_page(
                 "Create or manage your Atlassian API token:",
                 &token_url,
-                open_browser,
+                should_open_browser,
             )?;
+            should_open_browser = false;
             let atlassian_token =
                 self.prompt_token("Atlassian API token", existing.atlassian_token.as_deref())?;
             let setup_credentials = SetupCredentials {
@@ -628,12 +630,14 @@ impl App {
             "https://{}{TEMPO_TOKEN_PATH}",
             setup_credentials.hostname
         ))?;
+        let mut should_open_browser = open_browser;
         loop {
             self.present_token_page(
                 "Create or manage your Tempo API token:",
                 &tempo_url,
-                open_browser,
+                should_open_browser,
             )?;
+            should_open_browser = false;
             setup_credentials.tempo_token =
                 self.prompt_token("Tempo API token", existing.tempo_token.as_deref())?;
             let credentials = setup_credentials.to_credentials(account_id.clone());
@@ -2536,8 +2540,6 @@ mod tests {
             state.browser_urls,
             [
                 ATLASSIAN_TOKEN_URL,
-                ATLASSIAN_TOKEN_URL,
-                "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration",
                 "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration"
             ]
         );
