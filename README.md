@@ -30,16 +30,31 @@ GitHub Releases.
 
 ## Configuration
 
-Interactive setup stores credentials in a local config file with user-only
-permissions:
+### Interactive setup
+
+Run setup in a terminal:
 
 ```bash
 drag setup
 ```
 
-The guided setup prints the Atlassian and Tempo token URLs and opens each one
-in the default browser before asking for its token. Use `drag setup --no-open`
-to keep the same guided flow without launching a browser, such as over SSH.
+The wizard has three stages: **Connect Jira**, **Connect Tempo**, and **Save**.
+For Jira, enter either a bare hostname such as `yourcompany.atlassian.net` or
+any HTTPS URL from that Jira site. Setup asks for your Atlassian email and
+token, verifies the connection, and gets your account ID directly from Jira.
+It then asks for a Tempo token and verifies Tempo.
+
+Token input is hidden, so pasted tokens do not appear in the terminal. Before
+each token prompt, setup prints the relevant token page and tries to open it in
+your default browser. Use `drag setup --no-open` to print the same links without
+launching a browser, such as over SSH. A browser error is only a warning; use
+the printed link and continue.
+
+When reconfiguring, the current Jira site and email are offered as defaults.
+Each saved token can be retained without displaying or copying it. If Jira or
+Tempo rejects credentials, setup retries only that connection.
+
+### Headless setup
 
 For headless use, provide the four connection variables and run `drag setup
 --from-env`. Setup verifies Jira and Tempo with read-only requests, derives the
@@ -55,9 +70,20 @@ drag setup --from-env
 
 `ATLASSIAN_HOST` may be a bare hostname or any HTTPS URL on the Jira site. The
 runtime `TEMPO_ACCOUNT_ID` override remains supported for compatibility, but
-setup ignores it in favor of Jira's verified account ID. Use `--config <PATH>`
-to select another config file. Tokens are never included in JSON output or
-debug logs.
+setup does not require or trust it; verified setup always uses the account ID
+returned by Jira. Headless setup never prompts or opens a browser. Use
+`--config <PATH>` to select another config file.
+
+### Setup safety
+
+Setup reads the current configuration before asking for credentials and writes
+once, after both read-only connection checks succeed. Cancellation and failed
+validation or verification leave the existing file unchanged. A successful
+reconfiguration replaces only connection credentials, preserving aliases and
+trackers. Config files use user-only permissions on Unix. Tokens are never
+printed or included in human output, JSON, debug diagnostics, or errors.
+
+### Check connections
 
 `drag doctor` reports local configuration and runtime diagnostics without
 network access. Run `drag doctor --remote` to repeat the same read-only Jira

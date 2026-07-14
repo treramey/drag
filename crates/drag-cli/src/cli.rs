@@ -51,6 +51,10 @@ pub enum Command {
     #[command(visible_alias = "d")]
     Delete(DeleteArgs),
     /// Connect Jira and Tempo, verify both connections, then save.
+    ///
+    /// Interactive setup guides you through Connect Jira, Connect Tempo, and Save.
+    /// Use --from-env for unattended setup or --no-open to keep token links in the
+    /// terminal without launching a browser.
     Setup(SetupArgs),
     /// Manage issue-key aliases.
     Alias {
@@ -80,7 +84,9 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Option<Shell>,
     },
-    /// Report local diagnostics and optionally run read-only connection checks.
+    /// Report local diagnostics without network access.
+    ///
+    /// Add --remote to run opt-in, read-only Jira and Tempo connection checks.
     Doctor(DoctorArgs),
     /// Describe the machine-readable CLI contract.
     Schema,
@@ -164,7 +170,7 @@ pub struct DeleteArgs {
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Verify and save four environment-provided connection values without prompting.
+    /// Verify and save the four required environment values without prompting.
     #[arg(long)]
     pub from_env: bool,
 
@@ -175,7 +181,7 @@ pub struct SetupArgs {
 
 #[derive(Debug, Args)]
 pub struct DoctorArgs {
-    /// Check Jira and Tempo with read-only remote requests.
+    /// Opt in to read-only Jira and Tempo connection checks.
     #[arg(long)]
     pub remote: bool,
 }
