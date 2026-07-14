@@ -171,7 +171,67 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     let body: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(body["data"]["commands"]["log"]["dryRun"], true);
     assert_eq!(body["data"]["commands"]["setup"]["fromEnv"], true);
+    assert_eq!(
+        body["data"]["commands"]["doctor"]["defaultNetworkAccess"],
+        false
+    );
+    assert_eq!(body["data"]["commands"]["doctor"]["remote"], true);
+    assert_eq!(body["data"]["commands"]["doctor"]["failedCheckExitCode"], 1);
     assert_eq!(body["data"]["schemaVersion"], 1);
+    Ok(())
+}
+
+#[test]
+fn doctor_defaults_to_network_free_local_diagnostics() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+
+    let output = command(&path)?.arg("doctor").output()?;
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(body["ok"], true);
+    assert!(body["data"].get("remoteChecks").is_none());
+    Ok(())
+}
+
+#[test]
+fn doctor_remote_reports_missing_services_and_exits_unsuccessfully(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+
+    let output = command(&path)?.args(["doctor", "--remote"]).output()?;
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["ok"], false);
+    assert_eq!(
+        body["error"]["details"]["remoteChecks"]["jira"]["status"],
+        "notConfigured"
+    );
+    assert_eq!(
+        body["error"]["details"]["remoteChecks"]["tempo"]["status"],
+        "notConfigured"
+    );
+    Ok(())
+}
+
+#[test]
+fn doctor_remote_reports_malformed_config_as_a_structured_error(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    fs::write(&path, "{not valid json")?;
+
+    let output = command(&path)?.args(["doctor", "--remote"]).output()?;
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "config_error");
     Ok(())
 }
 

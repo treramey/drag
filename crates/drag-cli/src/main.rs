@@ -83,14 +83,42 @@ impl CliError {
     }
 }
 
+#[derive(Debug)]
 pub struct Rendered {
     data: Value,
     human: String,
+    failure: Option<RenderedFailure>,
+}
+
+#[derive(Debug)]
+struct RenderedFailure {
+    code: &'static str,
+    message: &'static str,
 }
 
 impl Rendered {
     pub fn new(data: Value, human: String) -> Self {
-        Self { data, human }
+        Self {
+            data,
+            human,
+            failure: None,
+        }
+    }
+
+    pub fn failed(data: Value, human: String, code: &'static str, message: &'static str) -> Self {
+        Self {
+            data,
+            human,
+            failure: Some(RenderedFailure { code, message }),
+        }
+    }
+
+    const fn exit_code(&self) -> u8 {
+        if self.failure.is_some() {
+            EXIT_FAILURE
+        } else {
+            0
+        }
     }
 }
 
@@ -112,6 +140,19 @@ struct ErrorBody<'a> {
     message: &'a str,
 }
 
+#[derive(Serialize)]
+struct DiagnosticFailure<T> {
+    ok: bool,
+    error: DiagnosticError<T>,
+}
+
+#[derive(Serialize)]
+struct DiagnosticError<T> {
+    code: &'static str,
+    message: &'static str,
+    details: T,
+}
+
 #[tokio::main]
 async fn main() -> ExitCode {
     let args: Vec<OsString> = std::env::args_os().collect();
@@ -122,13 +163,16 @@ async fn main() -> ExitCode {
     };
     let mode = resolve_mode(cli.output);
     match run(cli).await {
-        Ok(result) => match emit_result(result, mode) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                emit_error(&error, mode);
-                ExitCode::from(error.exit_code())
+        Ok(result) => {
+            let exit_code = result.exit_code();
+            match emit_result(result, mode) {
+                Ok(()) => ExitCode::from(exit_code),
+                Err(error) => {
+                    emit_error(&error, mode);
+                    ExitCode::from(error.exit_code())
+                }
             }
-        },
+        }
         Err(error) => {
             emit_error(&error, mode);
             ExitCode::from(error.exit_code())
@@ -177,36 +221,7 @@ async fn run(cli: Cli) -> Result<Rendered, CliError> {
                 script,
             ))
         }
-        Command::Doctor => {
-            let config = config::Config::load(&path)?;
-            let report = json!({
-                "name": "drag",
-                "version": env!("CARGO_PKG_VERSION"),
-                "configPath": path,
-                "configured": {
-                    "tempoToken": config.tempo_token.is_some() || std::env::var_os("TEMPO_TOKEN").is_some(),
-                    "accountId": config.account_id.is_some() || std::env::var_os("TEMPO_ACCOUNT_ID").is_some(),
-                    "atlassianEmail": config.atlassian_user_email.is_some() || std::env::var_os("ATLASSIAN_EMAIL").is_some(),
-                    "atlassianToken": config.atlassian_token.is_some() || std::env::var_os("ATLASSIAN_TOKEN").is_some(),
-                    "atlassianHost": config.hostname.is_some() || std::env::var_os("ATLASSIAN_HOST").is_some()
-                },
-                "aliases": config.aliases.len(),
-                "trackers": config.trackers.len(),
-                "timezone": timezone.name(),
-                "target": {"architecture": std::env::consts::ARCH, "operatingSystem": std::env::consts::OS}
-            });
-            Ok(Rendered::new(
-                report,
-                format!(
-                    "drag {}\nconfig: {}\ntimezone: {}\naliases: {}\ntrackers: {}",
-                    env!("CARGO_PKG_VERSION"),
-                    path.display(),
-                    timezone.name(),
-                    config.aliases.len(),
-                    config.trackers.len()
-                ),
-            ))
-        }
+        Command::Doctor(args) => app.doctor(args).await,
         Command::Schema => Ok(schema()),
     }
 }
@@ -229,7 +244,15 @@ fn schema() -> Rendered {
             "delete": {"aliases": ["d"], "dryRun": true},
             "alias": {"subcommands": ["set", "list", "delete"]},
             "tracker": {"subcommands": ["start", "pause", "resume", "stop", "delete", "list"], "stopDryRun": true},
-            "completions": {}, "doctor": {}, "schema": {}
+            "completions": {},
+            "doctor": {
+                "remote": true,
+                "defaultNetworkAccess": false,
+                "remoteChecks": {"jira": "read-only", "tempo": "read-only"},
+                "remoteStatuses": ["connected", "notConfigured", "failed"],
+                "failedCheckExitCode": 1
+            },
+            "schema": {}
         },
         "dateSyntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"],
         "durationSyntax": ["15m", "1h", "1h15m", "11-12:30", "23:30-00:30"],
@@ -251,6 +274,23 @@ fn resolve_mode(mode: OutputMode) -> OutputMode {
 }
 
 fn emit_result(result: Rendered, mode: OutputMode) -> Result<(), CliError> {
+    if let Some(failure) = result.failure {
+        match mode {
+            OutputMode::Human => eprintln!("{}", result.human),
+            OutputMode::Json | OutputMode::Auto => write_json(
+                &mut io::stderr().lock(),
+                &DiagnosticFailure {
+                    ok: false,
+                    error: DiagnosticError {
+                        code: failure.code,
+                        message: failure.message,
+                        details: result.data,
+                    },
+                },
+            )?,
+        }
+        return Ok(());
+    }
     match mode {
         OutputMode::Human => println!("{}", result.human),
         OutputMode::Json | OutputMode::Auto => write_json(

@@ -55,6 +55,12 @@ setup ignores it in favor of Jira's verified account ID. Use `--config <PATH>`
 to select another config file. Tokens are never included in JSON output or
 debug logs.
 
+`drag doctor` reports local configuration and runtime diagnostics without
+network access. Run `drag doctor --remote` to repeat the same read-only Jira
+and Tempo connection checks used by setup. Remote results are reported for
+both services when possible, and a failed check exits with status 1 without
+changing the configuration.
+
 ## Usage
 
 ```bash

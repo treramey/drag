@@ -80,8 +80,8 @@ pub enum Command {
         #[arg(value_enum)]
         shell: Option<Shell>,
     },
-    /// Report configuration and runtime diagnostics without exposing secrets.
-    Doctor,
+    /// Report local diagnostics and optionally run read-only connection checks.
+    Doctor(DoctorArgs),
     /// Describe the machine-readable CLI contract.
     Schema,
     /// Compatibility form for `alias set`.
@@ -167,6 +167,13 @@ pub struct SetupArgs {
     /// Verify and save four environment-provided connection values without prompting.
     #[arg(long)]
     pub from_env: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Check Jira and Tempo with read-only remote requests.
+    #[arg(long)]
+    pub remote: bool,
 }
 
 #[derive(Debug, Subcommand)]
