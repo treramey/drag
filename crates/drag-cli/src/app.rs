@@ -92,8 +92,8 @@ impl SetupCredentials {
     ) -> Result<Self, CliError> {
         let hostname = normalize_jira_site(&source("ATLASSIAN_HOST")?)?;
         let atlassian_user_email = source("ATLASSIAN_EMAIL")?.trim().to_owned();
-        let atlassian_token = source("ATLASSIAN_TOKEN")?;
-        let tempo_token = source("TEMPO_TOKEN")?;
+        let atlassian_token = source("ATLASSIAN_TOKEN")?.trim().to_owned();
+        let tempo_token = source("TEMPO_TOKEN")?.trim().to_owned();
         Ok(Self {
             tempo_token,
             atlassian_user_email,
@@ -1048,8 +1048,8 @@ mod tests {
         let values = BTreeMap::from([
             ("ATLASSIAN_HOST", "example.atlassian.net"),
             ("ATLASSIAN_EMAIL", "person@example.com"),
-            ("ATLASSIAN_TOKEN", "jira-secret"),
-            ("TEMPO_TOKEN", "tempo-secret"),
+            ("ATLASSIAN_TOKEN", " jira-secret\n"),
+            ("TEMPO_TOKEN", " tempo-secret\n"),
             ("TEMPO_ACCOUNT_ID", "must-not-be-used"),
         ]);
         let mut requested = Vec::new();
@@ -1062,6 +1062,8 @@ mod tests {
         })?;
 
         assert_eq!(credentials.hostname, "example.atlassian.net");
+        assert_eq!(credentials.atlassian_token, "jira-secret");
+        assert_eq!(credentials.tempo_token, "tempo-secret");
         assert_eq!(
             requested,
             [
