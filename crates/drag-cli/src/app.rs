@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
+use std::future::Future;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::pin::Pin;
 
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -27,6 +30,87 @@ pub struct App {
     path: PathBuf,
     timezone: Tz,
     debug: bool,
+    connection_verifier: Box<dyn ConnectionVerifier>,
+}
+
+type VerificationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
+
+trait ConnectionVerifier: Send + Sync {
+    fn verify_jira<'a>(
+        &'a self,
+        credentials: &'a SetupCredentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, String>;
+
+    fn verify_tempo<'a>(
+        &'a self,
+        credentials: &'a Credentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, ()>;
+}
+
+struct RemoteConnectionVerifier;
+
+impl ConnectionVerifier for RemoteConnectionVerifier {
+    fn verify_jira<'a>(
+        &'a self,
+        credentials: &'a SetupCredentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, String> {
+        Box::pin(async move {
+            let api = ApiClient::new(credentials.to_credentials(String::new()), debug)?;
+            api.get_current_user_account_id().await
+        })
+    }
+
+    fn verify_tempo<'a>(
+        &'a self,
+        credentials: &'a Credentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, ()> {
+        Box::pin(async move {
+            let api = ApiClient::new(credentials.clone(), debug)?;
+            api.verify_tempo_connection().await
+        })
+    }
+}
+
+struct SetupCredentials {
+    tempo_token: String,
+    atlassian_user_email: String,
+    atlassian_token: String,
+    hostname: String,
+}
+
+impl SetupCredentials {
+    fn from_environment() -> Result<Self, CliError> {
+        Self::from_source(required_setup_environment)
+    }
+
+    fn from_source(
+        mut source: impl FnMut(&str) -> Result<String, CliError>,
+    ) -> Result<Self, CliError> {
+        let hostname = normalize_jira_site(&source("ATLASSIAN_HOST")?)?;
+        let atlassian_user_email = source("ATLASSIAN_EMAIL")?.trim().to_owned();
+        let atlassian_token = source("ATLASSIAN_TOKEN")?;
+        let tempo_token = source("TEMPO_TOKEN")?;
+        Ok(Self {
+            tempo_token,
+            atlassian_user_email,
+            atlassian_token,
+            hostname,
+        })
+    }
+
+    fn to_credentials(&self, account_id: String) -> Credentials {
+        Credentials {
+            tempo_token: self.tempo_token.clone(),
+            account_id,
+            atlassian_user_email: self.atlassian_user_email.clone(),
+            atlassian_token: self.atlassian_token.clone(),
+            hostname: self.hostname.clone(),
+        }
+    }
 }
 
 impl App {
@@ -35,16 +119,33 @@ impl App {
             path,
             timezone,
             debug,
+            connection_verifier: Box::new(RemoteConnectionVerifier),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_connection_verifier(
+        path: PathBuf,
+        connection_verifier: impl ConnectionVerifier + 'static,
+    ) -> Self {
+        Self {
+            path,
+            timezone: chrono_tz::UTC,
+            debug: false,
+            connection_verifier: Box::new(connection_verifier),
         }
     }
 
     pub async fn setup(&self, args: SetupArgs) -> Result<Rendered, CliError> {
-        let credentials = if args.from_env {
-            Config::default().credentials()?
-        } else {
-            prompt_credentials()?
-        };
         let mut config = Config::load(&self.path)?;
+        if args.from_env {
+            let setup_credentials = SetupCredentials::from_environment()?;
+            return self
+                .verify_and_save_environment_setup(config, setup_credentials)
+                .await;
+        }
+
+        let credentials = prompt_credentials()?;
         config.tempo_token = Some(credentials.tempo_token);
         config.account_id = Some(credentials.account_id);
         config.atlassian_user_email = Some(credentials.atlassian_user_email);
@@ -55,6 +156,41 @@ impl App {
             json!({"configured": true, "path": self.path}),
             format!(
                 "Setup completed successfully. Configuration saved to {}.",
+                self.path.display()
+            ),
+        ))
+    }
+
+    async fn verify_and_save_environment_setup(
+        &self,
+        mut config: Config,
+        setup_credentials: SetupCredentials,
+    ) -> Result<Rendered, CliError> {
+        let account_id = self
+            .connection_verifier
+            .verify_jira(&setup_credentials, self.debug)
+            .await?;
+        let credentials = setup_credentials.to_credentials(account_id);
+        self.connection_verifier
+            .verify_tempo(&credentials, self.debug)
+            .await?;
+
+        config.tempo_token = Some(credentials.tempo_token);
+        config.account_id = Some(credentials.account_id);
+        config.atlassian_user_email = Some(credentials.atlassian_user_email);
+        config.atlassian_token = Some(credentials.atlassian_token);
+        config.hostname = Some(credentials.hostname);
+        config.save(&self.path)?;
+
+        Ok(Rendered::new(
+            json!({
+                "configured": true,
+                "path": self.path,
+                "source": "environment",
+                "verification": {"jira": "connected", "tempo": "connected"}
+            }),
+            format!(
+                "Verified Jira and Tempo using environment credentials. Configuration saved to {}.",
                 self.path.display()
             ),
         ))
@@ -529,6 +665,83 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
     })
 }
 
+fn required_setup_environment(name: &str) -> Result<String, CliError> {
+    match env::var(name) {
+        Ok(value) if !value.trim().is_empty() => Ok(value),
+        Ok(_) | Err(env::VarError::NotPresent) => Err(CliError::InvalidInput(format!(
+            "{name} must be set and non-empty for `drag setup --from-env`"
+        ))),
+        Err(env::VarError::NotUnicode(_)) => Err(CliError::InvalidInput(format!(
+            "{name} must contain valid Unicode for `drag setup --from-env`"
+        ))),
+    }
+}
+
+fn normalize_jira_site(input: &str) -> Result<String, CliError> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err(CliError::InvalidInput(
+            "ATLASSIAN_HOST must be a Jira hostname or HTTPS URL".to_owned(),
+        ));
+    }
+
+    let url = if input.contains("://") {
+        Url::parse(input).map_err(|_| {
+            CliError::InvalidInput(
+                "ATLASSIAN_HOST must be a valid Jira hostname or HTTPS URL".to_owned(),
+            )
+        })?
+    } else {
+        if input.contains(['/', '?', '#', '@', ':']) {
+            return Err(CliError::InvalidInput(
+                "ATLASSIAN_HOST must be a bare hostname or a complete HTTPS URL".to_owned(),
+            ));
+        }
+        Url::parse(&format!("https://{input}")).map_err(|_| {
+            CliError::InvalidInput("ATLASSIAN_HOST is not a valid hostname".to_owned())
+        })?
+    };
+
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return Err(CliError::InvalidInput(
+            "ATLASSIAN_HOST must use HTTPS without credentials or a custom port".to_owned(),
+        ));
+    }
+
+    let domain = match url.host() {
+        Some(url::Host::Domain(domain)) => domain,
+        _ => {
+            return Err(CliError::InvalidInput(
+                "ATLASSIAN_HOST must contain a valid Jira hostname".to_owned(),
+            ));
+        }
+    };
+    let valid_domain = domain.split('.').all(|label| {
+        !label.is_empty()
+            && label
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            && label
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+            && label
+                .chars()
+                .last()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+    });
+    if !valid_domain {
+        return Err(CliError::InvalidInput(
+            "ATLASSIAN_HOST must contain a valid Jira hostname".to_owned(),
+        ));
+    }
+    Ok(domain.to_owned())
+}
+
 fn prompt_credentials() -> Result<Credentials, CliError> {
     fn prompt(label: &str) -> Result<String, CliError> {
         eprint!("{label}: ");
@@ -717,4 +930,236 @@ pub fn default_timezone(explicit: Option<&str>) -> Result<Tz, CliError> {
         .unwrap_or_else(|| iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_owned()));
     name.parse()
         .map_err(|_| CliError::InvalidInput(format!("unknown IANA time zone: {name}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::sync::{Arc, Mutex};
+
+    use drag::tracker::Tracker;
+    use tempfile::TempDir;
+
+    use super::{
+        normalize_jira_site, App, Config, ConnectionVerifier, Credentials, SetupCredentials,
+        VerificationFuture,
+    };
+    use crate::CliError;
+
+    struct FakeVerifier {
+        jira_error: Option<String>,
+        tempo_error: Option<String>,
+        tempo_accounts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ConnectionVerifier for FakeVerifier {
+        fn verify_jira<'a>(
+            &'a self,
+            _credentials: &'a SetupCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, String> {
+            let error = self.jira_error.clone();
+            Box::pin(async move {
+                match error {
+                    Some(message) => Err(CliError::Api(message)),
+                    None => Ok("derived-account".to_owned()),
+                }
+            })
+        }
+
+        fn verify_tempo<'a>(
+            &'a self,
+            credentials: &'a Credentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, ()> {
+            let account_id = credentials.account_id.clone();
+            let error = self.tempo_error.clone();
+            let accounts = Arc::clone(&self.tempo_accounts);
+            Box::pin(async move {
+                accounts
+                    .lock()
+                    .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
+                    .push(account_id);
+                match error {
+                    Some(message) => Err(CliError::Api(message)),
+                    None => Ok(()),
+                }
+            })
+        }
+    }
+
+    fn setup_credentials() -> SetupCredentials {
+        SetupCredentials {
+            tempo_token: "new-tempo-token".to_owned(),
+            atlassian_user_email: "new@example.com".to_owned(),
+            atlassian_token: "new-jira-token".to_owned(),
+            hostname: "example.atlassian.net".to_owned(),
+        }
+    }
+
+    fn existing_config() -> Config {
+        Config {
+            tempo_token: Some("old-tempo-token".to_owned()),
+            account_id: Some("old-account".to_owned()),
+            atlassian_user_email: Some("old@example.com".to_owned()),
+            atlassian_token: Some("old-jira-token".to_owned()),
+            hostname: Some("old.atlassian.net".to_owned()),
+            aliases: BTreeMap::from([("lunch".to_owned(), "ABC-1".to_owned())]),
+            trackers: BTreeMap::from([(
+                "ABC-2".to_owned(),
+                Tracker::new("ABC-2".to_owned(), Some("work".to_owned()), 123),
+            )]),
+        }
+    }
+
+    #[test]
+    fn normalizes_bare_hosts_and_https_jira_urls() -> Result<(), Box<dyn std::error::Error>> {
+        for (input, expected) in [
+            ("EXAMPLE.atlassian.net", "example.atlassian.net"),
+            (
+                "https://Example.atlassian.net/jira/software/projects/ABC?view=all#top",
+                "example.atlassian.net",
+            ),
+        ] {
+            assert_eq!(normalize_jira_site(input)?, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unsafe_jira_sites() {
+        for input in [
+            "",
+            "http://example.atlassian.net",
+            "https://user:password@example.atlassian.net",
+            "https://example.atlassian.net:8443",
+            "example.atlassian.net/path",
+            "https://127.0.0.1",
+            "bad host.atlassian.net",
+        ] {
+            assert!(normalize_jira_site(input).is_err(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn setup_environment_does_not_read_the_compatibility_account_id(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let values = BTreeMap::from([
+            ("ATLASSIAN_HOST", "example.atlassian.net"),
+            ("ATLASSIAN_EMAIL", "person@example.com"),
+            ("ATLASSIAN_TOKEN", "jira-secret"),
+            ("TEMPO_TOKEN", "tempo-secret"),
+            ("TEMPO_ACCOUNT_ID", "must-not-be-used"),
+        ]);
+        let mut requested = Vec::new();
+        let credentials = SetupCredentials::from_source(|name| {
+            requested.push(name.to_owned());
+            values
+                .get(name)
+                .map(|value| (*value).to_owned())
+                .ok_or_else(|| CliError::InvalidInput(format!("missing {name}")))
+        })?;
+
+        assert_eq!(credentials.hostname, "example.atlassian.net");
+        assert_eq!(
+            requested,
+            [
+                "ATLASSIAN_HOST",
+                "ATLASSIAN_EMAIL",
+                "ATLASSIAN_TOKEN",
+                "TEMPO_TOKEN"
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verified_environment_setup_derives_account_and_preserves_local_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let config = existing_config();
+        config.save(&path)?;
+        let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
+        let app = App::with_connection_verifier(
+            path.clone(),
+            FakeVerifier {
+                jira_error: None,
+                tempo_error: None,
+                tempo_accounts: Arc::clone(&tempo_accounts),
+            },
+        );
+
+        let result = app
+            .verify_and_save_environment_setup(config, setup_credentials())
+            .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.account_id.as_deref(), Some("derived-account"));
+        assert_eq!(saved.tempo_token.as_deref(), Some("new-tempo-token"));
+        assert_eq!(
+            saved.aliases.get("lunch").map(String::as_str),
+            Some("ABC-1")
+        );
+        assert!(saved.trackers.contains_key("ABC-2"));
+        let accounts = tempo_accounts
+            .lock()
+            .map_err(|_| "test verifier lock was poisoned")?;
+        assert_eq!(accounts.as_slice(), ["derived-account"]);
+        assert_eq!(result.data["source"], "environment");
+        assert_eq!(result.data["verification"]["jira"], "connected");
+        assert_eq!(result.data["verification"]["tempo"], "connected");
+        let output = format!("{} {}", result.human, result.data);
+        assert!(!output.contains("new-tempo-token"));
+        assert!(!output.contains("new-jira-token"));
+        assert!(!output.contains("derived-account"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_verification_leaves_config_byte_for_byte_unchanged(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (jira_error, tempo_error) in [
+            (Some("jira rejected credentials".to_owned()), None),
+            (None, Some("tempo rejected credentials".to_owned())),
+        ] {
+            let directory = TempDir::new()?;
+            let path = directory.path().join("config.json");
+            let config = existing_config();
+            config.save(&path)?;
+            let before = fs::read(&path)?;
+            let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
+            let jira_should_fail = jira_error.is_some();
+            let app = App::with_connection_verifier(
+                path.clone(),
+                FakeVerifier {
+                    jira_error,
+                    tempo_error,
+                    tempo_accounts: Arc::clone(&tempo_accounts),
+                },
+            );
+
+            assert!(app
+                .verify_and_save_environment_setup(config, setup_credentials())
+                .await
+                .is_err());
+            assert_eq!(fs::read(path)?, before);
+            let accounts = tempo_accounts
+                .lock()
+                .map_err(|_| "test verifier lock was poisoned")?;
+            if jira_should_fail {
+                assert!(accounts.is_empty());
+            } else {
+                assert_eq!(accounts.as_slice(), ["derived-account"]);
+            }
+        }
+        Ok(())
+    }
 }

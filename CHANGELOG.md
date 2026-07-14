@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Verified headless setup using four environment variables, read-only Jira and
+  Tempo checks, and automatic Atlassian account-ID discovery.
 - Worklog, alias, schedule, and tracker behavior.
 - Tempo API v4 and Atlassian API v3 clients using Rustls.
 - Compatibility with the original map and tracker format.

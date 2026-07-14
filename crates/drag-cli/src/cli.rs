@@ -164,7 +164,7 @@ pub struct DeleteArgs {
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Read all five credential values from environment variables.
+    /// Read four credential values from the environment and verify both connections.
     #[arg(long)]
     pub from_env: bool,
 }

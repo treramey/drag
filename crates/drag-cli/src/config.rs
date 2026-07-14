@@ -35,7 +35,7 @@ pub struct Config {
     pub trackers: BTreeMap<String, Tracker>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Credentials {
     #[serde(skip_serializing)]
