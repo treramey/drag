@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
+#[cfg(not(windows))]
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -67,24 +69,32 @@ impl Config {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(CliError::Io)?;
         }
-        let temporary = path.with_extension("tmp");
-        let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary).map_err(CliError::Io)?;
-        let contents = serde_json::to_vec_pretty(self).map_err(CliError::Json)?;
-        file.write_all(&contents).map_err(CliError::Io)?;
-        file.write_all(b"\n").map_err(CliError::Io)?;
-        file.sync_all().map_err(CliError::Io)?;
+        let mut contents = serde_json::to_vec_pretty(self).map_err(CliError::Json)?;
+        contents.push(b'\n');
+
         #[cfg(windows)]
-        if path.exists() {
-            fs::remove_file(path).map_err(CliError::Io)?;
+        {
+            let file = atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite);
+            file.write(|temporary| temporary.write_all(&contents))
+                .map_err(std::io::Error::from)
+                .map_err(CliError::Io)?;
         }
-        fs::rename(&temporary, path).map_err(CliError::Io)?;
+
+        #[cfg(not(windows))]
+        {
+            let temporary = path.with_extension("tmp");
+            let mut options = OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(CliError::Io)?;
+            file.write_all(&contents).map_err(CliError::Io)?;
+            file.sync_all().map_err(CliError::Io)?;
+            fs::rename(&temporary, path).map_err(CliError::Io)?;
+        }
         Ok(())
     }
 
@@ -322,6 +332,24 @@ mod tests {
         let path = directory.path().join("config.json");
         std::fs::write(&path, "not json")?;
         assert!(matches!(Config::load(&path), Err(CliError::Config { .. })));
+        Ok(())
+    }
+
+    #[test]
+    fn save_replaces_an_existing_config() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("config file ü.json");
+        std::fs::write(&path, "old config")?;
+        let config = Config {
+            hostname: Some("example.atlassian.net".to_owned()),
+            ..Config::default()
+        };
+
+        config.save(&path)?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.hostname.as_deref(), Some("example.atlassian.net"));
+        assert_eq!(std::fs::read_dir(directory.path())?.count(), 1);
         Ok(())
     }
 
