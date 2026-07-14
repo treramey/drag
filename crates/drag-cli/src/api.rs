@@ -267,10 +267,10 @@ fn safe_segment(value: &str) -> Result<String, CliError> {
 }
 
 fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
-    if status == StatusCode::UNAUTHORIZED {
-        return CliError::Api(
-            "unauthorized; tokens are invalid or expired (run `drag setup`)".to_owned(),
-        );
+    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+        return CliError::Authentication(format!(
+            "{status}; credentials are invalid, expired, or lack access"
+        ));
     }
     let parsed: Option<Value> = serde_json::from_slice(body).ok();
     let details = parsed
@@ -321,7 +321,7 @@ mod tests {
     use reqwest::{Method, StatusCode};
 
     use super::{api_error, safe_segment, ApiClient};
-    use crate::config::Credentials;
+    use crate::{config::Credentials, CliError};
 
     #[test]
     fn rejects_identifiers_that_can_change_a_url() {
@@ -347,6 +347,16 @@ mod tests {
             &[],
         );
         assert!(error.to_string().contains("bad worklog"));
+    }
+
+    #[test]
+    fn classifies_authentication_statuses_as_correctable_credentials() {
+        for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            assert!(matches!(
+                api_error(status, b"", &[]),
+                CliError::Authentication(_)
+            ));
+        }
     }
 
     #[test]

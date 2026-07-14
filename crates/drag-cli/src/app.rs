@@ -128,7 +128,11 @@ impl SetupPrompter for TerminalSetupPrompter {
         } else {
             format!("{label} (pasted input will not be displayed): ")
         };
-        let value = rpassword::prompt_password(prompt).map_err(map_setup_input_error)?;
+        let config = rpassword::ConfigBuilder::new()
+            .output_writer(io::stderr())
+            .build();
+        let value = rpassword::prompt_password_with_config(prompt, config)
+            .map_err(map_setup_input_error)?;
         let value = value.trim();
         if value.is_empty() && can_retain {
             Ok(None)
@@ -299,12 +303,13 @@ impl App {
         existing: &Config,
     ) -> Result<(SetupCredentials, String), CliError> {
         self.setup_prompter.message("\nConnect Jira")?;
+        let mut hostname_default = existing.hostname.clone();
+        let mut email_default = existing.atlassian_user_email.clone();
         loop {
-            let hostname = self.prompt_jira_site(existing.hostname.as_deref())?;
-            let email = self.prompt_non_empty_text(
-                "Atlassian email",
-                existing.atlassian_user_email.as_deref(),
-            )?;
+            let hostname = self.prompt_jira_site(hostname_default.as_deref())?;
+            let email = self.prompt_non_empty_text("Atlassian email", email_default.as_deref())?;
+            hostname_default = Some(hostname.clone());
+            email_default = Some(email.clone());
             self.setup_prompter.message(&format!(
                 "Create or manage your Atlassian API token:\n{ATLASSIAN_TOKEN_URL}"
             ))?;
@@ -322,9 +327,10 @@ impl App {
                 .await
             {
                 Ok(account_id) => return Ok((setup_credentials, account_id)),
-                Err(error) => self.setup_prompter.message(&format!(
+                Err(error @ CliError::Authentication(_)) => self.setup_prompter.message(&format!(
                     "Could not connect to Jira: {error}\nCheck the Jira site, email, and token, then try again."
                 ))?,
+                Err(error) => return Err(error),
             }
         }
     }
@@ -353,9 +359,12 @@ impl App {
                 .await
             {
                 Ok(()) => return Ok(credentials),
-                Err(error) => self.setup_prompter.message(&format!(
+                Err(error @ CliError::Authentication(_)) => {
+                    self.setup_prompter.message(&format!(
                     "Could not connect to Tempo: {error}\nCheck the Tempo token, then try again."
-                ))?,
+                ))?
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -1073,13 +1082,24 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
+    #[cfg(unix)]
+    use std::process::Command;
+    #[cfg(unix)]
+    use std::time::Duration;
+
     use drag::tracker::Tracker;
+    #[cfg(unix)]
+    use expectrl::session::OsSession;
+    #[cfg(unix)]
+    use expectrl::{ControlCode, Eof, Expect, Session};
     use tempfile::TempDir;
 
     use super::{
         normalize_jira_site, App, Config, ConnectionVerifier, Credentials, SetupCredentials,
         SetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
+    #[cfg(unix)]
+    use crate::cli::OutputMode;
     use crate::cli::SetupArgs;
     use crate::CliError;
 
@@ -1126,10 +1146,15 @@ mod tests {
             state
                 .text_prompts
                 .push((label.to_owned(), default.map(str::to_owned)));
-            state
+            let response = state
                 .text_responses
                 .pop_front()
-                .ok_or_else(super::setup_cancelled)
+                .ok_or_else(super::setup_cancelled)?;
+            if response.is_empty() {
+                Ok(default.unwrap_or_default().to_owned())
+            } else {
+                Ok(response)
+            }
         }
 
         fn prompt_secret(&self, label: &str, can_retain: bool) -> Result<Option<String>, CliError> {
@@ -1146,8 +1171,22 @@ mod tests {
     }
 
     struct SequenceVerifier {
-        jira_results: Mutex<VecDeque<Result<String, String>>>,
-        tempo_results: Mutex<VecDeque<Result<(), String>>>,
+        jira_results: Mutex<VecDeque<Result<String, VerificationFailure>>>,
+        tempo_results: Mutex<VecDeque<Result<(), VerificationFailure>>>,
+    }
+
+    enum VerificationFailure {
+        Authentication(String),
+        Fatal(String),
+    }
+
+    impl VerificationFailure {
+        fn into_cli_error(self) -> CliError {
+            match self {
+                Self::Authentication(message) => CliError::Authentication(message),
+                Self::Fatal(message) => CliError::Api(message),
+            }
+        }
     }
 
     impl ConnectionVerifier for SequenceVerifier {
@@ -1162,7 +1201,7 @@ mod tests {
                     .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
                     .pop_front()
                     .ok_or_else(|| CliError::Api("unexpected Jira verification".to_owned()))?
-                    .map_err(CliError::Api)
+                    .map_err(VerificationFailure::into_cli_error)
             })
         }
 
@@ -1177,7 +1216,7 @@ mod tests {
                     .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
                     .pop_front()
                     .ok_or_else(|| CliError::Api("unexpected Tempo verification".to_owned()))?
-                    .map_err(CliError::Api)
+                    .map_err(VerificationFailure::into_cli_error)
             })
         }
     }
@@ -1185,8 +1224,8 @@ mod tests {
     fn interactive_app(
         path: PathBuf,
         state: Arc<Mutex<PromptState>>,
-        jira_results: impl IntoIterator<Item = Result<String, String>>,
-        tempo_results: impl IntoIterator<Item = Result<(), String>>,
+        jira_results: impl IntoIterator<Item = Result<String, VerificationFailure>>,
+        tempo_results: impl IntoIterator<Item = Result<(), VerificationFailure>>,
     ) -> App {
         App::with_setup_dependencies(
             path,
@@ -1199,6 +1238,69 @@ mod tests {
                 state,
             },
         )
+    }
+
+    #[cfg(unix)]
+    fn spawn_setup_pty(
+        path: &std::path::Path,
+        scenario: &str,
+    ) -> Result<OsSession, Box<dyn std::error::Error>> {
+        let mut command = Command::new(std::env::current_exe()?);
+        command
+            .args([
+                "--exact",
+                "app::tests::pty_setup_helper",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("DRAG_PTY_CONFIG", path)
+            .env("DRAG_PTY_SCENARIO", scenario);
+        let mut session = Session::spawn(command)?;
+        session.set_expect_timeout(Some(Duration::from_secs(10)));
+        Ok(session)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "PTY child process invoked by the interactive setup tests"]
+    async fn pty_setup_helper() -> Result<(), Box<dyn std::error::Error>> {
+        let path = PathBuf::from(std::env::var("DRAG_PTY_CONFIG")?);
+        let scenario = std::env::var("DRAG_PTY_SCENARIO")?;
+        let (jira_results, tempo_results) = match scenario.as_str() {
+            "success" | "reconfigure" | "late-cancel" => (
+                VecDeque::from([Ok("pty-account".to_owned())]),
+                VecDeque::from([Ok(())]),
+            ),
+            "retry" => (
+                VecDeque::from([
+                    Err(VerificationFailure::Authentication(
+                        "Jira credentials rejected".to_owned(),
+                    )),
+                    Ok("pty-account".to_owned()),
+                ]),
+                VecDeque::from([
+                    Err(VerificationFailure::Authentication(
+                        "Tempo token rejected".to_owned(),
+                    )),
+                    Ok(()),
+                ]),
+            ),
+            _ => return Err(format!("unknown PTY scenario: {scenario}").into()),
+        };
+        let app = App::with_connection_verifier(
+            path,
+            SequenceVerifier {
+                jira_results: Mutex::new(jira_results),
+                tempo_results: Mutex::new(tempo_results),
+            },
+        );
+
+        match app.setup(SetupArgs { from_env: false }).await {
+            Ok(result) => crate::emit_result(result, OutputMode::Json)?,
+            Err(error) => crate::emit_error(&error, OutputMode::Json),
+        }
+        Ok(())
     }
 
     impl ConnectionVerifier for FakeVerifier {
@@ -1292,6 +1394,134 @@ mod tests {
         ] {
             assert!(normalize_jira_site(input).is_err(), "{input:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_first_run_hides_tokens_and_emits_json_success() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let mut session = spawn_setup_pty(&path, "success")?;
+
+        session.expect("Connect Jira")?;
+        session.expect("Jira site (hostname or HTTPS URL)")?;
+        session.send_line("https://Example.atlassian.net/jira/software")?;
+        session.expect("Atlassian email")?;
+        session.send_line("person@example.com")?;
+        session.expect(ATLASSIAN_TOKEN_URL)?;
+        session.expect("pasted input will not be displayed")?;
+        session.send_line("pty-jira-secret")?;
+        let jira_output = session.expect("Connect Tempo")?;
+        assert!(!String::from_utf8_lossy(jira_output.before()).contains("pty-jira-secret"));
+        session.expect("api-integration")?;
+        session.expect("pasted input will not be displayed")?;
+        session.send_line("pty-tempo-secret")?;
+        let success_output = session.expect("\"source\": \"interactive\"")?;
+        assert!(!String::from_utf8_lossy(success_output.before()).contains("pty-tempo-secret"));
+        session.expect(Eof)?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.hostname.as_deref(), Some("example.atlassian.net"));
+        assert_eq!(saved.account_id.as_deref(), Some("pty-account"));
+        assert_eq!(saved.atlassian_token.as_deref(), Some("pty-jira-secret"));
+        assert_eq!(saved.tempo_token.as_deref(), Some("pty-tempo-secret"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_authentication_retries_reuse_latest_jira_values_and_retry_only_tempo_token(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let mut session = spawn_setup_pty(&path, "retry")?;
+
+        session.expect("Jira site (hostname or HTTPS URL)")?;
+        session.send_line("example.atlassian.net")?;
+        session.expect("Atlassian email")?;
+        session.send_line("person@example.com")?;
+        session.expect("pasted input will not be displayed")?;
+        session.send_line("bad-jira-token")?;
+        session.expect("Could not connect to Jira")?;
+        session.expect("Jira site (hostname or HTTPS URL) [example.atlassian.net]")?;
+        session.send_line("")?;
+        session.expect("Atlassian email [person@example.com]")?;
+        session.send_line("")?;
+        session.expect("pasted input will not be displayed")?;
+        session.send_line("good-jira-token")?;
+        session.expect("Connect Tempo")?;
+        session.expect("pasted input will not be displayed")?;
+        session.send_line("bad-tempo-token")?;
+        session.expect("Could not connect to Tempo")?;
+        session.expect("pasted input will not be displayed")?;
+        session.send_line("good-tempo-token")?;
+        session.expect("\"source\": \"interactive\"")?;
+        session.expect(Eof)?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.hostname.as_deref(), Some("example.atlassian.net"));
+        assert_eq!(
+            saved.atlassian_user_email.as_deref(),
+            Some("person@example.com")
+        );
+        assert_eq!(saved.atlassian_token.as_deref(), Some("good-jira-token"));
+        assert_eq!(saved.tempo_token.as_deref(), Some("good-tempo-token"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_reconfiguration_offers_defaults_and_retains_tokens(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let mut session = spawn_setup_pty(&path, "reconfigure")?;
+
+        session.expect("Jira site (hostname or HTTPS URL) [old.atlassian.net]")?;
+        session.send_line("")?;
+        session.expect("Atlassian email [old@example.com]")?;
+        session.send_line("")?;
+        session.expect("press Enter to keep the existing token")?;
+        session.send_line("")?;
+        session.expect("Connect Tempo")?;
+        session.expect("press Enter to keep the existing token")?;
+        session.send_line("")?;
+        session.expect("\"source\": \"interactive\"")?;
+        session.expect(Eof)?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.atlassian_token.as_deref(), Some("old-jira-token"));
+        assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
+        assert!(saved.aliases.contains_key("lunch"));
+        assert!(saved.trackers.contains_key("ABC-2"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_late_interrupt_leaves_existing_config_unchanged(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let before = fs::read(&path)?;
+        let mut session = spawn_setup_pty(&path, "late-cancel")?;
+
+        session.expect("Jira site (hostname or HTTPS URL) [old.atlassian.net]")?;
+        session.send_line("")?;
+        session.expect("Atlassian email [old@example.com]")?;
+        session.send_line("")?;
+        session.expect("press Enter to keep the existing token")?;
+        session.send_line("")?;
+        session.expect("Connect Tempo")?;
+        session.expect("press Enter to keep the existing token")?;
+        session.send(ControlCode::EndOfText)?;
+        session.expect(Eof)?;
+
+        assert_eq!(fs::read(path)?, before);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1412,8 +1642,8 @@ mod tests {
                 "not a host".to_owned(),
                 "example.atlassian.net".to_owned(),
                 "person@example.com".to_owned(),
-                "example.atlassian.net".to_owned(),
-                "person@example.com".to_owned(),
+                String::new(),
+                String::new(),
             ]),
             secret_responses: VecDeque::from([
                 Some("bad-jira".to_owned()),
@@ -1427,10 +1657,17 @@ mod tests {
             path.clone(),
             Arc::clone(&state),
             [
-                Err("authentication failed".to_owned()),
+                Err(VerificationFailure::Authentication(
+                    "authentication failed".to_owned(),
+                )),
                 Ok("derived-account".to_owned()),
             ],
-            [Err("token rejected".to_owned()), Ok(())],
+            [
+                Err(VerificationFailure::Authentication(
+                    "token rejected".to_owned(),
+                )),
+                Ok(()),
+            ],
         );
 
         app.setup(SetupArgs { from_env: false }).await?;
@@ -1438,10 +1675,8 @@ mod tests {
         let saved = Config::load(&path)?;
         assert_eq!(saved.atlassian_token.as_deref(), Some("good-jira"));
         assert_eq!(saved.tempo_token.as_deref(), Some("good-tempo"));
-        let messages = &state
-            .lock()
-            .map_err(|_| "test prompt lock was poisoned")?
-            .messages;
+        let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
+        let messages = &state.messages;
         assert!(messages
             .iter()
             .any(|message| message.contains("Invalid Jira site")));
@@ -1451,6 +1686,98 @@ mod tests {
         assert!(messages
             .iter()
             .any(|message| message.contains("Could not connect to Tempo")));
+        assert_eq!(
+            state.text_prompts[3..],
+            [
+                (
+                    "Jira site (hostname or HTTPS URL)".to_owned(),
+                    Some("example.atlassian.net".to_owned())
+                ),
+                (
+                    "Atlassian email".to_owned(),
+                    Some("person@example.com".to_owned())
+                )
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interactive_setup_propagates_non_authentication_verification_errors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let state = Arc::new(Mutex::new(PromptState {
+            text_responses: VecDeque::from([
+                "example.atlassian.net".to_owned(),
+                "person@example.com".to_owned(),
+            ]),
+            secret_responses: VecDeque::from([Some("jira-token".to_owned())]),
+            ..PromptState::default()
+        }));
+        let app = interactive_app(
+            path.clone(),
+            Arc::clone(&state),
+            [Err(VerificationFailure::Fatal(
+                "network timeout".to_owned(),
+            ))],
+            std::iter::empty(),
+        );
+
+        let error = match app.setup(SetupArgs { from_env: false }).await {
+            Ok(_) => return Err("setup should propagate the network error".into()),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, CliError::Api(message) if message == "network timeout"));
+        assert!(!path.exists());
+        let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
+        assert_eq!(state.text_prompts.len(), 2);
+        assert!(!state
+            .messages
+            .iter()
+            .any(|message| message.contains("try again")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interactive_setup_does_not_retry_fatal_tempo_errors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let state = Arc::new(Mutex::new(PromptState {
+            text_responses: VecDeque::from([
+                "example.atlassian.net".to_owned(),
+                "person@example.com".to_owned(),
+            ]),
+            secret_responses: VecDeque::from([
+                Some("jira-token".to_owned()),
+                Some("tempo-token".to_owned()),
+            ]),
+            ..PromptState::default()
+        }));
+        let app = interactive_app(
+            path.clone(),
+            Arc::clone(&state),
+            [Ok("derived-account".to_owned())],
+            [Err(VerificationFailure::Fatal(
+                "malformed response".to_owned(),
+            ))],
+        );
+
+        let error = match app.setup(SetupArgs { from_env: false }).await {
+            Ok(_) => return Err("setup should propagate the response error".into()),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, CliError::Api(message) if message == "malformed response"));
+        assert!(!path.exists());
+        let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
+        assert_eq!(state.secret_prompts.len(), 2);
+        assert!(!state
+            .messages
+            .iter()
+            .any(|message| message.contains("Check the Tempo token")));
         Ok(())
     }
 
@@ -1492,7 +1819,9 @@ mod tests {
         let app = interactive_app(
             path.clone(),
             state,
-            [Err("authentication failed".to_owned())],
+            [Err(VerificationFailure::Authentication(
+                "authentication failed".to_owned(),
+            ))],
             std::iter::empty(),
         );
 
