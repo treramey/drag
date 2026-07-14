@@ -50,7 +50,7 @@ pub enum Command {
     /// Delete one or more worklogs.
     #[command(visible_alias = "d")]
     Delete(DeleteArgs),
-    /// Configure Atlassian and Tempo credentials.
+    /// Connect Jira and Tempo, verify both connections, then save.
     Setup(SetupArgs),
     /// Manage issue-key aliases.
     Alias {
@@ -164,7 +164,7 @@ pub struct DeleteArgs {
 
 #[derive(Debug, Args)]
 pub struct SetupArgs {
-    /// Read four credential values from the environment and verify both connections.
+    /// Verify and save four environment-provided connection values without prompting.
     #[arg(long)]
     pub from_env: bool,
 }

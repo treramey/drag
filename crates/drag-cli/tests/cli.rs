@@ -4,6 +4,12 @@ use assert_cmd::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[cfg(unix)]
+use std::time::Duration;
+
+#[cfg(unix)]
+use expectrl::{ControlCode, Eof, Expect, Session};
+
 fn command(config: &std::path::Path) -> Result<Command, Box<dyn std::error::Error>> {
     let mut command = Command::cargo_bin("drag")?;
     command.args([
@@ -253,5 +259,62 @@ fn headless_setup_parses_existing_config_before_reading_credentials(
     let body: Value = serde_json::from_slice(&output.stderr)?;
     assert_eq!(body["error"]["code"], "config_error");
     assert_eq!(fs::read(path)?, before);
+    Ok(())
+}
+
+#[test]
+fn interactive_setup_without_a_terminal_points_automation_to_from_env(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let output = command(&path)?.arg("setup").output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("setup --from-env")));
+    assert!(!path.exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn interactive_setup_uses_a_terminal_and_retries_a_failed_jira_connection(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let mut command = std::process::Command::new(assert_cmd::cargo::cargo_bin!("drag"));
+    command.args([
+        "--config",
+        path.to_str().ok_or("temporary config path is not UTF-8")?,
+        "--timezone",
+        "UTC",
+        "--output",
+        "json",
+        "setup",
+    ]);
+    let mut session = Session::spawn(command)?;
+    session.set_expect_timeout(Some(Duration::from_secs(15)));
+
+    session.expect("Connect Jira")?;
+    session.expect("Jira site (hostname or HTTPS URL)")?;
+    session.send_line("localhost")?;
+    session.expect("Atlassian email")?;
+    session.send_line("person@example.com")?;
+    session.expect("https://id.atlassian.com/manage-profile/security/api-tokens")?;
+    session.expect("pasted input will not be displayed")?;
+    session.send_line("jira-token-must-not-be-echoed")?;
+    let verification_output = session.expect("Could not connect to Jira")?;
+    assert!(!String::from_utf8_lossy(verification_output.before())
+        .contains("jira-token-must-not-be-echoed"));
+    session.expect("Jira site (hostname or HTTPS URL)")?;
+    session.send(ControlCode::EndOfTransmission)?;
+    session.expect("interactive setup was cancelled")?;
+    session.expect(Eof)?;
+
+    assert!(!path.exists());
     Ok(())
 }
