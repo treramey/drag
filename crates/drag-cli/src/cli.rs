@@ -174,7 +174,7 @@ pub struct SetupArgs {
     #[arg(long)]
     pub from_env: bool,
 
-    /// Print token URLs without opening them in a browser.
+    /// Print token URLs without launching a browser.
     #[arg(long)]
     pub no_open: bool,
 }

@@ -252,7 +252,7 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
     assert!(stdout.contains("Connect Jira, Connect Tempo, and Save"));
     assert!(stdout.contains("--from-env"));
     assert!(stdout.contains("--no-open"));
-    assert!(stdout.contains("without launching a browser"));
+    assert!(stdout.contains("Print token URLs without launching a browser"));
     Ok(())
 }
 
