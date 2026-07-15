@@ -19,6 +19,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::config::normalize_jira_site;
 use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher, TokenPage,
@@ -398,6 +399,43 @@ impl OnboardingModel {
         }
     }
 
+    fn validate_jira(&mut self) -> bool {
+        if self.hostname.trim().is_empty() {
+            self.focus = 0;
+            self.error = Some(
+                "Jira site is required. Enter a bare hostname or an HTTPS Jira URL.".to_owned(),
+            );
+            return false;
+        }
+        if let Err(error) = normalize_jira_site(&self.hostname) {
+            self.focus = 0;
+            self.error = Some(format!(
+                "Invalid Jira site: {error}. Enter a bare hostname or an HTTPS Jira URL."
+            ));
+            return false;
+        }
+        if self.email.trim().is_empty() {
+            self.focus = 1;
+            self.error = Some("Atlassian email is required.".to_owned());
+            return false;
+        }
+        if self.jira_token.trim().is_empty() && !self.can_retain_jira_token {
+            self.focus = 2;
+            self.error = Some("Atlassian API token is required.".to_owned());
+            return false;
+        }
+        true
+    }
+
+    fn validate_tempo(&mut self) -> bool {
+        if self.tempo_token.trim().is_empty() && !self.can_retain_tempo_token {
+            self.focus = 0;
+            self.error = Some("Tempo API token is required.".to_owned());
+            return false;
+        }
+        true
+    }
+
     fn pending_cancel(event: &Event) -> bool {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
@@ -480,6 +518,10 @@ where
                     continue;
                 }
 
+                if !model.validate_jira() {
+                    continue;
+                }
+
                 model.error = None;
                 model.jira_status = ConnectionStatus::Pending;
                 model.tempo_status = ConnectionStatus::NotConnected;
@@ -487,7 +529,7 @@ where
 
                 let hostname = model.hostname.clone();
                 let email = model.email.clone();
-                let token = if model.jira_token.is_empty() && model.can_retain_jira_token {
+                let token = if model.jira_token.trim().is_empty() && model.can_retain_jira_token {
                     SecretInput::Retain
                 } else {
                     SecretInput::Replace(model.jira_token.clone())
@@ -531,6 +573,7 @@ where
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.jira_status = ConnectionStatus::NotConnected;
+                        model.focus = 2;
                         model.error = Some(format!("Could not connect to Jira: {error}"));
                     }
                     Err(error) => return Err(error),
@@ -543,11 +586,15 @@ where
                     continue;
                 }
 
+                if !model.validate_tempo() {
+                    continue;
+                }
+
                 model.error = None;
                 model.tempo_status = ConnectionStatus::Pending;
                 draw(terminal, &model, &mut observe)?;
 
-                let token = if model.tempo_token.is_empty() && model.can_retain_tempo_token {
+                let token = if model.tempo_token.trim().is_empty() && model.can_retain_tempo_token {
                     SecretInput::Retain
                 } else {
                     SecretInput::Replace(model.tempo_token.clone())
@@ -594,6 +641,7 @@ where
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.tempo_status = ConnectionStatus::NotConnected;
+                        model.focus = 0;
                         model.error = Some(format!("Could not connect to Tempo: {error}"));
                     }
                     Err(error) => return Err(error),
