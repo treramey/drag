@@ -2910,6 +2910,7 @@ mod tests {
         let directory = TempDir::new()?;
         let path = directory.path().join("config.json");
         existing_config().save(&path)?;
+        let browser_state = Arc::new(Mutex::new(PromptState::default()));
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
             // Complete setup once with retained credentials.
@@ -2937,17 +2938,31 @@ mod tests {
                 jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
                 tempo_results: Mutex::new(VecDeque::from([Ok(())])),
             },
-            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+            RatatuiOnboardingSession::scripted(
+                FakeBrowserLauncher {
+                    state: Arc::clone(&browser_state),
+                },
+                events,
+                Arc::clone(&frames),
+            ),
         );
 
         app.setup(SetupArgs {
             from_env: false,
-            no_open: true,
+            no_open: false,
         })
         .await?;
 
         let saved = Config::load(&path)?;
         assert_eq!(saved.account_id.as_deref(), Some("derived-account"));
+        assert_eq!(
+            browser_state
+                .lock()
+                .map_err(|_| "test browser lock poisoned")?
+                .browser_urls
+                .len(),
+            2
+        );
         assert!(frames
             .lock()
             .map_err(|_| "test frame lock poisoned")?
