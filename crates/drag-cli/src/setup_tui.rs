@@ -529,7 +529,7 @@ where
 
                 let hostname = model.hostname.clone();
                 let email = model.email.clone();
-                let token = if model.jira_token.trim().is_empty() && model.can_retain_jira_token {
+                let token = if model.jira_token.is_empty() && model.can_retain_jira_token {
                     SecretInput::Retain
                 } else {
                     SecretInput::Replace(model.jira_token.clone())
@@ -573,6 +573,7 @@ where
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.jira_status = ConnectionStatus::NotConnected;
+                        model.jira_token.clear();
                         model.focus = 2;
                         model.error = Some(format!("Could not connect to Jira: {error}"));
                     }
@@ -594,7 +595,7 @@ where
                 model.tempo_status = ConnectionStatus::Pending;
                 draw(terminal, &model, &mut observe)?;
 
-                let token = if model.tempo_token.trim().is_empty() && model.can_retain_tempo_token {
+                let token = if model.tempo_token.is_empty() && model.can_retain_tempo_token {
                     SecretInput::Retain
                 } else {
                     SecretInput::Replace(model.tempo_token.clone())
@@ -641,6 +642,7 @@ where
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.tempo_status = ConnectionStatus::NotConnected;
+                        model.tempo_token.clear();
                         model.focus = 0;
                         model.error = Some(format!("Could not connect to Tempo: {error}"));
                     }

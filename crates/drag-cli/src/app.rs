@@ -1202,7 +1202,19 @@ mod tests {
     struct RecordingSequenceVerifier {
         jira_results: Mutex<VecDeque<Result<String, VerificationFailure>>>,
         tempo_results: Mutex<VecDeque<Result<(), VerificationFailure>>>,
-        calls: Arc<Mutex<Vec<&'static str>>>,
+        attempts: Arc<Mutex<Vec<RecordedVerification>>>,
+    }
+
+    enum RecordedVerification {
+        Jira {
+            hostname: String,
+            email: String,
+            token: String,
+        },
+        Tempo {
+            account_id: String,
+            token: String,
+        },
     }
 
     struct ScriptedOnboardingSession {
@@ -1327,14 +1339,18 @@ mod tests {
     impl ConnectionVerifier for RecordingSequenceVerifier {
         fn verify_jira<'a>(
             &'a self,
-            _connection: &'a JiraCredentials,
+            connection: &'a JiraCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, String> {
             Box::pin(async move {
-                self.calls
+                self.attempts
                     .lock()
                     .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
-                    .push("jira");
+                    .push(RecordedVerification::Jira {
+                        hostname: connection.hostname.clone(),
+                        email: connection.atlassian_user_email.clone(),
+                        token: connection.atlassian_token.clone(),
+                    });
                 self.jira_results
                     .lock()
                     .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
@@ -1346,14 +1362,17 @@ mod tests {
 
         fn verify_tempo<'a>(
             &'a self,
-            _connection: &'a TempoCredentials,
+            connection: &'a TempoCredentials,
             _debug: bool,
         ) -> VerificationFuture<'a, ()> {
             Box::pin(async move {
-                self.calls
+                self.attempts
                     .lock()
                     .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
-                    .push("tempo");
+                    .push(RecordedVerification::Tempo {
+                        account_id: connection.account_id.clone(),
+                        token: connection.tempo_token.clone(),
+                    });
                 self.tempo_results
                     .lock()
                     .map_err(|_| CliError::Api("test verifier lock was poisoned".to_owned()))?
@@ -2235,7 +2254,7 @@ mod tests {
         let directory = TempDir::new()?;
         let path = directory.path().join("config.json");
         let browser_state = Arc::new(Mutex::new(PromptState::default()));
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let attempts = Arc::new(Mutex::new(Vec::new()));
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
             // Reject an invalid site and an empty Jira form before any verification call.
@@ -2262,7 +2281,7 @@ mod tests {
             Event::Paste("rejected-jira-token".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Event::Paste("-replacement".to_owned()),
+            Event::Paste("replacement-jira-token".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Tempo also validates locally and retries in place.
@@ -2271,7 +2290,7 @@ mod tests {
             Event::Paste("rejected-tempo-token".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-            Event::Paste("-replacement".to_owned()),
+            Event::Paste("replacement-tempo-token".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -2291,7 +2310,7 @@ mod tests {
                     )),
                     Ok(()),
                 ])),
-                calls: Arc::clone(&calls),
+                attempts: Arc::clone(&attempts),
             },
             RatatuiOnboardingSession::scripted(
                 FakeBrowserLauncher {
@@ -2308,13 +2327,35 @@ mod tests {
         })
         .await?;
 
-        assert_eq!(
-            calls
-                .lock()
-                .map_err(|_| "test verifier lock was poisoned")?
-                .as_slice(),
-            ["jira", "jira", "tempo", "tempo"]
-        );
+        let attempts = attempts
+            .lock()
+            .map_err(|_| "test verifier lock was poisoned")?;
+        assert_eq!(attempts.len(), 4);
+        assert!(matches!(
+            &attempts[0],
+            RecordedVerification::Jira { hostname, email, token }
+                if hostname == "example.atlassian.net"
+                    && email == "person@example.com"
+                    && token == "rejected-jira-token"
+        ));
+        assert!(matches!(
+            &attempts[1],
+            RecordedVerification::Jira { hostname, email, token }
+                if hostname == "example.atlassian.net"
+                    && email == "person@example.com"
+                    && token == "replacement-jira-token"
+        ));
+        assert!(matches!(
+            &attempts[2],
+            RecordedVerification::Tempo { account_id, token }
+                if account_id == "derived-account" && token == "rejected-tempo-token"
+        ));
+        assert!(matches!(
+            &attempts[3],
+            RecordedVerification::Tempo { account_id, token }
+                if account_id == "derived-account" && token == "replacement-tempo-token"
+        ));
+        drop(attempts);
         assert_eq!(
             browser_state
                 .lock()
@@ -2328,6 +2369,14 @@ mod tests {
         assert_eq!(
             saved.atlassian_user_email.as_deref(),
             Some("person@example.com")
+        );
+        assert_eq!(
+            saved.atlassian_token.as_deref(),
+            Some("replacement-jira-token")
+        );
+        assert_eq!(
+            saved.tempo_token.as_deref(),
+            Some("replacement-tempo-token")
         );
 
         let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
@@ -2405,6 +2454,63 @@ mod tests {
             .join("\n");
         assert!(rendered.contains(ATLASSIAN_TOKEN_URL));
         assert!(rendered.contains("api-integration"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_whitespace_does_not_silently_retain_stored_tokens(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Paste(" ".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("replacement-jira-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste(" ".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("replacement-tempo-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("replacement-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(
+            saved.atlassian_token.as_deref(),
+            Some("replacement-jira-token")
+        );
+        assert_eq!(
+            saved.tempo_token.as_deref(),
+            Some("replacement-tempo-token")
+        );
+        let rendered = frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .join("\n");
+        assert!(rendered.contains("Could not connect to Jira: token is required"));
+        assert!(rendered.contains("Could not connect to Tempo: token is required"));
         Ok(())
     }
 
