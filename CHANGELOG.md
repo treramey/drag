@@ -9,7 +9,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 - Ratatui onboarding for interactive setup, with masked token input,
   asynchronous connection progress, backward navigation, safe stored-token
-  reuse and replacement, and an explicit review-and-save step.
+  reuse and replacement, an explicit review-and-save step, responsive resize
+  handling, and actionable guidance for undersized terminals.
 - Guided Jira and Tempo setup with read-only credential verification,
   automatic Atlassian account-ID discovery, safe credential reuse, and one
   transactional save.
@@ -27,6 +28,10 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Security
 
+- Restore terminal raw mode, alternate screen, cursor visibility, and bracketed
+  paste after onboarding success, cancellation, errors, and panics.
+- Keep Ratatui rendering on standard error so successful JSON output remains
+  parseable and free of terminal control sequences.
 - Restrict authenticated Tempo pagination to the Tempo API origin.
 - Validate URL path identifiers and redact all credential output.
 - Report malformed config instead of silently replacing it with empty state.

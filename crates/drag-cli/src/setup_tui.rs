@@ -26,6 +26,9 @@ use crate::setup::{
 };
 use crate::CliError;
 
+const MIN_TERMINAL_WIDTH: u16 = 84;
+const MIN_TERMINAL_HEIGHT: u16 = 28;
+
 #[cfg(test)]
 const TEST_WIDTH: u16 = 100;
 #[cfg(test)]
@@ -703,6 +706,11 @@ where
 }
 
 fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
+    if frame.area().width < MIN_TERMINAL_WIDTH || frame.area().height < MIN_TERMINAL_HEIGHT {
+        render_resize_message(frame, frame.area());
+        return;
+    }
+
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Fill(1),
@@ -717,6 +725,29 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
         UiStage::Save => render_save(frame, body, model),
     }
     render_footer(frame, footer, model);
+}
+
+fn render_resize_message(frame: &mut Frame<'_>, area: Rect) {
+    let message = Text::from(vec![
+        Line::from("Terminal too small").bold(),
+        Line::default(),
+        Line::from(format!(
+            "Current size: {} columns by {} rows.",
+            area.width, area.height
+        )),
+        Line::from(format!(
+            "Resize to at least {MIN_TERMINAL_WIDTH} columns by {MIN_TERMINAL_HEIGHT} rows to continue."
+        )),
+        Line::from("Your entered setup values are preserved.").dim(),
+        Line::from("Ctrl-C cancels without saving.").dim(),
+    ]);
+    frame.render_widget(
+        Paragraph::new(message)
+            .centered()
+            .wrap(Wrap { trim: true })
+            .block(Block::bordered().title(" Drag setup ")),
+        area,
+    );
 }
 
 fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
@@ -925,9 +956,12 @@ fn render_field(
     } else {
         Style::default()
     };
-    let block = Block::bordered()
-        .title(format!(" {label} "))
-        .border_style(border_style);
+    let title = if focused {
+        format!(" › {label} (focused) ")
+    } else {
+        format!(" {label} ")
+    };
+    let block = Block::bordered().title(title).border_style(border_style);
     frame.render_widget(Paragraph::new(display.as_str()).block(block), area);
 
     if focused && area.width > 2 && !(masked && value.is_empty() && can_retain_secret) {
@@ -946,12 +980,17 @@ fn render_action(
     focused: bool,
     status: ConnectionStatus,
 ) {
-    let text = match status {
+    let status_text = match status {
         ConnectionStatus::Pending => format!("… Verifying {label}…"),
         ConnectionStatus::Connected if label != "Save configuration" => {
             format!("✓ {label} connected")
         }
         _ => format!("[ {label} ]"),
+    };
+    let text = if focused {
+        format!("› {status_text} (focused)")
+    } else {
+        status_text
     };
     let style = if status == ConnectionStatus::Connected {
         Style::default().green().bold()
@@ -1001,7 +1040,9 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         " Enter ".bold().cyan(),
         format!("{action}  ").dim(),
         " Esc ".bold().cyan(),
-        escape_action.dim(),
+        format!("{escape_action}  ").dim(),
+        " Ctrl-C ".bold().cyan(),
+        "cancel".dim(),
     ]);
     frame.render_widget(Paragraph::new(footer).block(Block::bordered()), area);
 }
@@ -1018,4 +1059,80 @@ fn test_backend_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> Stri
         output.push('\n');
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::Event;
+    use ratatui::backend::TestBackend;
+
+    use super::{
+        test_backend_text, Action, ConnectionStatus, OnboardingModel, Terminal, UiStage,
+        MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
+    };
+
+    fn model() -> OnboardingModel {
+        OnboardingModel {
+            stage: UiStage::Jira,
+            focus: 0,
+            hostname: String::new(),
+            email: String::new(),
+            jira_token: String::new(),
+            tempo_token: String::new(),
+            can_retain_jira_token: false,
+            can_retain_tempo_token: false,
+            jira_instruction: "Create an Atlassian token.".to_owned(),
+            tempo_instruction: String::new(),
+            jira_url: "https://id.atlassian.com/manage-profile/security/api-tokens".to_owned(),
+            tempo_url: String::new(),
+            jira_status: ConnectionStatus::NotConnected,
+            tempo_status: ConnectionStatus::NotConnected,
+            error: None,
+            warning: None,
+        }
+    }
+
+    fn render_text(
+        width: u16,
+        height: u16,
+        model: &OnboardingModel,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| super::render(frame, model))?;
+        Ok(test_backend_text(&terminal))
+    }
+
+    #[test]
+    fn undersized_terminal_shows_actionable_resize_message(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rendered = render_text(MIN_TERMINAL_WIDTH - 1, MIN_TERMINAL_HEIGHT - 1, &model())?;
+
+        assert!(rendered.contains("Terminal too small"));
+        assert!(rendered.contains("Resize to at least 84 columns by 28 rows"));
+        assert!(rendered.contains("Ctrl-C cancels without saving"));
+        Ok(())
+    }
+
+    #[test]
+    fn resize_event_preserves_entered_state_until_terminal_is_large_enough(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut model = model();
+        assert!(matches!(
+            model.handle_event(Event::Paste("example.atlassian.net".to_owned())),
+            Action::None
+        ));
+        assert!(matches!(
+            model.handle_event(Event::Resize(
+                MIN_TERMINAL_WIDTH - 1,
+                MIN_TERMINAL_HEIGHT - 1
+            )),
+            Action::None
+        ));
+        let small = render_text(MIN_TERMINAL_WIDTH - 1, MIN_TERMINAL_HEIGHT - 1, &model)?;
+        let restored = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+
+        assert!(small.contains("Your entered setup values are preserved"));
+        assert!(restored.contains("example.atlassian.net"));
+        Ok(())
+    }
 }
