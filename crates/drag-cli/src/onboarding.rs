@@ -1,0 +1,599 @@
+use std::future::Future;
+use std::io::{self, IsTerminal, Write};
+use std::pin::Pin;
+
+use url::Url;
+
+use crate::api::ApiClient;
+use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
+use crate::CliError;
+
+pub(crate) const ATLASSIAN_TOKEN_URL: &str =
+    "https://id.atlassian.com/manage-profile/security/api-tokens";
+const TEMPO_TOKEN_PATH: &str =
+    "/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration";
+
+pub(crate) type VerificationFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
+pub(crate) type OnboardingFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<OnboardingOutcome, CliError>> + Send + 'a>>;
+
+pub(crate) trait ConnectionVerifier: Send + Sync {
+    fn verify_jira<'a>(
+        &'a self,
+        connection: &'a JiraCredentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, String>;
+
+    fn verify_tempo<'a>(
+        &'a self,
+        connection: &'a TempoCredentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, ()>;
+}
+
+pub(crate) struct RemoteConnectionVerifier;
+
+impl ConnectionVerifier for RemoteConnectionVerifier {
+    fn verify_jira<'a>(
+        &'a self,
+        connection: &'a JiraCredentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, String> {
+        Box::pin(async move {
+            let api = ApiClient::new(connection.to_credentials(), debug)?;
+            api.get_current_user_account_id().await
+        })
+    }
+
+    fn verify_tempo<'a>(
+        &'a self,
+        connection: &'a TempoCredentials,
+        debug: bool,
+    ) -> VerificationFuture<'a, ()> {
+        Box::pin(async move {
+            let api = ApiClient::new(connection.to_credentials(), debug)?;
+            api.verify_tempo_connection().await
+        })
+    }
+}
+
+impl JiraCredentials {
+    fn to_credentials(&self) -> Credentials {
+        Credentials {
+            tempo_token: String::new(),
+            account_id: String::new(),
+            atlassian_user_email: self.atlassian_user_email.clone(),
+            atlassian_token: self.atlassian_token.clone(),
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
+impl TempoCredentials {
+    fn to_credentials(&self) -> Credentials {
+        Credentials {
+            tempo_token: self.tempo_token.clone(),
+            account_id: self.account_id.clone(),
+            atlassian_user_email: String::new(),
+            atlassian_token: String::new(),
+            hostname: String::new(),
+        }
+    }
+}
+
+pub(crate) trait BrowserLauncher: Send + Sync {
+    fn open(&self, url: &Url) -> io::Result<()>;
+}
+
+struct SystemBrowserLauncher;
+
+impl BrowserLauncher for SystemBrowserLauncher {
+    fn open(&self, url: &Url) -> io::Result<()> {
+        webbrowser::open(url.as_str())
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct NoopBrowserLauncher;
+
+#[cfg(test)]
+impl BrowserLauncher for NoopBrowserLauncher {
+    fn open(&self, _url: &Url) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub(crate) trait SetupPrompter: Send + Sync {
+    fn is_terminal(&self) -> bool;
+    fn message(&self, message: &str) -> Result<(), CliError>;
+    fn prompt_text(&self, label: &str, default: Option<&str>) -> Result<String, CliError>;
+    fn prompt_secret(&self, label: &str, can_retain: bool) -> Result<Option<String>, CliError>;
+}
+
+pub(crate) struct TerminalSetupPrompter;
+
+impl SetupPrompter for TerminalSetupPrompter {
+    fn is_terminal(&self) -> bool {
+        io::stdin().is_terminal()
+    }
+
+    fn message(&self, message: &str) -> Result<(), CliError> {
+        writeln!(io::stderr().lock(), "{message}")?;
+        Ok(())
+    }
+
+    fn prompt_text(&self, label: &str, default: Option<&str>) -> Result<String, CliError> {
+        let mut stderr = io::stderr().lock();
+        match default {
+            Some(default) => write!(stderr, "{label} [{default}]: ")?,
+            None => write!(stderr, "{label}: ")?,
+        }
+        stderr.flush()?;
+
+        let mut input = String::new();
+        let bytes_read = io::stdin()
+            .read_line(&mut input)
+            .map_err(map_setup_input_error)?;
+        if bytes_read == 0 {
+            return Err(setup_cancelled());
+        }
+        let value = input.trim();
+        if value.is_empty() {
+            Ok(default.unwrap_or_default().to_owned())
+        } else {
+            Ok(value.to_owned())
+        }
+    }
+
+    fn prompt_secret(&self, label: &str, can_retain: bool) -> Result<Option<String>, CliError> {
+        let prompt = if can_retain {
+            format!(
+                "{label} (pasted input will not be displayed; press Enter to keep the existing token): "
+            )
+        } else {
+            format!("{label} (pasted input will not be displayed): ")
+        };
+        let config = rpassword::ConfigBuilder::new()
+            .output_writer(io::stderr())
+            .build();
+        let value = rpassword::prompt_password_with_config(prompt, config)
+            .map_err(map_setup_input_error)?;
+        let value = value.trim();
+        if value.is_empty() && can_retain {
+            Ok(None)
+        } else {
+            Ok(Some(value.to_owned()))
+        }
+    }
+}
+
+pub(crate) struct SetupCredentials {
+    pub(crate) tempo_token: String,
+    pub(crate) atlassian_user_email: String,
+    pub(crate) atlassian_token: String,
+    pub(crate) hostname: String,
+}
+
+impl SetupCredentials {
+    pub(crate) fn from_source(
+        mut source: impl FnMut(&str) -> Result<String, CliError>,
+    ) -> Result<Self, CliError> {
+        let hostname = normalize_jira_site(&source("ATLASSIAN_HOST")?)?;
+        let atlassian_user_email = source("ATLASSIAN_EMAIL")?.trim().to_owned();
+        let atlassian_token = source("ATLASSIAN_TOKEN")?.trim().to_owned();
+        let tempo_token = source("TEMPO_TOKEN")?.trim().to_owned();
+        Ok(Self {
+            tempo_token,
+            atlassian_user_email,
+            atlassian_token,
+            hostname,
+        })
+    }
+
+    pub(crate) fn to_credentials(&self, account_id: String) -> Credentials {
+        Credentials {
+            tempo_token: self.tempo_token.clone(),
+            account_id,
+            atlassian_user_email: self.atlassian_user_email.clone(),
+            atlassian_token: self.atlassian_token.clone(),
+            hostname: self.hostname.clone(),
+        }
+    }
+
+    pub(crate) fn jira_connection(&self) -> JiraCredentials {
+        JiraCredentials {
+            atlassian_user_email: self.atlassian_user_email.clone(),
+            atlassian_token: self.atlassian_token.clone(),
+            hostname: self.hostname.clone(),
+        }
+    }
+}
+
+impl From<&Credentials> for TempoCredentials {
+    fn from(credentials: &Credentials) -> Self {
+        Self {
+            tempo_token: credentials.tempo_token.clone(),
+            account_id: credentials.account_id.clone(),
+        }
+    }
+}
+
+pub(crate) trait OnboardingSession: Send + Sync {
+    fn is_terminal(&self) -> bool;
+    fn run<'a>(&'a self, workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a>;
+}
+
+pub(crate) enum OnboardingOutcome {
+    Save(Credentials),
+}
+
+pub(crate) struct LineOnboardingSession {
+    prompter: Box<dyn SetupPrompter>,
+    browser_launcher: Box<dyn BrowserLauncher>,
+}
+
+impl LineOnboardingSession {
+    pub(crate) fn terminal() -> Self {
+        Self {
+            prompter: Box::new(TerminalSetupPrompter),
+            browser_launcher: Box::new(SystemBrowserLauncher),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_dependencies(
+        prompter: impl SetupPrompter + 'static,
+        browser_launcher: impl BrowserLauncher + 'static,
+    ) -> Self {
+        Self {
+            prompter: Box::new(prompter),
+            browser_launcher: Box::new(browser_launcher),
+        }
+    }
+
+    async fn run_workflow(
+        &self,
+        mut workflow: OnboardingWorkflow<'_>,
+    ) -> Result<OnboardingOutcome, CliError> {
+        self.prompter.message(
+            "Connect Jira, connect Tempo, then save. Nothing is saved until both connections succeed.",
+        )?;
+        self.prompter.message("\nConnect Jira")?;
+
+        loop {
+            let hostname = self.prompt_jira_site(workflow.hostname_default())?;
+            let email = self.prompt_non_empty_text("Atlassian email", workflow.email_default())?;
+            let token_page = workflow.jira_token_page()?;
+            self.present_token_page(&token_page)?;
+            let token =
+                self.prompt_token("Atlassian API token", workflow.can_retain_jira_token())?;
+
+            match workflow.connect_jira(hostname, email, token).await? {
+                ConnectionOutcome::Connected => break,
+                ConnectionOutcome::Rejected(error) => self.prompter.message(&format!(
+                    "Could not connect to Jira: {error}\nCheck the Jira site, email, and token, then try again."
+                ))?,
+            }
+        }
+
+        self.prompter.message("\nConnect Tempo")?;
+        loop {
+            let token_page = workflow.tempo_token_page()?;
+            self.present_token_page(&token_page)?;
+            let token = self.prompt_token("Tempo API token", workflow.can_retain_tempo_token())?;
+
+            match workflow.connect_tempo(token).await? {
+                ConnectionOutcome::Connected => break,
+                ConnectionOutcome::Rejected(error) => self.prompter.message(&format!(
+                    "Could not connect to Tempo: {error}\nCheck the Tempo token, then try again."
+                ))?,
+            }
+        }
+
+        self.prompter.message("\nSave")?;
+        Ok(OnboardingOutcome::Save(workflow.finish()?))
+    }
+
+    fn present_token_page(&self, page: &TokenPage) -> Result<(), CliError> {
+        self.prompter
+            .message(&format!("{}\n{}", page.instruction, page.url))?;
+        if page.open_browser {
+            if let Err(error) = self.browser_launcher.open(&page.url) {
+                self.prompter.message(&format!(
+                    "Warning: could not open this page in your browser: {error}. Continue with the URL above."
+                ))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prompt_jira_site(&self, default: Option<&str>) -> Result<String, CliError> {
+        loop {
+            let input = self
+                .prompter
+                .prompt_text("Jira site (hostname or HTTPS URL)", default)?;
+            match OnboardingWorkflow::normalize_jira_site(&input) {
+                Ok(hostname) => return Ok(hostname),
+                Err(error) => self.prompter.message(&format!(
+                    "Invalid Jira site: {error}\nPaste a bare hostname or any HTTPS URL from your Jira site."
+                ))?,
+            }
+        }
+    }
+
+    fn prompt_non_empty_text(
+        &self,
+        label: &str,
+        default: Option<&str>,
+    ) -> Result<String, CliError> {
+        loop {
+            let value = self.prompter.prompt_text(label, default)?;
+            let value = value.trim();
+            if !value.is_empty() {
+                return Ok(value.to_owned());
+            }
+            self.prompter
+                .message(&format!("{label} must not be empty; try again."))?;
+        }
+    }
+
+    fn prompt_token(&self, label: &str, can_retain: bool) -> Result<SecretInput, CliError> {
+        loop {
+            match self.prompter.prompt_secret(label, can_retain)? {
+                Some(value) if !value.trim().is_empty() => {
+                    return Ok(SecretInput::Replace(value.trim().to_owned()));
+                }
+                None => return Ok(SecretInput::Retain),
+                Some(_) => self
+                    .prompter
+                    .message(&format!("{label} must not be empty; try again."))?,
+            }
+        }
+    }
+}
+
+impl OnboardingSession for LineOnboardingSession {
+    fn is_terminal(&self) -> bool {
+        self.prompter.is_terminal()
+    }
+
+    fn run<'a>(&'a self, workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a> {
+        Box::pin(async move { self.run_workflow(workflow).await })
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OnboardingStage {
+    Jira,
+    Tempo,
+    Complete,
+}
+
+pub(crate) enum SecretInput {
+    Replace(String),
+    Retain,
+}
+
+pub(crate) enum ConnectionOutcome {
+    Connected,
+    Rejected(CliError),
+}
+
+pub(crate) struct TokenPage {
+    pub(crate) instruction: &'static str,
+    pub(crate) url: Url,
+    pub(crate) open_browser: bool,
+}
+
+pub(crate) struct OnboardingWorkflow<'a> {
+    verifier: &'a dyn ConnectionVerifier,
+    debug: bool,
+    open_browser: bool,
+    stage: OnboardingStage,
+    hostname_default: Option<String>,
+    email_default: Option<String>,
+    jira_token: Option<String>,
+    tempo_token: Option<String>,
+    jira_page_presented: bool,
+    tempo_page_presented: bool,
+    setup_credentials: Option<SetupCredentials>,
+    account_id: Option<String>,
+}
+
+impl<'a> OnboardingWorkflow<'a> {
+    pub(crate) fn new(
+        existing: &Config,
+        verifier: &'a dyn ConnectionVerifier,
+        debug: bool,
+        open_browser: bool,
+    ) -> Self {
+        Self {
+            verifier,
+            debug,
+            open_browser,
+            stage: OnboardingStage::Jira,
+            hostname_default: existing.hostname.clone(),
+            email_default: existing.atlassian_user_email.clone(),
+            jira_token: existing
+                .atlassian_token
+                .clone()
+                .filter(|value| !value.is_empty()),
+            tempo_token: existing
+                .tempo_token
+                .clone()
+                .filter(|value| !value.is_empty()),
+            jira_page_presented: false,
+            tempo_page_presented: false,
+            setup_credentials: None,
+            account_id: None,
+        }
+    }
+
+    pub(crate) fn hostname_default(&self) -> Option<&str> {
+        self.hostname_default.as_deref()
+    }
+
+    pub(crate) fn email_default(&self) -> Option<&str> {
+        self.email_default.as_deref()
+    }
+
+    pub(crate) fn can_retain_jira_token(&self) -> bool {
+        self.jira_token.is_some()
+    }
+
+    pub(crate) fn can_retain_tempo_token(&self) -> bool {
+        self.tempo_token.is_some()
+    }
+
+    pub(crate) fn normalize_jira_site(input: &str) -> Result<String, CliError> {
+        normalize_jira_site(input)
+    }
+
+    pub(crate) fn jira_token_page(&mut self) -> Result<TokenPage, CliError> {
+        self.require_stage(OnboardingStage::Jira)?;
+        let page = TokenPage {
+            instruction: "Create or manage your Atlassian API token:",
+            url: Url::parse(ATLASSIAN_TOKEN_URL)?,
+            open_browser: self.open_browser && !self.jira_page_presented,
+        };
+        self.jira_page_presented = true;
+        Ok(page)
+    }
+
+    pub(crate) fn tempo_token_page(&mut self) -> Result<TokenPage, CliError> {
+        self.require_stage(OnboardingStage::Tempo)?;
+        let hostname = self
+            .setup_credentials
+            .as_ref()
+            .map(|credentials| credentials.hostname.as_str())
+            .ok_or_else(invalid_onboarding_state)?;
+        let page = TokenPage {
+            instruction: "Create or manage your Tempo API token:",
+            url: Url::parse(&format!("https://{hostname}{TEMPO_TOKEN_PATH}"))?,
+            open_browser: self.open_browser && !self.tempo_page_presented,
+        };
+        self.tempo_page_presented = true;
+        Ok(page)
+    }
+
+    pub(crate) async fn connect_jira(
+        &mut self,
+        hostname: String,
+        email: String,
+        token: SecretInput,
+    ) -> Result<ConnectionOutcome, CliError> {
+        self.require_stage(OnboardingStage::Jira)?;
+        let hostname = normalize_jira_site(&hostname)?;
+        let email = email.trim();
+        if email.is_empty() {
+            return Err(CliError::InvalidInput(
+                "Atlassian email must not be empty".to_owned(),
+            ));
+        }
+        let email = email.to_owned();
+        self.hostname_default = Some(hostname.clone());
+        self.email_default = Some(email.clone());
+        let atlassian_token = resolve_secret(token, self.jira_token.as_deref())?;
+        let setup_credentials = SetupCredentials {
+            tempo_token: String::new(),
+            atlassian_user_email: email,
+            atlassian_token,
+            hostname,
+        };
+
+        match self
+            .verifier
+            .verify_jira(&setup_credentials.jira_connection(), self.debug)
+            .await
+        {
+            Ok(account_id) => {
+                self.setup_credentials = Some(setup_credentials);
+                self.account_id = Some(account_id);
+                self.stage = OnboardingStage::Tempo;
+                Ok(ConnectionOutcome::Connected)
+            }
+            Err(error @ CliError::Authentication(_)) => Ok(ConnectionOutcome::Rejected(error)),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) async fn connect_tempo(
+        &mut self,
+        token: SecretInput,
+    ) -> Result<ConnectionOutcome, CliError> {
+        self.require_stage(OnboardingStage::Tempo)?;
+        let tempo_token = resolve_secret(token, self.tempo_token.as_deref())?;
+        let setup_credentials = self
+            .setup_credentials
+            .as_mut()
+            .ok_or_else(invalid_onboarding_state)?;
+        setup_credentials.tempo_token = tempo_token;
+        let credentials = setup_credentials.to_credentials(
+            self.account_id
+                .as_ref()
+                .ok_or_else(invalid_onboarding_state)?
+                .clone(),
+        );
+
+        match self
+            .verifier
+            .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
+            .await
+        {
+            Ok(()) => {
+                self.stage = OnboardingStage::Complete;
+                Ok(ConnectionOutcome::Connected)
+            }
+            Err(error @ CliError::Authentication(_)) => Ok(ConnectionOutcome::Rejected(error)),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn finish(self) -> Result<Credentials, CliError> {
+        self.require_stage(OnboardingStage::Complete)?;
+        Ok(self
+            .setup_credentials
+            .ok_or_else(invalid_onboarding_state)?
+            .to_credentials(self.account_id.ok_or_else(invalid_onboarding_state)?))
+    }
+
+    fn require_stage(&self, expected: OnboardingStage) -> Result<(), CliError> {
+        if self.stage == expected {
+            Ok(())
+        } else {
+            Err(invalid_onboarding_state())
+        }
+    }
+}
+
+fn resolve_secret(input: SecretInput, existing: Option<&str>) -> Result<String, CliError> {
+    match input {
+        SecretInput::Replace(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
+        SecretInput::Retain => existing
+            .map(str::to_owned)
+            .ok_or_else(|| CliError::InvalidInput("token is required".to_owned())),
+        SecretInput::Replace(_) => Err(CliError::InvalidInput("token is required".to_owned())),
+    }
+}
+
+fn invalid_onboarding_state() -> CliError {
+    CliError::InvalidInput("invalid onboarding workflow state".to_owned())
+}
+
+pub(crate) fn setup_cancelled() -> CliError {
+    CliError::InvalidInput(
+        "interactive setup was cancelled; configuration was not changed".to_owned(),
+    )
+}
+
+fn map_setup_input_error(error: io::Error) -> CliError {
+    if matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
+    ) {
+        setup_cancelled()
+    } else {
+        CliError::Io(error)
+    }
+}
