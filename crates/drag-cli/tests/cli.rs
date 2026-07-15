@@ -196,7 +196,6 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         body["data"]["commands"]["setup"]["interactiveStages"],
         serde_json::json!([
-            "welcome",
             "jiraAccountDetails",
             "atlassianApiToken",
             "tempoAccount",
@@ -288,7 +287,7 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
     assert!(stdout.contains("terminal-capable stdin and stderr"));
     assert!(stdout
         .contains("Jira account details, Atlassian API token, Tempo account, and Review & save"));
-    assert!(stdout.contains("No browser opens on the welcome screen"));
+    assert!(stdout.contains("No browser opens while entering Jira details"));
     assert!(stdout.contains("explicitly enter its token stage"));
     assert!(stdout.contains("Tab and Shift-Tab"));
     assert!(stdout.contains("Escape goes back"));

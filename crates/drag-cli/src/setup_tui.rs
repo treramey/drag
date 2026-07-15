@@ -210,15 +210,9 @@ impl RatatuiOnboardingSession {
     #[cfg(test)]
     pub(crate) fn scripted(
         browser_launcher: impl BrowserLauncher + 'static,
-        mut events: Vec<Event>,
+        events: Vec<Event>,
         frames: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ) -> Self {
-        // Preserve Welcome as the first observed frame while making every
-        // scripted workflow explicitly advance before its scenario events.
-        events.insert(
-            0,
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
-        );
         Self {
             browser_launcher: Box::new(browser_launcher),
             scripted: Some(ScriptedSession {
@@ -384,7 +378,6 @@ impl Drop for StderrTerminal {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiStage {
-    Welcome,
     JiraDetails,
     JiraToken,
     Tempo,
@@ -594,7 +587,7 @@ impl OnboardingModel {
             focus_border_elapsed: Duration::ZERO,
             cursor_blink_elapsed: Duration::ZERO,
             reduced_motion,
-            stage: UiStage::Welcome,
+            stage: UiStage::JiraDetails,
             focus: 0,
             hostname: workflow.hostname_default().unwrap_or_default().to_owned(),
             email: workflow.email_default().unwrap_or_default().to_owned(),
@@ -757,9 +750,7 @@ impl OnboardingModel {
             return Action::Cancel;
         }
         match key.code {
-            KeyCode::Esc if matches!(self.stage, UiStage::Welcome | UiStage::JiraDetails) => {
-                Action::Cancel
-            }
+            KeyCode::Esc if self.stage == UiStage::JiraDetails => Action::Cancel,
             KeyCode::Esc => Action::Back,
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.focus_previous();
@@ -806,7 +797,6 @@ impl OnboardingModel {
 
     fn focus_count(&self) -> usize {
         match self.stage {
-            UiStage::Welcome => 1,
             UiStage::JiraDetails => 3,
             UiStage::JiraToken => 2,
             UiStage::Tempo => 2,
@@ -845,7 +835,6 @@ impl OnboardingModel {
     fn input_changed(&mut self) {
         self.reset_cursor_blink();
         match self.stage {
-            UiStage::Welcome => {}
             UiStage::JiraDetails | UiStage::JiraToken => {
                 self.jira_status = ConnectionStatus::NotConnected;
                 self.tempo_status = ConnectionStatus::NotConnected;
@@ -858,7 +847,6 @@ impl OnboardingModel {
 
     fn activate_or_advance(&mut self) -> Action {
         match self.stage {
-            UiStage::Welcome => Action::Continue,
             UiStage::JiraDetails if self.focus == 2 => Action::Continue,
             UiStage::JiraToken if self.focus == 1 => Action::ConnectJira,
             UiStage::Tempo if self.focus == 1 => Action::ConnectTempo,
@@ -994,14 +982,6 @@ where
             Action::None => {}
             Action::Cancel => return Err(setup_cancelled()),
             Action::Continue => match model.stage {
-                UiStage::Welcome => {
-                    transition_to(
-                        &mut model,
-                        &mut workflow,
-                        browser_launcher,
-                        UiStage::JiraDetails,
-                    )?;
-                }
                 UiStage::JiraDetails => {
                     if model.validate_jira_details() {
                         transition_to(
@@ -1018,7 +998,6 @@ where
                 model.error = None;
                 model.warning = None;
                 match model.stage {
-                    UiStage::Welcome => return Err(setup_cancelled()),
                     UiStage::JiraDetails => return Err(setup_cancelled()),
                     UiStage::JiraToken => {
                         model.jira_token.clear();
@@ -1252,11 +1231,7 @@ fn enter_stage(
             model.tempo_page_loaded = true;
             present_page(model, browser_launcher, &page);
         }
-        UiStage::Welcome
-        | UiStage::JiraDetails
-        | UiStage::JiraToken
-        | UiStage::Tempo
-        | UiStage::Save => {}
+        UiStage::JiraDetails | UiStage::JiraToken | UiStage::Tempo | UiStage::Save => {}
     };
     Ok(())
 }
@@ -1397,7 +1372,7 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<AnimatedArea
     .areas(frame.area());
 
     let header = constrain_content_width(header);
-    let body_width = if matches!(model.stage, UiStage::Welcome | UiStage::Save) {
+    let body_width = if model.stage == UiStage::Save {
         MAX_CONTENT_WIDTH
     } else {
         MAX_FORM_WIDTH
@@ -1407,10 +1382,6 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<AnimatedArea
 
     let header_areas = render_header(frame, header, model);
     let (review_connector, focused_input) = match model.stage {
-        UiStage::Welcome => {
-            render_welcome(frame, body, model);
-            (None, None)
-        }
         UiStage::JiraDetails => {
             let focused_input = render_jira_details(frame, body, model);
             (None, focused_input)
@@ -1568,50 +1539,6 @@ fn render_header(
             1,
         ),
     }
-}
-
-fn render_welcome(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, _, steps, _, safety, _, action, _] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Length(SPACE_MD),
-        Constraint::Length(6),
-        Constraint::Length(SPACE_MD),
-        Constraint::Length(2),
-        Constraint::Length(SPACE_MD),
-        Constraint::Length(1),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from("Welcome to Drag").bold(),
-            Line::from("Connect your Jira and Tempo accounts in four short steps.").dim(),
-        ])),
-        intro,
-    );
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from("1  Jira account details"),
-            Line::from("2  Atlassian API token"),
-            Line::from("3  Tempo API token"),
-            Line::from("4  Review and save"),
-        ])),
-        steps,
-    );
-    frame.render_widget(
-        Paragraph::new("Token pages open only after you enter their step. Nothing is saved until you review and confirm.")
-            .wrap(Wrap { trim: true })
-            .style(Palette::muted()),
-        safety,
-    );
-    render_action(
-        frame,
-        action,
-        "Start setup",
-        true,
-        ConnectionStatus::NotConnected,
-        model.pending_symbol(),
-    );
 }
 
 fn stage_span(
@@ -2204,22 +2131,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         return;
     }
 
-    if model.stage == UiStage::Welcome {
-        let footer = Text::from(vec![
-            Line::styled("─".repeat(usize::from(area.width)), Palette::muted()),
-            Line::from(vec![
-                ratatui::text::Span::styled(" Enter ", Palette::primary().bold()),
-                ratatui::text::Span::styled("start setup  ", Palette::muted()),
-                ratatui::text::Span::styled(" Esc ", Palette::muted().bold()),
-                ratatui::text::Span::styled("cancel", Palette::muted()),
-            ]),
-        ]);
-        frame.render_widget(Paragraph::new(footer), area);
-        return;
-    }
-
     let action = match model.stage {
-        UiStage::Welcome => "start setup",
         UiStage::JiraDetails if model.focus < 2 => "next",
         UiStage::JiraDetails => "continue to API token",
         UiStage::JiraToken if model.jira_status == ConnectionStatus::Connected => "continue",
@@ -2530,7 +2442,6 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut branded = model();
         for stage in [
-            UiStage::Welcome,
             UiStage::JiraDetails,
             UiStage::JiraToken,
             UiStage::Tempo,
@@ -2577,32 +2488,6 @@ mod tests {
             .ok_or("Connect Jira heading was not rendered")?;
 
         assert!(heading.starts_with("Connect Jira"));
-        Ok(())
-    }
-
-    #[test]
-    fn welcome_is_initial_and_requires_explicit_advancement(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut model = model();
-        model.set_stage(UiStage::Welcome);
-        let rendered = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
-
-        assert!(model.stage == UiStage::Welcome);
-        assert!(rendered.contains("Welcome to Drag"));
-        assert!(rendered.contains("Start setup"));
-        assert!(!rendered.contains("Jira site"));
-        assert!(matches!(
-            model.handle_event(Event::Paste("must-not-fill-a-field".to_owned())),
-            Action::None
-        ));
-        assert!(model.hostname.is_empty());
-        assert!(matches!(
-            model.handle_event(Event::Key(KeyEvent::new(
-                KeyCode::Enter,
-                KeyModifiers::NONE
-            ))),
-            Action::Continue
-        ));
         Ok(())
     }
 
