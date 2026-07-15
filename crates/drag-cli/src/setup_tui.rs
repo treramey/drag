@@ -119,11 +119,10 @@ struct AnimationTicker {
 impl AnimationTicker {
     fn terminal() -> Self {
         let start = tokio::time::Instant::now() + ENTRANCE_TICK_RATE;
+        let mut interval = tokio::time::interval_at(start, ENTRANCE_TICK_RATE);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Self {
-            state: Some((
-                tokio::time::interval_at(start, ENTRANCE_TICK_RATE),
-                tokio::time::Instant::now(),
-            )),
+            state: Some((interval, tokio::time::Instant::now())),
         }
     }
 
