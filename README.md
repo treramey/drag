@@ -40,10 +40,11 @@ drag setup
 
 The Ratatui wizard has three stages: **Connect Jira**, **Connect Tempo**, and
 **Save**. Use Tab and Shift-Tab to move between fields and actions, Enter to
-continue, and Escape to cancel. For Jira, enter either a bare hostname such as
-`yourcompany.atlassian.net` or any HTTPS URL from that Jira site. Setup verifies
-Jira and Tempo without blocking keyboard input, then shows a non-secret review
-before anything is saved.
+continue, and Escape to return to the previous stage. Escape cancels from
+Connect Jira. For Jira, enter either a bare hostname such as
+`yourcompany.atlassian.net` or any HTTPS URL from that Jira site. Setup
+verifies Jira and Tempo without blocking keyboard input, then shows a
+non-secret review before anything is saved.
 
 Typed and pasted tokens are masked. Each connection stage shows the relevant
 token page and tries to open it in your default browser. Use `drag setup
@@ -54,7 +55,9 @@ continue.
 When reconfiguring, the current Jira site and email are offered as defaults.
 Each saved token can be retained without displaying or copying it. If Jira or
 Tempo rejects credentials, setup keeps the current stage available for another
-attempt.
+attempt. Editing verified Jira details requires both connections to be checked
+again; replacing only the Tempo token keeps Jira connected. Nothing changes on
+disk until the final Save action.
 
 ### Headless setup
 

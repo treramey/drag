@@ -42,6 +42,8 @@ several peer submodules rather than a single implementation file.
 ## Safety invariants
 
 - Secrets never appear in result models or debug output.
+- Stored setup tokens remain in the workflow boundary and are represented in
+  the TUI only as retainable credentials, never as editable field values.
 - Config parse errors are never converted into an empty config.
 - Config writes use mode `0600` on Unix and a temporary file before replace.
 - Authenticated pagination stays on `https://api.tempo.io`.

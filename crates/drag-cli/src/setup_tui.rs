@@ -289,9 +289,8 @@ impl OnboardingModel {
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Paste(value) => {
-                if let Some(input) = self.focused_input_mut() {
-                    input.push_str(&value);
-                    self.error = None;
+                if !value.is_empty() && self.push_to_focused_input(&value) {
+                    self.input_changed();
                 }
                 Action::None
             }
@@ -308,7 +307,8 @@ impl OnboardingModel {
         }
 
         match key.code {
-            KeyCode::Esc => Action::Cancel,
+            KeyCode::Esc if self.stage == UiStage::Jira => Action::Cancel,
+            KeyCode::Esc => Action::Back,
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.focus_previous();
                 Action::None
@@ -324,15 +324,15 @@ impl OnboardingModel {
             KeyCode::Enter => self.activate_or_advance(),
             KeyCode::Backspace => {
                 if let Some(input) = self.focused_input_mut() {
-                    input.pop();
-                    self.error = None;
+                    if input.pop().is_some() {
+                        self.input_changed();
+                    }
                 }
                 Action::None
             }
             KeyCode::Char(character) if text_input_modifiers(key.modifiers) => {
-                if let Some(input) = self.focused_input_mut() {
-                    input.push(character);
-                    self.error = None;
+                if self.push_to_focused_input(character.encode_utf8(&mut [0; 4])) {
+                    self.input_changed();
                 }
                 Action::None
             }
@@ -366,6 +366,26 @@ impl OnboardingModel {
         }
     }
 
+    fn push_to_focused_input(&mut self, value: &str) -> bool {
+        let Some(input) = self.focused_input_mut() else {
+            return false;
+        };
+        input.push_str(value);
+        true
+    }
+
+    fn input_changed(&mut self) {
+        match self.stage {
+            UiStage::Jira => {
+                self.jira_status = ConnectionStatus::NotConnected;
+                self.tempo_status = ConnectionStatus::NotConnected;
+            }
+            UiStage::Tempo => self.tempo_status = ConnectionStatus::NotConnected,
+            UiStage::Save => {}
+        }
+        self.error = None;
+    }
+
     fn activate_or_advance(&mut self) -> Action {
         match self.stage {
             UiStage::Jira if self.focus == 3 => Action::ConnectJira,
@@ -381,12 +401,19 @@ impl OnboardingModel {
     fn pending_cancel(event: &Event) -> bool {
         match event {
             Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                key.code == KeyCode::Esc
-                    || (key.modifiers.contains(KeyModifiers::CONTROL)
-                        && key.code == KeyCode::Char('c'))
+                key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c')
             }
             _ => false,
         }
+    }
+
+    fn pending_back(event: &Event) -> bool {
+        matches!(
+            event,
+            Event::Key(key)
+                if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+                    && key.code == KeyCode::Esc
+        )
     }
 }
 
@@ -401,6 +428,7 @@ enum Action {
     ConnectJira,
     ConnectTempo,
     Save,
+    Back,
     Cancel,
 }
 
@@ -429,9 +457,32 @@ where
         match model.handle_event(event) {
             Action::None => {}
             Action::Cancel => return Err(setup_cancelled()),
+            Action::Back => {
+                model.error = None;
+                model.warning = None;
+                match model.stage {
+                    UiStage::Jira => return Err(setup_cancelled()),
+                    UiStage::Tempo => {
+                        model.tempo_token.clear();
+                        model.stage = UiStage::Jira;
+                        model.focus = 0;
+                    }
+                    UiStage::Save => {
+                        model.stage = UiStage::Tempo;
+                        model.focus = 0;
+                    }
+                }
+            }
             Action::ConnectJira => {
+                if model.jira_status == ConnectionStatus::Connected {
+                    model.stage = UiStage::Tempo;
+                    model.focus = 0;
+                    continue;
+                }
+
                 model.error = None;
                 model.jira_status = ConnectionStatus::Pending;
+                model.tempo_status = ConnectionStatus::NotConnected;
                 draw(terminal, &model, &mut observe)?;
 
                 let hostname = model.hostname.clone();
@@ -441,6 +492,7 @@ where
                 } else {
                     SecretInput::Replace(model.jira_token.clone())
                 };
+                workflow.invalidate_jira();
                 let outcome = {
                     let verification = workflow.connect_jira(hostname, email, token);
                     tokio::pin!(verification);
@@ -450,7 +502,9 @@ where
                             result = &mut verification => break result,
                             event = events.next() => {
                                 let event = event_result(event)?;
-                                if OnboardingModel::pending_cancel(&event) {
+                                if OnboardingModel::pending_cancel(&event)
+                                    || OnboardingModel::pending_back(&event)
+                                {
                                     return Err(setup_cancelled());
                                 }
                                 draw(terminal, &model, &mut observe)?;
@@ -463,6 +517,7 @@ where
                     Ok(ConnectionOutcome::Connected) => {
                         model.jira_status = ConnectionStatus::Connected;
                         model.jira_token.clear();
+                        model.can_retain_jira_token = true;
                         model.hostname = workflow.hostname_default().unwrap_or_default().to_owned();
                         model.email = workflow.email_default().unwrap_or_default().to_owned();
                         model.stage = UiStage::Tempo;
@@ -482,6 +537,12 @@ where
                 }
             }
             Action::ConnectTempo => {
+                if model.tempo_status == ConnectionStatus::Connected {
+                    model.stage = UiStage::Save;
+                    model.focus = 0;
+                    continue;
+                }
+
                 model.error = None;
                 model.tempo_status = ConnectionStatus::Pending;
                 draw(terminal, &model, &mut observe)?;
@@ -491,17 +552,21 @@ where
                 } else {
                     SecretInput::Replace(model.tempo_token.clone())
                 };
+                workflow.invalidate_tempo()?;
                 let outcome = {
                     let verification = workflow.connect_tempo(token);
                     tokio::pin!(verification);
                     loop {
                         tokio::select! {
                             biased;
-                            result = &mut verification => break result,
+                            result = &mut verification => break Some(result),
                             event = events.next() => {
                                 let event = event_result(event)?;
                                 if OnboardingModel::pending_cancel(&event) {
                                     return Err(setup_cancelled());
+                                }
+                                if OnboardingModel::pending_back(&event) {
+                                    break None;
                                 }
                                 draw(terminal, &model, &mut observe)?;
                             }
@@ -509,10 +574,19 @@ where
                     }
                 };
 
+                let Some(outcome) = outcome else {
+                    model.tempo_token.clear();
+                    model.tempo_status = ConnectionStatus::NotConnected;
+                    model.stage = UiStage::Jira;
+                    model.focus = 0;
+                    continue;
+                };
+
                 match outcome {
                     Ok(ConnectionOutcome::Connected) => {
                         model.tempo_status = ConnectionStatus::Connected;
                         model.tempo_token.clear();
+                        model.can_retain_tempo_token = true;
                         model.stage = UiStage::Save;
                         model.focus = 0;
                         model.warning = None;
@@ -582,7 +656,7 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(4),
         Constraint::Fill(1),
-        Constraint::Length(2),
+        Constraint::Length(3),
     ])
     .areas(frame.area());
 
@@ -662,6 +736,7 @@ fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         &model.hostname,
         model.focus == 0,
         false,
+        false,
     );
     render_field(
         frame,
@@ -669,6 +744,7 @@ fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         "Atlassian email",
         &model.email,
         model.focus == 1,
+        false,
         false,
     );
     render_field(
@@ -678,6 +754,7 @@ fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         &model.jira_token,
         model.focus == 2,
         true,
+        model.can_retain_jira_token,
     );
     frame.render_widget(
         Paragraph::new(Text::from(vec![
@@ -718,6 +795,7 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         &model.tempo_token,
         model.focus == 0,
         true,
+        model.can_retain_tempo_token,
     );
     let url_text = if let Some((origin, path)) = model.tempo_url.split_once("/plugins") {
         Text::from(vec![
@@ -783,8 +861,11 @@ fn render_field(
     value: &str,
     focused: bool,
     masked: bool,
+    can_retain_secret: bool,
 ) {
-    let display = if masked {
+    let display = if masked && value.is_empty() && can_retain_secret {
+        "Stored credential available — leave blank to retain".to_owned()
+    } else if masked {
         "•".repeat(value.chars().count())
     } else {
         value.to_owned()
@@ -799,7 +880,7 @@ fn render_field(
         .border_style(border_style);
     frame.render_widget(Paragraph::new(display.as_str()).block(block), area);
 
-    if focused && area.width > 2 {
+    if focused && area.width > 2 && !(masked && value.is_empty() && can_retain_secret) {
         let cursor_offset = display
             .chars()
             .count()
@@ -851,9 +932,16 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let action = match model.stage {
+        UiStage::Jira if model.jira_status == ConnectionStatus::Connected => "continue",
+        UiStage::Tempo if model.tempo_status == ConnectionStatus::Connected => "continue",
         UiStage::Jira => "connect Jira",
         UiStage::Tempo => "connect Tempo",
         UiStage::Save => "save",
+    };
+    let escape_action = if model.stage == UiStage::Jira {
+        "cancel"
+    } else {
+        "back"
     };
     let footer = Line::from(vec![
         " Tab ".bold().cyan(),
@@ -863,7 +951,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         " Enter ".bold().cyan(),
         format!("{action}  ").dim(),
         " Esc ".bold().cyan(),
-        "cancel".dim(),
+        escape_action.dim(),
     ]);
     frame.render_widget(Paragraph::new(footer).block(Block::bordered()), area);
 }

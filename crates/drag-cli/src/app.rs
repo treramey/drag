@@ -1207,6 +1207,8 @@ mod tests {
 
     struct PendingJiraVerifier;
 
+    struct PendingTempoVerifier;
+
     struct DoctorVerifier {
         jira_result: Mutex<Option<Result<String, VerificationFailure>>>,
         tempo_result: Mutex<Option<Result<(), VerificationFailure>>>,
@@ -1338,6 +1340,24 @@ mod tests {
         }
     }
 
+    impl ConnectionVerifier for PendingTempoVerifier {
+        fn verify_jira<'a>(
+            &'a self,
+            _connection: &'a JiraCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, String> {
+            Box::pin(async { Ok("derived-account".to_owned()) })
+        }
+
+        fn verify_tempo<'a>(
+            &'a self,
+            _connection: &'a TempoCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+
     impl ConnectionVerifier for DoctorVerifier {
         fn verify_jira<'a>(
             &'a self,
@@ -1444,9 +1464,43 @@ mod tests {
                 KeyModifiers::NONE,
             )));
         } else {
-            events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+            events.push(Event::Key(KeyEvent::new(
+                KeyCode::Char('c'),
+                KeyModifiers::CONTROL,
+            )));
         }
         events
+    }
+
+    fn reconfiguration_tui_events() -> Vec<Event> {
+        vec![
+            // Retain the stored Jira credential and verify the prefilled identity.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Retain the stored Tempo credential.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Return from Save and replace only the Tempo credential.
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Paste("replacement-tempo-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Return through Tempo to Jira and edit the verified identity.
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Paste(".updated".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Paste("replacement-jira-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Jira edits require Tempo to be verified again before Save.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ]
     }
 
     #[cfg(unix)]
@@ -1970,6 +2024,10 @@ mod tests {
         concurrent
             .aliases
             .insert("meeting".to_owned(), "ABC-3".to_owned());
+        concurrent.trackers.insert(
+            "ABC-4".to_owned(),
+            Tracker::new("ABC-4".to_owned(), Some("concurrent".to_owned()), 456),
+        );
         let events = Arc::new(Mutex::new(Vec::new()));
         let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
         let app = App::with_onboarding_session(
@@ -2025,6 +2083,8 @@ mod tests {
                 .as_slice(),
             ["jira-browser:false", "tempo-browser:false", "save"]
         );
+        assert!(saved.trackers.contains_key("ABC-2"));
+        assert!(saved.trackers.contains_key("ABC-4"));
         Ok(())
     }
 
@@ -2152,6 +2212,305 @@ mod tests {
 
         assert!(error.to_string().contains("cancelled"));
         assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_reconfiguration_retains_replaces_backtracks_and_reverifies(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([
+                    Ok("initial-derived-account".to_owned()),
+                    Ok("final-derived-account".to_owned()),
+                ])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(()), Ok(()), Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(
+                NoopBrowserLauncher,
+                reconfiguration_tui_events(),
+                Arc::clone(&frames),
+            ),
+        );
+
+        let result = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(
+            (
+                saved.hostname.as_deref(),
+                saved.atlassian_user_email.as_deref(),
+                saved.atlassian_token.as_deref(),
+                saved.tempo_token.as_deref(),
+                saved.account_id.as_deref(),
+            ),
+            (
+                Some("old.atlassian.net"),
+                Some("old@example.com.updated"),
+                Some("replacement-jira-token"),
+                Some("replacement-tempo-token"),
+                Some("final-derived-account"),
+            )
+        );
+        assert!(saved.aliases.contains_key("lunch"));
+        assert!(saved.trackers.contains_key("ABC-2"));
+
+        let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
+        assert!(captured_frames.first().is_some_and(|frame| {
+            frame.contains("old.atlassian.net")
+                && frame.contains("old@example.com")
+                && frame.contains("Stored credential available")
+                && frame.contains("Esc")
+                && frame.contains("cancel")
+        }));
+        assert!(captured_frames.iter().any(|frame| {
+            frame.contains("Connect Tempo")
+                && frame.contains("Stored credential available")
+                && frame.contains("Esc")
+                && frame.contains("back")
+        }));
+        assert!(captured_frames.iter().any(|frame| {
+            frame.contains("✓ Connect Jira") && frame.contains("› Connect Tempo")
+        }));
+        assert!(captured_frames.iter().any(|frame| {
+            frame.contains("old@example.com.updated")
+                && frame.contains("› Connect Jira")
+                && frame.contains("○ Connect Tempo")
+        }));
+        assert!(captured_frames.last().is_some_and(|frame| {
+            frame.contains("old@example.com.updated")
+                && frame.contains("✓ Jira connected")
+                && frame.contains("✓ Tempo connected")
+        }));
+
+        let rendered = format!("{} {}", result.human, result.data);
+        for secret in [
+            "old-jira-token",
+            "old-tempo-token",
+            "replacement-jira-token",
+            "replacement-tempo-token",
+            "old-account",
+            "initial-derived-account",
+            "final-derived-account",
+        ] {
+            assert!(!captured_frames.iter().any(|frame| frame.contains(secret)));
+            assert!(!rendered.contains(secret));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_backtracking_without_edits_does_not_repeat_verification(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            // Complete setup once with retained credentials.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Navigate back to Jira without editing anything.
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            // Continue through the still-connected stages and save.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.account_id.as_deref(), Some("derived-account"));
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| {
+                frame.contains("✓ Connect Jira")
+                    && frame.contains("✓ Connect Tempo")
+                    && frame.contains("continue")
+            }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_backtracking_discards_an_unverified_tempo_token_buffer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            // Reach Save with both stored credentials verified.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Start a replacement, then leave Tempo without verifying it.
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Paste("partial-tempo-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            // Continue through Jira and retain the stored Tempo credential.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(()), Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| {
+                frame.contains("Connect Tempo") && frame.contains("Stored credential available")
+            }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_pending_tempo_back_discards_the_unverified_token_buffer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let before = fs::read(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("partial-tempo-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            // Continue through the still-connected Jira stage, then cancel on Tempo.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            PendingTempoVerifier,
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await
+            .err()
+            .ok_or("pending Tempo setup unexpectedly succeeded")?;
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(fs::read(path)?, before);
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| {
+                frame.contains("Connect Tempo") && frame.contains("Stored credential available")
+            }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_reconfiguration_cancellation_leaves_config_byte_for_byte_unchanged(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let before = fs::read(&path)?;
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(
+                NoopBrowserLauncher,
+                events,
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await
+            .err()
+            .ok_or("reconfiguration unexpectedly saved after cancellation")?;
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(fs::read(path)?, before);
         Ok(())
     }
 
