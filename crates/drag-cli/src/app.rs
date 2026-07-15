@@ -1207,6 +1207,8 @@ mod tests {
 
     struct PendingJiraVerifier;
 
+    struct PendingTempoVerifier;
+
     struct DoctorVerifier {
         jira_result: Mutex<Option<Result<String, VerificationFailure>>>,
         tempo_result: Mutex<Option<Result<(), VerificationFailure>>>,
@@ -1335,6 +1337,24 @@ mod tests {
                     "Tempo verification should not start".to_owned(),
                 ))
             })
+        }
+    }
+
+    impl ConnectionVerifier for PendingTempoVerifier {
+        fn verify_jira<'a>(
+            &'a self,
+            _connection: &'a JiraCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, String> {
+            Box::pin(async { Ok("derived-account".to_owned()) })
+        }
+
+        fn verify_tempo<'a>(
+            &'a self,
+            _connection: &'a TempoCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, ()> {
+            Box::pin(std::future::pending())
         }
     }
 
@@ -2341,6 +2361,112 @@ mod tests {
                 frame.contains("✓ Connect Jira")
                     && frame.contains("✓ Connect Tempo")
                     && frame.contains("continue")
+            }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_backtracking_discards_an_unverified_tempo_token_buffer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            // Reach Save with both stored credentials verified.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Start a replacement, then leave Tempo without verifying it.
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Paste("partial-tempo-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            // Continue through Jira and retain the stored Tempo credential.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(()), Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| {
+                frame.contains("Connect Tempo") && frame.contains("Stored credential available")
+            }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_pending_tempo_back_discards_the_unverified_token_buffer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let before = fs::read(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("partial-tempo-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            // Continue through the still-connected Jira stage, then cancel on Tempo.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            PendingTempoVerifier,
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await
+            .err()
+            .ok_or("pending Tempo setup unexpectedly succeeded")?;
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(fs::read(path)?, before);
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| {
+                frame.contains("Connect Tempo") && frame.contains("Stored credential available")
             }));
         Ok(())
     }

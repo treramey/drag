@@ -463,6 +463,7 @@ where
                 match model.stage {
                     UiStage::Jira => return Err(setup_cancelled()),
                     UiStage::Tempo => {
+                        model.tempo_token.clear();
                         model.stage = UiStage::Jira;
                         model.focus = 0;
                     }
@@ -574,6 +575,7 @@ where
                 };
 
                 let Some(outcome) = outcome else {
+                    model.tempo_token.clear();
                     model.tempo_status = ConnectionStatus::NotConnected;
                     model.stage = UiStage::Jira;
                     model.focus = 0;
