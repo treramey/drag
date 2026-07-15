@@ -53,11 +53,11 @@ pub enum Command {
     /// Connect Jira and Tempo, verify both connections, then save.
     ///
     /// Interactive setup requires terminal-capable stdin and stderr and opens
-    /// Ratatui for Connect Jira, Connect Tempo, and Save. Use Tab and Shift-Tab
-    /// to move and Enter to continue. Escape goes back, or cancels from Connect
-    /// Jira; Ctrl-C cancels from any stage. Use --from-env for unattended setup
-    /// or --no-open to keep token links in the terminal without launching a
-    /// browser.
+    /// Ratatui for Jira account, Tempo account, and Review & save. Use Tab and
+    /// Shift-Tab to move and Enter to continue. Token settings open in your
+    /// browser. Escape goes back, or cancels from Jira account; Ctrl-C cancels
+    /// from any stage. Use --from-env for unattended setup or --no-open to keep
+    /// token URLs in the terminal without launching a browser.
     Setup(SetupArgs),
     /// Manage issue-key aliases.
     Alias {
