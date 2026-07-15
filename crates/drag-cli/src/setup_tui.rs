@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use futures_util::{Stream, StreamExt};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
@@ -22,12 +22,57 @@ use ratatui::{Frame, Terminal};
 use crate::config::normalize_jira_site;
 use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
-    OnboardingWorkflow, SecretInput, SystemBrowserLauncher, TokenPage,
+    OnboardingWorkflow, SecretInput, SystemBrowserLauncher,
 };
 use crate::CliError;
 
 const MIN_TERMINAL_WIDTH: u16 = 84;
 const MIN_TERMINAL_HEIGHT: u16 = 28;
+const MAX_CONTENT_WIDTH: u16 = 100;
+const MAX_FORM_WIDTH: u16 = 80;
+const SPACE_SM: u16 = 1;
+const SPACE_MD: u16 = 2;
+const REVIEW_LABEL_WIDTH: usize = 11;
+
+const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
+
+struct Palette;
+
+impl Palette {
+    const fn primary() -> Style {
+        Style::new().fg(Color::Rgb(116, 39, 127))
+    }
+
+    const fn muted() -> Style {
+        Style::new().fg(Color::Rgb(101, 92, 82))
+    }
+
+    const fn focus() -> Style {
+        Self::primary()
+    }
+
+    const fn action_focus() -> Style {
+        Style::new()
+            .fg(Color::Rgb(243, 239, 230))
+            .bg(Color::Rgb(116, 39, 127))
+    }
+
+    const fn pending() -> Style {
+        Style::new().fg(Color::Yellow)
+    }
+
+    const fn success() -> Style {
+        Style::new().fg(Color::Rgb(0, 121, 133))
+    }
+
+    const fn warning() -> Style {
+        Style::new().fg(Color::Yellow)
+    }
+
+    const fn error() -> Style {
+        Style::new().fg(Color::Red)
+    }
+}
 
 #[cfg(test)]
 const TEST_WIDTH: u16 = 100;
@@ -262,6 +307,8 @@ struct OnboardingModel {
     tempo_instruction: String,
     jira_url: String,
     tempo_url: String,
+    jira_page_can_open: bool,
+    tempo_page_can_open: bool,
     jira_page_loaded: bool,
     tempo_page_loaded: bool,
     jira_status: ConnectionStatus,
@@ -285,6 +332,8 @@ impl OnboardingModel {
             tempo_instruction: String::new(),
             jira_url: String::new(),
             tempo_url: String::new(),
+            jira_page_can_open: false,
+            tempo_page_can_open: false,
             jira_page_loaded: false,
             tempo_page_loaded: false,
             jira_status: ConnectionStatus::NotConnected,
@@ -319,7 +368,6 @@ impl OnboardingModel {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Cancel;
         }
-
         match key.code {
             KeyCode::Esc if self.stage == UiStage::JiraDetails => Action::Cancel,
             KeyCode::Esc => Action::Back,
@@ -334,6 +382,18 @@ impl OnboardingModel {
             KeyCode::BackTab => {
                 self.focus_previous();
                 Action::None
+            }
+            KeyCode::Char('j' | 'J')
+                if self.stage == UiStage::Save
+                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                Action::EditJira
+            }
+            KeyCode::Char('t' | 'T')
+                if self.stage == UiStage::Save
+                    && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT) =>
+            {
+                Action::EditTempo
             }
             KeyCode::Enter => self.activate_or_advance(),
             KeyCode::Backspace => {
@@ -496,6 +556,8 @@ enum Action {
     ConnectJira,
     ConnectTempo,
     Save,
+    EditJira,
+    EditTempo,
     Back,
     Cancel,
 }
@@ -711,6 +773,17 @@ where
                 }
             }
             Action::Save => return Ok(workflow),
+            Action::EditJira => {
+                transition_to(
+                    &mut model,
+                    &mut workflow,
+                    browser_launcher,
+                    UiStage::JiraDetails,
+                )?;
+            }
+            Action::EditTempo => {
+                transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
+            }
         }
     }
 }
@@ -731,39 +804,37 @@ fn enter_stage(
     browser_launcher: &dyn BrowserLauncher,
     stage: UiStage,
 ) -> Result<(), CliError> {
-    let page = match stage {
+    match stage {
         UiStage::JiraToken if !model.jira_page_loaded => {
             let page = workflow.jira_token_page()?;
             model.jira_instruction = page.instruction.to_owned();
             model.jira_url = page.url.to_string();
+            model.jira_page_can_open = page.open_browser;
             model.jira_page_loaded = true;
-            Some(page)
+            present_page(model, browser_launcher, &page);
         }
         UiStage::Tempo if !model.tempo_page_loaded => {
             let page = workflow.tempo_token_page()?;
             model.tempo_instruction = page.instruction.to_owned();
             model.tempo_url = page.url.to_string();
+            model.tempo_page_can_open = page.open_browser;
             model.tempo_page_loaded = true;
-            Some(page)
+            present_page(model, browser_launcher, &page);
         }
-        UiStage::JiraDetails | UiStage::JiraToken | UiStage::Tempo | UiStage::Save => None,
+        UiStage::JiraDetails | UiStage::JiraToken | UiStage::Tempo | UiStage::Save => {}
     };
-
-    if let Some(page) = page {
-        present_page(model, browser_launcher, &page);
-    }
     Ok(())
 }
 
 fn present_page(
     model: &mut OnboardingModel,
     browser_launcher: &dyn BrowserLauncher,
-    page: &TokenPage,
+    page: &crate::setup::TokenPage,
 ) {
     if page.open_browser {
         if let Err(error) = browser_launcher.open(&page.url) {
             model.warning = Some(format!(
-                "Could not open the token page in your browser: {error}. Use the URL shown here."
+                "Could not open token settings: {error}. Use the URL shown below."
             ));
         }
     }
@@ -822,12 +893,22 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
         return;
     }
 
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(3),
+    let [_top_padding, header, body, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(5),
         Constraint::Fill(1),
-        Constraint::Length(3),
+        Constraint::Length(2),
     ])
     .areas(frame.area());
+
+    let header = constrain_content_width(header);
+    let body_width = if model.stage == UiStage::Save {
+        MAX_CONTENT_WIDTH
+    } else {
+        MAX_FORM_WIDTH
+    };
+    let body = constrain_width_left(constrain_content_width(body), body_width);
+    let footer = constrain_content_width(footer);
 
     render_header(frame, header, model);
     match model.stage {
@@ -837,6 +918,48 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
         UiStage::Save => render_save(frame, body, model),
     }
     render_footer(frame, footer, model);
+}
+
+fn constrain_content_width(area: Rect) -> Rect {
+    constrain_width(area, MAX_CONTENT_WIDTH)
+}
+
+fn constrain_width_left(area: Rect, maximum: u16) -> Rect {
+    Rect::new(area.x, area.y, area.width.min(maximum), area.height)
+}
+
+fn constrain_width(area: Rect, maximum: u16) -> Rect {
+    let width = area.width.min(maximum);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y,
+        width,
+        area.height,
+    )
+}
+
+struct FormSpacing {
+    related: u16,
+    section: u16,
+}
+
+const fn form_spacing(area: Rect, spacious_height: u16) -> FormSpacing {
+    if area.height >= spacious_height {
+        FormSpacing {
+            related: SPACE_SM,
+            section: SPACE_MD,
+        }
+    } else if area.height >= 16 {
+        FormSpacing {
+            related: SPACE_SM,
+            section: SPACE_SM,
+        }
+    } else {
+        FormSpacing {
+            related: 0,
+            section: 0,
+        }
+    }
 }
 
 fn render_resize_message(frame: &mut Frame<'_>, area: Rect) {
@@ -865,25 +988,44 @@ fn render_resize_message(frame: &mut Frame<'_>, area: Rect) {
 fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let stages = Line::from(vec![
         stage_span(
-            "Connect Jira",
+            "Jira account",
             matches!(model.stage, UiStage::JiraDetails | UiStage::JiraToken),
             model.jira_status,
         ),
-        "  →  ".dim(),
+        ratatui::text::Span::styled(" ─── ", Palette::muted()),
         stage_span(
-            "Connect Tempo",
+            "Tempo account",
             model.stage == UiStage::Tempo,
             model.tempo_status,
         ),
-        "  →  ".dim(),
+        ratatui::text::Span::styled(" ─── ", Palette::muted()),
         stage_span(
-            "Save",
+            "Review & save",
             model.stage == UiStage::Save,
             ConnectionStatus::NotConnected,
         ),
     ]);
-    let title = Text::from(vec![Line::from("Drag setup").bold(), stages]);
+    let mut title = DRAG_ART
+        .iter()
+        .map(|line| Line::styled(*line, Palette::primary().bold()))
+        .collect::<Vec<_>>();
+    title.push(Line::default());
+    title.push(stages);
+    let title = Text::from(title);
     frame.render_widget(Paragraph::new(title), area);
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version_width = u16::try_from(version.len())
+        .unwrap_or(area.width)
+        .min(area.width);
+    frame.render_widget(
+        Paragraph::new(version).style(Palette::muted()),
+        Rect::new(
+            area.right().saturating_sub(version_width),
+            area.y,
+            version_width,
+            1,
+        ),
+    );
 }
 
 fn stage_span(
@@ -894,49 +1036,71 @@ fn stage_span(
     let text = match status {
         ConnectionStatus::Connected => format!("✓ {label}"),
         ConnectionStatus::Pending => format!("… {label}"),
-        ConnectionStatus::NotConnected if active => format!("› {label}"),
+        ConnectionStatus::NotConnected if active => format!("● {label}"),
         ConnectionStatus::NotConnected => format!("○ {label}"),
     };
-    if status == ConnectionStatus::Connected {
-        text.green().bold()
-    } else if active {
-        text.cyan().bold()
-    } else {
-        text.dim()
-    }
+    let style = match status {
+        ConnectionStatus::Connected => Palette::success().bold(),
+        ConnectionStatus::Pending => Palette::pending().bold(),
+        ConnectionStatus::NotConnected if active => Palette::primary().bold(),
+        ConnectionStatus::NotConnected => Palette::muted(),
+    };
+    ratatui::text::Span::styled(text, style)
 }
 
 fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, hostname, email, action, feedback, _] = Layout::vertical([
+    let spacing = form_spacing(area, 20);
+    let [intro, _, hostname, host_help, _, email, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(spacing.related),
         Constraint::Length(3),
-        Constraint::Length(3),
+        Constraint::Length(spacing.section),
+        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Fill(1),
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new("First, identify the Jira account you want Drag to use."),
+        Paragraph::new(Text::from(vec![
+            Line::from("Connect your Jira account").bold(),
+            Line::from("Enter the Atlassian account Drag should use.").dim(),
+        ])),
         intro,
+    );
+    frame.render_widget(
+        Paragraph::new("Your Atlassian workspace address, for example company.atlassian.net").dim(),
+        host_help,
     );
     render_field(
         frame,
         hostname,
         "Jira site",
         &model.hostname,
-        model.focus == 0,
-        false,
-        false,
+        FieldPresentation {
+            focused: model.focus == 0,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Jira site")),
+            ..FieldPresentation::default()
+        },
     );
     render_field(
         frame,
         email,
         "Atlassian email",
         &model.email,
-        model.focus == 1,
-        false,
-        false,
+        FieldPresentation {
+            focused: model.focus == 1,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Atlassian email")),
+            ..FieldPresentation::default()
+        },
     );
     render_action(
         frame,
@@ -949,35 +1113,46 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
 }
 
 fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, token, url, status, feedback, _] = Layout::vertical([
-        Constraint::Length(2),
+    let fallback_height = if !model.jira_page_can_open || model.warning.is_some() {
+        3
+    } else {
+        0
+    };
+    let [intro, _, token, _, raw_url, _, status, feedback, _] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(3),
-        Constraint::Length(3),
-        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(fallback_height),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Fill(1),
     ])
     .areas(area);
-    frame.render_widget(
-        Paragraph::new("Now create or enter an Atlassian API token, then connect Jira."),
-        intro,
-    );
+    frame.render_widget(Paragraph::new("Connect Jira").bold(), intro);
     render_field(
         frame,
         token,
         "Atlassian API token",
         &model.jira_token,
-        model.focus == 0,
-        true,
-        model.can_retain_jira_token,
+        FieldPresentation {
+            focused: model.focus == 0,
+            masked: true,
+            can_retain_secret: model.can_retain_jira_token,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Atlassian API token")),
+        },
     );
-    frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from(model.jira_instruction.as_str().dim()),
-            Line::from(model.jira_url.as_str().underlined()),
-        ]))
-        .wrap(Wrap { trim: false }),
-        url,
+    render_token_url_fallback(
+        frame,
+        raw_url,
+        &model.jira_instruction,
+        &model.jira_url,
+        model.jira_page_can_open,
+        model.warning.is_some(),
     );
     render_action(
         frame,
@@ -990,41 +1165,47 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
 }
 
 fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, token, url, status, feedback, _] = Layout::vertical([
-        Constraint::Length(2),
+    let fallback_height = if !model.tempo_page_can_open || model.warning.is_some() {
+        3
+    } else {
+        0
+    };
+    let [intro, _, token, _, raw_url, _, status, feedback, _] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(3),
-        Constraint::Length(4),
-        Constraint::Length(3),
+        Constraint::Length(1),
+        Constraint::Length(fallback_height),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Fill(1),
     ])
     .areas(area);
-    frame.render_widget(
-        Paragraph::new("Jira is connected. Add a Tempo API token to continue."),
-        intro,
-    );
+    frame.render_widget(Paragraph::new("Connect Tempo").bold(), intro);
     render_field(
         frame,
         token,
         "Tempo API token",
         &model.tempo_token,
-        model.focus == 0,
-        true,
-        model.can_retain_tempo_token,
+        FieldPresentation {
+            focused: model.focus == 0,
+            masked: true,
+            can_retain_secret: model.can_retain_tempo_token,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Tempo API token")),
+        },
     );
-    let url_text = if let Some((origin, path)) = model.tempo_url.split_once("/plugins") {
-        Text::from(vec![
-            Line::from(model.tempo_instruction.as_str().dim()),
-            Line::from(origin.to_owned().underlined()),
-            Line::from(format!("/plugins{path}").underlined()),
-        ])
-    } else {
-        Text::from(vec![
-            Line::from(model.tempo_instruction.as_str().dim()),
-            Line::from(model.tempo_url.as_str().underlined()),
-        ])
-    };
-    frame.render_widget(Paragraph::new(url_text).wrap(Wrap { trim: false }), url);
+    render_token_url_fallback(
+        frame,
+        raw_url,
+        &model.tempo_instruction,
+        &model.tempo_url,
+        model.tempo_page_can_open,
+        model.warning.is_some(),
+    );
     render_action(
         frame,
         status,
@@ -1035,33 +1216,50 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     render_feedback(frame, feedback, model);
 }
 
+fn render_token_url_fallback(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    instruction: &str,
+    url: &str,
+    can_open: bool,
+    open_failed: bool,
+) {
+    if !can_open || open_failed {
+        frame.render_widget(
+            Paragraph::new(Text::from(vec![
+                Line::from(instruction.dim()),
+                Line::from(url.underlined()),
+            ]))
+            .wrap(Wrap { trim: false }),
+            area,
+        );
+    }
+}
+
 fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, review, action, feedback, _] = Layout::vertical([
+    let side_by_side = area.width >= 96;
+    let manifest_height = if side_by_side { 6 } else { 13 };
+    let [intro, _, manifest, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(7),
-        Constraint::Length(3),
-        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Length(manifest_height),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Fill(1),
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new("Review the non-secret connection details, then save explicitly."),
+        Paragraph::new(Text::from(vec![
+            Line::from("Ready to save").bold(),
+            Line::from("Confirm the Jira account and Tempo workspace DRAG will connect.").dim(),
+        ])),
         intro,
     );
-    let review_text = Text::from(vec![
-        Line::from(vec!["Jira site: ".dim(), model.hostname.as_str().into()]),
-        Line::from(vec!["Atlassian email: ".dim(), model.email.as_str().into()]),
-        Line::from("✓ Jira connected".green()),
-        Line::from("✓ Tempo connected".green()),
-        Line::from("Nothing has been saved yet.".yellow()),
-    ]);
-    frame.render_widget(
-        Paragraph::new(review_text).block(Block::bordered().title(" Review ")),
-        review,
-    );
+    render_connection_manifest(frame, manifest, model, side_by_side);
     render_action(
         frame,
-        action,
+        constrain_width_left(action, 26),
         "Save configuration",
         true,
         ConnectionStatus::Connected,
@@ -1069,36 +1267,157 @@ fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     render_feedback(frame, feedback, model);
 }
 
+fn render_connection_manifest(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OnboardingModel,
+    side_by_side: bool,
+) {
+    let jira_details = || {
+        vec![
+            detail_line("Site", &model.hostname),
+            detail_line("Account", &model.email),
+            Line::default(),
+            edit_line("J", "Edit Jira account"),
+        ]
+    };
+
+    if side_by_side {
+        let [jira, connector, tempo] = Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Length(4),
+            Constraint::Fill(1),
+        ])
+        .areas(area);
+        render_connection_endpoint(frame, jira, "JIRA", jira_details());
+        frame.render_widget(
+            Paragraph::new("──▶")
+                .centered()
+                .style(Palette::primary().bold()),
+            Rect::new(connector.x, connector.y + 2, connector.width, 1),
+        );
+        render_tempo_endpoint(frame, tempo, model);
+    } else {
+        let [jira, connector, tempo] = Layout::vertical([
+            Constraint::Length(6),
+            Constraint::Length(1),
+            Constraint::Length(6),
+        ])
+        .areas(area);
+        render_connection_endpoint(frame, jira, "JIRA", jira_details());
+        frame.render_widget(
+            Paragraph::new("▼")
+                .centered()
+                .style(Palette::primary().bold()),
+            connector,
+        );
+        render_tempo_endpoint(frame, tempo, model);
+    }
+}
+
+fn render_tempo_endpoint(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+    render_connection_endpoint(
+        frame,
+        area,
+        "TEMPO",
+        vec![
+            detail_line("Workspace", &model.hostname),
+            styled_detail_line("Credential", "Verified", Palette::success()),
+            Line::default(),
+            edit_line("T", "Edit Tempo token"),
+        ],
+    );
+}
+
+fn render_connection_endpoint(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    label: &'static str,
+    details: Vec<Line<'_>>,
+) {
+    let title = Line::from(vec![
+        ratatui::text::Span::styled(format!(" {label}  "), Palette::primary().bold()),
+        ratatui::text::Span::styled("✓ connected ", Palette::success()),
+    ]);
+    frame.render_widget(
+        Paragraph::new(Text::from(details)).block(
+            Block::bordered()
+                .title(title)
+                .border_style(Palette::muted()),
+        ),
+        area,
+    );
+}
+
+fn detail_line<'a>(label: &'static str, value: &'a str) -> Line<'a> {
+    styled_detail_line(label, value, Style::new())
+}
+
+fn styled_detail_line<'a>(label: &'static str, value: &'a str, value_style: Style) -> Line<'a> {
+    Line::from(vec![
+        ratatui::text::Span::styled(format!("{label:<REVIEW_LABEL_WIDTH$}"), Palette::muted()),
+        ratatui::text::Span::styled(value, value_style),
+    ])
+}
+
+fn edit_line(shortcut: &'static str, label: &'static str) -> Line<'static> {
+    Line::from(vec![
+        ratatui::text::Span::styled(format!("{shortcut}  "), Palette::primary().bold()),
+        ratatui::text::Span::styled(label, Palette::muted()),
+    ])
+}
+
+#[derive(Default)]
+struct FieldPresentation {
+    focused: bool,
+    masked: bool,
+    can_retain_secret: bool,
+    invalid: bool,
+}
+
 fn render_field(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,
     value: &str,
-    focused: bool,
-    masked: bool,
-    can_retain_secret: bool,
+    presentation: FieldPresentation,
 ) {
-    let display = if masked && value.is_empty() && can_retain_secret {
-        "Stored credential available — leave blank to retain".to_owned()
+    let FieldPresentation {
+        focused,
+        masked,
+        can_retain_secret,
+        invalid,
+    } = presentation;
+    let retained = masked && value.is_empty() && can_retain_secret;
+    let display = if retained {
+        "••••••••••••".to_owned()
     } else if masked {
         "•".repeat(value.chars().count())
     } else {
         value.to_owned()
     };
-    let border_style = if focused {
-        Style::default().cyan()
+    let border_style = if invalid {
+        Palette::error()
+    } else if focused {
+        Palette::focus()
     } else {
-        Style::default()
+        Palette::muted()
     };
-    let title = if focused {
-        format!(" › {label} (focused) ")
+    let title = if invalid {
+        format!(" ✕ {label} (invalid) ")
+    } else if focused && retained {
+        format!(" › {label} (stored) ")
+    } else if focused {
+        format!(" › {label} ")
+    } else if retained {
+        format!(" {label} (stored) ")
     } else {
         format!(" {label} ")
     };
     let block = Block::bordered().title(title).border_style(border_style);
     frame.render_widget(Paragraph::new(display.as_str()).block(block), area);
 
-    if focused && area.width > 2 && !(masked && value.is_empty() && can_retain_secret) {
+    if focused && area.width > 2 && !retained {
         let cursor_offset = display
             .chars()
             .count()
@@ -1114,39 +1433,42 @@ fn render_action(
     focused: bool,
     status: ConnectionStatus,
 ) {
-    let status_text = match status {
+    let focused_action = focused
+        && status != ConnectionStatus::Pending
+        && (status == ConnectionStatus::NotConnected || label == "Save configuration");
+    let text = match status {
         ConnectionStatus::Pending => format!("… Verifying {label}…"),
         ConnectionStatus::Connected if label != "Save configuration" => {
             format!("✓ {label} connected")
         }
-        _ => format!("[ {label} ]"),
+        _ => format!("{label}  →"),
     };
-    let text = if focused {
-        format!("› {status_text} (focused)")
+    let style = if status == ConnectionStatus::Pending {
+        Palette::pending().bold()
+    } else if focused_action {
+        Palette::action_focus().bold()
+    } else if status == ConnectionStatus::Connected {
+        Palette::success().bold()
     } else {
-        status_text
+        Palette::muted()
     };
-    let style = if status == ConnectionStatus::Connected {
-        Style::default().green().bold()
-    } else if focused {
-        Style::default().cyan().bold()
+    let line = if focused_action {
+        Line::from(vec![
+            ratatui::text::Span::styled("▌", Palette::primary().bold()),
+            ratatui::text::Span::styled(format!(" {text} "), style),
+            ratatui::text::Span::styled("▐", Palette::primary().bold()),
+        ])
     } else {
-        Style::default()
+        Line::styled(format!("  {text}"), style)
     };
-    frame.render_widget(
-        Paragraph::new(text)
-            .centered()
-            .style(style)
-            .block(Block::bordered().border_style(style)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let line = if let Some(error) = &model.error {
-        Line::from(format!("Error: {error}")).red()
+        Line::styled(format!("✕ Error: {error}"), Palette::error())
     } else if let Some(warning) = &model.warning {
-        Line::from(format!("Warning: {warning}")).yellow()
+        Line::styled(format!("! Warning: {warning}"), Palette::warning())
     } else {
         Line::default()
     };
@@ -1154,10 +1476,31 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+    if model.stage == UiStage::Save {
+        let footer = Text::from(vec![
+            Line::styled("─".repeat(usize::from(area.width)), Palette::muted()),
+            Line::from(vec![
+                ratatui::text::Span::styled(" J ", Palette::primary().bold()),
+                ratatui::text::Span::styled("edit Jira  ", Palette::muted()),
+                ratatui::text::Span::styled(" T ", Palette::primary().bold()),
+                ratatui::text::Span::styled("edit Tempo  ", Palette::muted()),
+                ratatui::text::Span::styled(" Enter ", Palette::primary().bold()),
+                ratatui::text::Span::styled("save  ", Palette::muted()),
+                ratatui::text::Span::styled(" Esc ", Palette::muted().bold()),
+                ratatui::text::Span::styled("edit Tempo", Palette::muted()),
+            ]),
+        ]);
+        frame.render_widget(Paragraph::new(footer), area);
+        return;
+    }
+
     let action = match model.stage {
+        UiStage::JiraDetails if model.focus < 2 => "next",
         UiStage::JiraDetails => "continue to API token",
         UiStage::JiraToken if model.jira_status == ConnectionStatus::Connected => "continue",
         UiStage::Tempo if model.tempo_status == ConnectionStatus::Connected => "continue",
+        UiStage::JiraToken if model.focus == 0 => "next",
+        UiStage::Tempo if model.focus == 0 => "next",
         UiStage::JiraToken => "connect Jira",
         UiStage::Tempo => "connect Tempo",
         UiStage::Save => "save",
@@ -1167,19 +1510,23 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     } else {
         "back"
     };
-    let footer = Line::from(vec![
-        " Tab ".bold().cyan(),
-        "next  ".dim(),
-        " Shift-Tab ".bold().cyan(),
-        "previous  ".dim(),
-        " Enter ".bold().cyan(),
-        format!("{action}  ").dim(),
-        " Esc ".bold().cyan(),
-        format!("{escape_action}  ").dim(),
-        " Ctrl-C ".bold().cyan(),
-        "cancel".dim(),
+    let mut controls = vec![
+        ratatui::text::Span::styled(" Tab ", Palette::muted().bold()),
+        ratatui::text::Span::styled("next  ", Palette::muted()),
+        ratatui::text::Span::styled(" Shift-Tab ", Palette::muted().bold()),
+        ratatui::text::Span::styled("previous  ", Palette::muted()),
+        ratatui::text::Span::styled(" Enter ", Palette::primary().bold()),
+        ratatui::text::Span::styled(format!("{action}  "), Palette::muted()),
+    ];
+    controls.extend([
+        ratatui::text::Span::styled(" Esc ", Palette::muted().bold()),
+        ratatui::text::Span::styled(format!("{escape_action}  "), Palette::muted()),
     ]);
-    frame.render_widget(Paragraph::new(footer).block(Block::bordered()), area);
+    let footer = Text::from(vec![
+        Line::styled("─".repeat(usize::from(area.width)), Palette::muted()),
+        Line::from(controls),
+    ]);
+    frame.render_widget(Paragraph::new(footer), area);
 }
 
 #[cfg(test)]
@@ -1200,6 +1547,7 @@ fn test_backend_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> Stri
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use super::{
         event_allowed_while_undersized, test_backend_text, Action, ConnectionStatus,
@@ -1216,10 +1564,12 @@ mod tests {
             tempo_token: String::new(),
             can_retain_jira_token: false,
             can_retain_tempo_token: false,
-            jira_instruction: "Create an Atlassian token.".to_owned(),
-            tempo_instruction: String::new(),
+            jira_instruction: "Create or manage your Atlassian API token:".to_owned(),
+            tempo_instruction: "Create or manage your Tempo API token:".to_owned(),
             jira_url: "https://id.atlassian.com/manage-profile/security/api-tokens".to_owned(),
             tempo_url: String::new(),
+            jira_page_can_open: true,
+            tempo_page_can_open: false,
             jira_page_loaded: true,
             tempo_page_loaded: false,
             jira_status: ConnectionStatus::NotConnected,
@@ -1237,6 +1587,175 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height))?;
         terminal.draw(|frame| super::render(frame, model))?;
         Ok(test_backend_text(&terminal))
+    }
+
+    fn rendered_color(
+        model: &OnboardingModel,
+        symbol: &str,
+    ) -> Result<Color, Box<dyn std::error::Error>> {
+        let mut terminal =
+            Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
+        terminal.draw(|frame| super::render(frame, model))?;
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == symbol)
+            .map(|cell| cell.fg)
+            .ok_or_else(|| format!("rendered symbol {symbol:?} was not found").into())
+    }
+
+    #[test]
+    fn supported_terminal_shows_branded_lockup_and_package_version(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut branded = model();
+        for stage in [
+            UiStage::JiraDetails,
+            UiStage::JiraToken,
+            UiStage::Tempo,
+            UiStage::Save,
+        ] {
+            branded.set_stage(stage);
+            let rendered = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &branded)?;
+            assert!(rendered.contains("█▀▄  █▀█  ▄▀█  █▀▀"));
+            assert!(rendered.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        }
+        assert_eq!(rendered_color(&branded, "█")?, Color::Rgb(116, 39, 127));
+        Ok(())
+    }
+
+    #[test]
+    fn focused_action_highlight_wraps_only_its_label() -> Result<(), Box<dyn std::error::Error>> {
+        let mut model = model();
+        model.set_stage(UiStage::JiraDetails);
+        model.focus = 2;
+        let mut terminal =
+            Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
+        terminal.draw(|frame| super::render(frame, &model))?;
+
+        let highlighted = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| cell.bg == Color::Rgb(116, 39, 127))
+            .count();
+        assert!(highlighted > 0);
+        assert!(highlighted < usize::from(super::MAX_CONTENT_WIDTH / 2));
+        Ok(())
+    }
+
+    #[test]
+    fn form_column_shares_the_header_left_edge() -> Result<(), Box<dyn std::error::Error>> {
+        let rendered = render_text(super::TEST_WIDTH, super::TEST_HEIGHT, &model())?;
+        let heading = rendered
+            .lines()
+            .find(|line| line.contains("Connect Jira"))
+            .ok_or("Connect Jira heading was not rendered")?;
+
+        assert!(heading.starts_with("Connect Jira"));
+        Ok(())
+    }
+
+    #[test]
+    fn fields_use_non_color_cues_and_semantic_state_colors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut focused = model();
+        let focused_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(focused_text.contains("Atlassian API token"));
+        assert!(focused_text.contains("› Atlassian API token"));
+        assert_eq!(rendered_color(&focused, "›")?, Color::Rgb(116, 39, 127));
+
+        focused.error = Some("Atlassian API token is required.".to_owned());
+        let invalid_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(invalid_text.contains("✕ Atlassian API token (invalid)"));
+        assert_eq!(rendered_color(&focused, "✕")?, Color::Red);
+
+        focused.error = None;
+        focused.can_retain_jira_token = true;
+        focused.focus = 1;
+        let retained_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(retained_text.contains("Atlassian API token (stored)"));
+        assert!(retained_text.contains("••••"));
+
+        focused.can_retain_jira_token = false;
+        focused.jira_token = "never-render-this-secret".to_owned();
+        let populated_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(populated_text.contains("Atlassian API token"));
+        assert!(populated_text.contains("••••"));
+        assert!(!populated_text.contains("never-render-this-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn actions_use_non_color_cues_and_semantic_status_colors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut model = model();
+        model.jira_status = ConnectionStatus::Pending;
+        let pending = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        assert!(pending.contains("… Verifying Connect Jira…"));
+        assert_eq!(rendered_color(&model, "…")?, Color::Yellow);
+
+        model.jira_status = ConnectionStatus::Connected;
+        let connected = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        assert!(connected.contains("✓ Connect Jira connected"));
+        assert_eq!(rendered_color(&model, "✓")?, Color::Rgb(0, 121, 133));
+        Ok(())
+    }
+
+    #[test]
+    fn review_identifies_both_endpoints_without_an_unsaved_warning(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut review = model();
+        review.set_stage(UiStage::Save);
+        review.hostname = "silvervine.atlassian.net".to_owned();
+        review.email = "person@silvervine.example".to_owned();
+        review.jira_status = ConnectionStatus::Connected;
+        review.tempo_status = ConnectionStatus::Connected;
+
+        let rendered = render_text(super::TEST_WIDTH, super::TEST_HEIGHT, &review)?;
+
+        for expected in [
+            "Ready to save",
+            "JIRA",
+            "TEMPO",
+            "Workspace",
+            "Edit Jira account",
+            "Edit Tempo token",
+            "Save configuration",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing review text: {expected}"
+            );
+        }
+        assert!(!rendered.contains("Nothing has been saved"));
+
+        let narrow = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &review)?;
+        assert!(narrow.contains('▼'));
+        assert!(narrow.contains("Save configuration"));
+        Ok(())
+    }
+
+    #[test]
+    fn review_shortcuts_open_the_requested_connection_stage() {
+        let mut review = model();
+        review.set_stage(UiStage::Save);
+        assert!(matches!(
+            review.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('j'),
+                KeyModifiers::NONE
+            ))),
+            Action::EditJira
+        ));
+        assert!(matches!(
+            review.handle_event(Event::Key(KeyEvent::new(
+                KeyCode::Char('T'),
+                KeyModifiers::SHIFT
+            ))),
+            Action::EditTempo
+        ));
     }
 
     #[test]

@@ -39,11 +39,12 @@ drag setup
 ```
 
 The Ratatui wizard requires terminal-capable standard input and standard error
-and has three stages: **Connect Jira**, **Connect Tempo**, and **Save**. Use Tab
+and has three stages: **Jira account**, **Tempo account**, and **Review & save**. Use Tab
 and Shift-Tab to move between fields and actions, Enter to continue, and Escape
-to return to the previous stage. Escape cancels from Connect Jira; Ctrl-C
+to return to the previous stage. Escape cancels from Jira account details; Ctrl-C
 cancels from any stage, including during a connection check. Cancellation
-never saves configuration. For Jira, enter either a bare hostname such as
+never saves configuration. On Review & save, press J to edit Jira or T to edit
+Tempo before saving. For Jira, enter either a bare hostname such as
 `yourcompany.atlassian.net` or any HTTPS URL from that Jira site. Setup
 verifies Jira and Tempo without blocking keyboard input, then shows a
 non-secret review before anything is saved.
@@ -53,11 +54,10 @@ than 84 columns by 28 rows show a resize instruction until enough space is
 available. Focus, pending, connected, warning, and error states use text and
 symbols as well as color.
 
-Typed and pasted tokens are masked. Each connection stage shows the relevant
-token page and tries to open it in your default browser. Use `drag setup
---no-open` to keep the links in the terminal without launching a browser, such
-as over SSH. A browser error is only a warning; use the displayed link and
-continue.
+Typed and pasted tokens are masked. Each connection stage opens the relevant
+token settings in your default browser. Use `drag setup --no-open` to keep the
+URLs in the terminal without launching a browser, such as over SSH. A browser
+error is only a warning; use the displayed URL and continue.
 
 When reconfiguring, the current Jira site and email are offered as defaults.
 Each saved token can be retained without displaying or copying it. If Jira or

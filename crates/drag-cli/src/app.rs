@@ -1549,9 +1549,11 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Event::Paste("scripted-jira-secret".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Event::Paste("scripted-tempo-secret".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -1576,9 +1578,11 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             // Retain the stored Jira credential.
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             // Retain the stored Tempo credential.
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -2134,7 +2138,6 @@ mod tests {
         session.send("\t\r")?;
         let jira_output = session.expect("Tempo API token")?;
         assert!(!String::from_utf8_lossy(jira_output.before()).contains("pty-jira-secret"));
-        session.expect("api-integration")?;
         send_paste(&mut session, "pty-tempo-secret")?;
         session.send("\t\r")?;
         let tempo_output = session.expect("Save configuration")?;
@@ -2274,7 +2277,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         session.get_process_mut().set_window_size(100, 30)?;
         session
-            .expect("Jira site (focused)")
+            .expect("Connect your Jira account")
             .map_err(|error| format!("waiting for restored Jira stage: {error}"))?;
         session
             .expect("example.atlassian.net")
@@ -2461,7 +2464,10 @@ mod tests {
             "person@example.com",
             ATLASSIAN_TOKEN_URL,
             "api-integration",
-            "Nothing has been saved yet",
+            "Ready to save",
+            "Workspace",
+            "Edit Jira account",
+            "Edit Tempo token",
         ] {
             assert!(frames.contains(visible), "missing rendered text: {visible}");
         }
@@ -2510,6 +2516,7 @@ mod tests {
                     Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                     Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
                     Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
                     Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
                 ],
                 Arc::clone(&frames),
@@ -2543,7 +2550,7 @@ mod tests {
         }));
         assert!(frames
             .iter()
-            .any(|frame| frame.contains(ATLASSIAN_TOKEN_URL)));
+            .any(|frame| frame.contains("Connect Jira") && frame.contains("••••")));
         Ok(())
     }
 
@@ -2605,8 +2612,7 @@ mod tests {
             .map_err(|_| "test frame lock poisoned")?
             .last()
             .is_some_and(|frame| {
-                frame.contains("Stored credential available")
-                    && !frame.contains("unverified-jira-token")
+                frame.contains("••••") && !frame.contains("unverified-jira-token")
             }));
         Ok(())
     }
@@ -2637,6 +2643,7 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Reject an empty replacement before retrying Jira authentication.
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Paste("rejected-jira-token".to_owned()),
@@ -2646,6 +2653,7 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Tempo also validates locally and retries in place.
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Paste("rejected-tempo-token".to_owned()),
@@ -2756,7 +2764,7 @@ mod tests {
             );
         }
         assert!(captured_frames.iter().any(|frame| {
-            frame.contains("Could not connect to Tempo") && frame.contains("✓ Connect Jira")
+            frame.contains("Could not connect to Tempo") && frame.contains("✓ Jira account")
         }));
         let site_error = captured_frames
             .iter()
@@ -3013,30 +3021,31 @@ mod tests {
             frame.contains("old.atlassian.net")
                 && frame.contains("old@example.com")
                 && frame.contains("Continue to API token")
-                && !frame.contains("Stored credential available")
+                && !frame.contains("••••")
         }));
-        assert!(captured_frames.iter().any(|frame| {
-            frame.contains(ATLASSIAN_TOKEN_URL) && frame.contains("Stored credential available")
-        }));
+        assert!(captured_frames
+            .iter()
+            .any(|frame| { frame.contains("Connect Jira") && frame.contains("••••") }));
         assert!(captured_frames.iter().any(|frame| {
             frame.contains("Connect Tempo")
                 && frame.contains("old.atlassian.net.updated")
-                && frame.contains("Stored credential available")
+                && frame.contains("••••")
                 && frame.contains("Esc")
                 && frame.contains("back")
         }));
         assert!(captured_frames.iter().any(|frame| {
-            frame.contains("✓ Connect Jira") && frame.contains("› Connect Tempo")
+            frame.contains("✓ Jira account") && frame.contains("● Tempo account")
         }));
         assert!(captured_frames.iter().any(|frame| {
             frame.contains("old@example.com.updated")
-                && frame.contains("› Connect Jira")
-                && frame.contains("○ Connect Tempo")
+                && frame.contains("● Jira account")
+                && frame.contains("○ Tempo account")
         }));
         assert!(captured_frames.last().is_some_and(|frame| {
             frame.contains("old@example.com.updated")
-                && frame.contains("✓ Jira connected")
-                && frame.contains("✓ Tempo connected")
+                && frame.contains("JIRA")
+                && frame.contains("TEMPO")
+                && frame.matches("✓ connected").count() == 2
         }));
         assert_eq!(
             browser_state
@@ -3078,8 +3087,10 @@ mod tests {
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Complete setup once with retained credentials.
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Navigate back to Jira without editing anything.
@@ -3128,8 +3139,8 @@ mod tests {
             .map_err(|_| "test frame lock poisoned")?
             .iter()
             .any(|frame| {
-                frame.contains("✓ Connect Jira")
-                    && frame.contains("✓ Connect Tempo")
+                frame.contains("✓ Jira account")
+                    && frame.contains("✓ Tempo account")
                     && frame.contains("continue")
             }));
         Ok(())
@@ -3183,9 +3194,7 @@ mod tests {
             .lock()
             .map_err(|_| "test frame lock poisoned")?
             .iter()
-            .any(|frame| {
-                frame.contains("Connect Tempo") && frame.contains("Stored credential available")
-            }));
+            .any(|frame| { frame.contains("Connect Tempo") && frame.contains("••••") }));
         Ok(())
     }
 
@@ -3233,9 +3242,7 @@ mod tests {
             .lock()
             .map_err(|_| "test frame lock poisoned")?
             .iter()
-            .any(|frame| {
-                frame.contains("Connect Tempo") && frame.contains("Stored credential available")
-            }));
+            .any(|frame| { frame.contains("Connect Tempo") && frame.contains("••••") }));
         Ok(())
     }
 
