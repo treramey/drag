@@ -502,6 +502,7 @@ impl<'a> OnboardingWorkflow<'a> {
             .await
         {
             Ok(account_id) => {
+                self.jira_token = Some(setup_credentials.atlassian_token.clone());
                 self.setup_credentials = Some(setup_credentials);
                 self.account_id = Some(account_id);
                 self.stage = OnboardingStage::Tempo;
@@ -536,12 +537,25 @@ impl<'a> OnboardingWorkflow<'a> {
             .await
         {
             Ok(()) => {
+                self.tempo_token = Some(setup_credentials.tempo_token.clone());
                 self.stage = OnboardingStage::Complete;
                 Ok(ConnectionOutcome::Connected)
             }
             Err(error @ CliError::Authentication(_)) => Ok(ConnectionOutcome::Rejected(error)),
             Err(error) => Err(error),
         }
+    }
+
+    pub(crate) fn back_to_jira(&mut self) -> Result<(), CliError> {
+        self.require_stage(OnboardingStage::Tempo)?;
+        self.stage = OnboardingStage::Jira;
+        Ok(())
+    }
+
+    pub(crate) fn back_to_tempo(&mut self) -> Result<(), CliError> {
+        self.require_stage(OnboardingStage::Complete)?;
+        self.stage = OnboardingStage::Tempo;
+        Ok(())
     }
 
     pub(crate) fn finish(self) -> Result<Credentials, CliError> {
