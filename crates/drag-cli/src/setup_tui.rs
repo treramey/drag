@@ -28,6 +28,9 @@ use crate::CliError;
 
 const MIN_TERMINAL_WIDTH: u16 = 84;
 const MIN_TERMINAL_HEIGHT: u16 = 28;
+const MAX_CONTENT_WIDTH: u16 = 100;
+const SPACE_SM: u16 = 1;
+const SPACE_MD: u16 = 2;
 
 const DRAG_ART: [&str; 5] = [
     "██████  ██████   █████   ██████",
@@ -870,6 +873,10 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
     ])
     .areas(frame.area());
 
+    let header = constrain_content_width(header);
+    let body = constrain_content_width(body);
+    let footer = constrain_content_width(footer);
+
     render_header(frame, header, model);
     match model.stage {
         UiStage::JiraDetails => render_jira_details(frame, body, model),
@@ -878,6 +885,26 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
         UiStage::Save => render_save(frame, body, model),
     }
     render_footer(frame, footer, model);
+}
+
+fn constrain_content_width(area: Rect) -> Rect {
+    let width = area.width.min(MAX_CONTENT_WIDTH);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y,
+        width,
+        area.height,
+    )
+}
+
+const fn form_gap(area: Rect) -> u16 {
+    if area.height >= 20 {
+        SPACE_MD
+    } else if area.height >= 16 {
+        SPACE_SM
+    } else {
+        0
+    }
 }
 
 fn render_resize_message(frame: &mut Frame<'_>, area: Rect) {
@@ -967,10 +994,14 @@ fn stage_span(
 }
 
 fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, hostname, email, action, feedback, _] = Layout::vertical([
+    let gap = form_gap(area);
+    let [intro, _, hostname, _, email, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(gap),
         Constraint::Length(3),
+        Constraint::Length(gap),
         Constraint::Length(3),
+        Constraint::Length(gap),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
@@ -1019,10 +1050,14 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
 }
 
 fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, token, url, status, feedback, _] = Layout::vertical([
+    let gap = form_gap(area);
+    let [intro, _, token, _, url, _, status, feedback, _] = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(gap),
         Constraint::Length(3),
+        Constraint::Length(gap),
         Constraint::Length(3),
+        Constraint::Length(gap),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
@@ -1066,10 +1101,14 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
 }
 
 fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, token, url, status, feedback, _] = Layout::vertical([
+    let gap = form_gap(area);
+    let [intro, _, token, _, url, _, status, feedback, _] = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(gap),
         Constraint::Length(3),
+        Constraint::Length(gap),
         Constraint::Length(4),
+        Constraint::Length(gap),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
@@ -1118,9 +1157,12 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
 }
 
 fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, review, action, feedback, _] = Layout::vertical([
+    let gap = form_gap(area);
+    let [intro, _, review, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
+        Constraint::Length(gap),
         Constraint::Length(7),
+        Constraint::Length(gap),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
