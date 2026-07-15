@@ -5,7 +5,12 @@ lcov.info
 
 # Local agent tooling
 /.pi/
+/.agents/
 /VENT.md
+/skills-lock.json
+
+# Local manual QA helpers
+/scripts/manual-qa-setup.sh
 
 # IDE and editor files
 /.idea/
