@@ -30,8 +30,8 @@ use crate::onboarding::{
     SecretInput, SetupPrompter, TerminalSetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::onboarding::{
-    ConnectionVerifier, LineOnboardingSession, OnboardingOutcome, OnboardingSession,
-    OnboardingWorkflow, RemoteConnectionVerifier, SetupCredentials,
+    ConnectionVerifier, LineOnboardingSession, OnboardingSession, OnboardingWorkflow,
+    RemoteConnectionVerifier, SetupCredentials,
 };
 use crate::{CliError, Rendered, EXIT_USAGE};
 
@@ -370,7 +370,7 @@ impl App {
             self.debug,
             open_browser,
         );
-        let OnboardingOutcome::Save(credentials) = self.onboarding_session.run(workflow).await?;
+        let credentials = self.onboarding_session.run(workflow).await?.finish()?;
         let data = json!({
             "configured": true,
             "path": self.path,
@@ -1076,9 +1076,8 @@ mod tests {
 
     use super::{
         normalize_jira_site, App, BrowserLauncher, Config, ConnectionOutcome, ConnectionVerifier,
-        JiraCredentials, OnboardingFuture, OnboardingOutcome, OnboardingSession,
-        OnboardingWorkflow, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
-        VerificationFuture, ATLASSIAN_TOKEN_URL,
+        JiraCredentials, OnboardingFuture, OnboardingSession, OnboardingWorkflow, SecretInput,
+        SetupCredentials, SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
     use crate::cli::{DoctorArgs, SetupArgs};
     use crate::CliError;
@@ -1199,6 +1198,8 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
     }
 
+    struct IncompleteOnboardingSession;
+
     struct DoctorVerifier {
         jira_result: Mutex<Option<Result<String, VerificationFailure>>>,
         tempo_result: Mutex<Option<Result<(), VerificationFailure>>>,
@@ -1252,8 +1253,18 @@ mod tests {
                     .lock()
                     .map_err(|_| CliError::Api("test session lock was poisoned".to_owned()))?
                     .push("save".to_owned());
-                Ok(OnboardingOutcome::Save(workflow.finish()?))
+                Ok(workflow)
             })
+        }
+    }
+
+    impl OnboardingSession for IncompleteOnboardingSession {
+        fn is_terminal(&self) -> bool {
+            true
+        }
+
+        fn run<'a>(&'a self, workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a> {
+            Box::pin(async move { Ok(workflow) })
         }
     }
 
@@ -1953,6 +1964,41 @@ mod tests {
                 .map_err(|_| "test session lock was poisoned")?
                 .as_slice(),
             ["jira-browser:false", "tempo-browser:false", "save"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn incomplete_onboarding_session_cannot_save_credentials(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let initial = existing_config();
+        initial.save(&path)?;
+        let before = fs::read(&path)?;
+        let app = App::with_onboarding_session(
+            path.clone(),
+            FakeVerifier {
+                jira_error: None,
+                tempo_error: None,
+                tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+                config_update: None,
+            },
+            IncompleteOnboardingSession,
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await
+            .err()
+            .ok_or("incomplete onboarding unexpectedly succeeded")?;
+
+        assert_eq!(
+            (error.to_string(), fs::read(path)?),
+            ("invalid onboarding workflow state".to_owned(), before)
         );
         Ok(())
     }

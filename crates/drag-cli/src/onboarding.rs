@@ -16,7 +16,7 @@ const TEMPO_TOKEN_PATH: &str =
 pub(crate) type VerificationFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
 pub(crate) type OnboardingFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<OnboardingOutcome, CliError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<OnboardingWorkflow<'a>, CliError>> + Send + 'a>>;
 
 pub(crate) trait ConnectionVerifier: Send + Sync {
     fn verify_jira<'a>(
@@ -224,10 +224,6 @@ pub(crate) trait OnboardingSession: Send + Sync {
     fn run<'a>(&'a self, workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a>;
 }
 
-pub(crate) enum OnboardingOutcome {
-    Save(Credentials),
-}
-
 pub(crate) struct LineOnboardingSession {
     prompter: Box<dyn SetupPrompter>,
     browser_launcher: Box<dyn BrowserLauncher>,
@@ -252,10 +248,10 @@ impl LineOnboardingSession {
         }
     }
 
-    async fn run_workflow(
-        &self,
-        mut workflow: OnboardingWorkflow<'_>,
-    ) -> Result<OnboardingOutcome, CliError> {
+    async fn run_workflow<'a>(
+        &'a self,
+        mut workflow: OnboardingWorkflow<'a>,
+    ) -> Result<OnboardingWorkflow<'a>, CliError> {
         self.prompter.message(
             "Connect Jira, connect Tempo, then save. Nothing is saved until both connections succeed.",
         )?;
@@ -292,7 +288,7 @@ impl LineOnboardingSession {
         }
 
         self.prompter.message("\nSave")?;
-        Ok(OnboardingOutcome::Save(workflow.finish()?))
+        Ok(workflow)
     }
 
     fn present_token_page(&self, page: &TokenPage) -> Result<(), CliError> {
