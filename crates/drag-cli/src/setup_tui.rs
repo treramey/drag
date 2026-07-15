@@ -14,7 +14,7 @@ use crossterm::terminal::{
 use futures_util::{Stream, StreamExt};
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
@@ -28,6 +28,46 @@ use crate::CliError;
 
 const MIN_TERMINAL_WIDTH: u16 = 84;
 const MIN_TERMINAL_HEIGHT: u16 = 28;
+
+const DRAG_ART: [&str; 5] = [
+    "██████  ██████   █████   ██████",
+    "██   ██ ██   ██ ██   ██ ██",
+    "██   ██ ██████  ███████ ██   ███",
+    "██   ██ ██   ██ ██   ██ ██    ██",
+    "██████  ██   ██ ██   ██  ██████",
+];
+
+struct Palette;
+
+impl Palette {
+    const fn primary() -> Style {
+        Style::new().fg(Color::Cyan)
+    }
+
+    const fn muted() -> Style {
+        Style::new().fg(Color::Gray)
+    }
+
+    const fn focus() -> Style {
+        Style::new().fg(Color::Cyan)
+    }
+
+    const fn pending() -> Style {
+        Style::new().fg(Color::Yellow)
+    }
+
+    const fn success() -> Style {
+        Style::new().fg(Color::Green)
+    }
+
+    const fn warning() -> Style {
+        Style::new().fg(Color::Yellow)
+    }
+
+    const fn error() -> Style {
+        Style::new().fg(Color::Red)
+    }
+}
 
 #[cfg(test)]
 const TEST_WIDTH: u16 = 100;
@@ -823,7 +863,7 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
     }
 
     let [header, body, footer] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(8),
         Constraint::Fill(1),
         Constraint::Length(3),
     ])
@@ -869,20 +909,39 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
             matches!(model.stage, UiStage::JiraDetails | UiStage::JiraToken),
             model.jira_status,
         ),
-        "  →  ".dim(),
+        ratatui::text::Span::styled("  →  ", Palette::muted()),
         stage_span(
             "Connect Tempo",
             model.stage == UiStage::Tempo,
             model.tempo_status,
         ),
-        "  →  ".dim(),
+        ratatui::text::Span::styled("  →  ", Palette::muted()),
         stage_span(
             "Save",
             model.stage == UiStage::Save,
             ConnectionStatus::NotConnected,
         ),
     ]);
-    let title = Text::from(vec![Line::from("Drag setup").bold(), stages]);
+    let mut title = DRAG_ART
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut spans = vec![ratatui::text::Span::styled(
+                *line,
+                Palette::primary().bold(),
+            )];
+            if index == 0 {
+                spans.push(ratatui::text::Span::styled(
+                    format!("  v{}", env!("CARGO_PKG_VERSION")),
+                    Palette::muted(),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect::<Vec<_>>();
+    title.push(Line::default());
+    title.push(stages);
+    let title = Text::from(title);
     frame.render_widget(Paragraph::new(title), area);
 }
 
@@ -897,13 +956,13 @@ fn stage_span(
         ConnectionStatus::NotConnected if active => format!("› {label}"),
         ConnectionStatus::NotConnected => format!("○ {label}"),
     };
-    if status == ConnectionStatus::Connected {
-        text.green().bold()
-    } else if active {
-        text.cyan().bold()
-    } else {
-        text.dim()
-    }
+    let style = match status {
+        ConnectionStatus::Connected => Palette::success().bold(),
+        ConnectionStatus::Pending => Palette::pending().bold(),
+        ConnectionStatus::NotConnected if active => Palette::primary().bold(),
+        ConnectionStatus::NotConnected => Palette::muted(),
+    };
+    ratatui::text::Span::styled(text, style)
 }
 
 fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
@@ -925,18 +984,28 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
         hostname,
         "Jira site",
         &model.hostname,
-        model.focus == 0,
-        false,
-        false,
+        FieldPresentation {
+            focused: model.focus == 0,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Jira site")),
+            ..FieldPresentation::default()
+        },
     );
     render_field(
         frame,
         email,
         "Atlassian email",
         &model.email,
-        model.focus == 1,
-        false,
-        false,
+        FieldPresentation {
+            focused: model.focus == 1,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Atlassian email")),
+            ..FieldPresentation::default()
+        },
     );
     render_action(
         frame,
@@ -967,9 +1036,15 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
         token,
         "Atlassian API token",
         &model.jira_token,
-        model.focus == 0,
-        true,
-        model.can_retain_jira_token,
+        FieldPresentation {
+            focused: model.focus == 0,
+            masked: true,
+            can_retain_secret: model.can_retain_jira_token,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Atlassian API token")),
+        },
     );
     frame.render_widget(
         Paragraph::new(Text::from(vec![
@@ -1008,9 +1083,15 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         token,
         "Tempo API token",
         &model.tempo_token,
-        model.focus == 0,
-        true,
-        model.can_retain_tempo_token,
+        FieldPresentation {
+            focused: model.focus == 0,
+            masked: true,
+            can_retain_secret: model.can_retain_tempo_token,
+            invalid: model
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("Tempo API token")),
+        },
     );
     let url_text = if let Some((origin, path)) = model.tempo_url.split_once("/plugins") {
         Text::from(vec![
@@ -1051,9 +1132,9 @@ fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let review_text = Text::from(vec![
         Line::from(vec!["Jira site: ".dim(), model.hostname.as_str().into()]),
         Line::from(vec!["Atlassian email: ".dim(), model.email.as_str().into()]),
-        Line::from("✓ Jira connected".green()),
-        Line::from("✓ Tempo connected".green()),
-        Line::from("Nothing has been saved yet.".yellow()),
+        Line::styled("✓ Jira connected", Palette::success()),
+        Line::styled("✓ Tempo connected", Palette::success()),
+        Line::styled("! Nothing has been saved yet.", Palette::warning()),
     ]);
     frame.render_widget(
         Paragraph::new(review_text).block(Block::bordered().title(" Review ")),
@@ -1069,36 +1150,59 @@ fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     render_feedback(frame, feedback, model);
 }
 
+#[derive(Default)]
+struct FieldPresentation {
+    focused: bool,
+    masked: bool,
+    can_retain_secret: bool,
+    invalid: bool,
+}
+
 fn render_field(
     frame: &mut Frame<'_>,
     area: Rect,
     label: &str,
     value: &str,
-    focused: bool,
-    masked: bool,
-    can_retain_secret: bool,
+    presentation: FieldPresentation,
 ) {
-    let display = if masked && value.is_empty() && can_retain_secret {
+    let FieldPresentation {
+        focused,
+        masked,
+        can_retain_secret,
+        invalid,
+    } = presentation;
+    let retained = masked && value.is_empty() && can_retain_secret;
+    let display = if retained {
         "Stored credential available — leave blank to retain".to_owned()
     } else if masked {
         "•".repeat(value.chars().count())
     } else {
         value.to_owned()
     };
-    let border_style = if focused {
-        Style::default().cyan()
+    let border_style = if invalid {
+        Palette::error()
+    } else if focused {
+        Palette::focus()
+    } else if retained {
+        Palette::warning()
     } else {
-        Style::default()
+        Palette::muted()
     };
-    let title = if focused {
+    let title = if invalid {
+        format!(" ✕ {label} (invalid) ")
+    } else if focused {
         format!(" › {label} (focused) ")
+    } else if retained {
+        format!(" ◇ {label} (stored) ")
+    } else if !value.is_empty() {
+        format!(" ● {label} ")
     } else {
-        format!(" {label} ")
+        format!(" ○ {label} ")
     };
     let block = Block::bordered().title(title).border_style(border_style);
     frame.render_widget(Paragraph::new(display.as_str()).block(block), area);
 
-    if focused && area.width > 2 && !(masked && value.is_empty() && can_retain_secret) {
+    if focused && area.width > 2 && !retained {
         let cursor_offset = display
             .chars()
             .count()
@@ -1126,12 +1230,14 @@ fn render_action(
     } else {
         status_text
     };
-    let style = if status == ConnectionStatus::Connected {
-        Style::default().green().bold()
+    let style = if status == ConnectionStatus::Pending {
+        Palette::pending().bold()
+    } else if status == ConnectionStatus::Connected {
+        Palette::success().bold()
     } else if focused {
-        Style::default().cyan().bold()
+        Palette::focus().bold()
     } else {
-        Style::default()
+        Palette::muted()
     };
     frame.render_widget(
         Paragraph::new(text)
@@ -1144,9 +1250,9 @@ fn render_action(
 
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let line = if let Some(error) = &model.error {
-        Line::from(format!("Error: {error}")).red()
+        Line::styled(format!("✕ Error: {error}"), Palette::error())
     } else if let Some(warning) = &model.warning {
-        Line::from(format!("Warning: {warning}")).yellow()
+        Line::styled(format!("! Warning: {warning}"), Palette::warning())
     } else {
         Line::default()
     };
@@ -1168,16 +1274,16 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         "back"
     };
     let footer = Line::from(vec![
-        " Tab ".bold().cyan(),
-        "next  ".dim(),
-        " Shift-Tab ".bold().cyan(),
-        "previous  ".dim(),
-        " Enter ".bold().cyan(),
-        format!("{action}  ").dim(),
-        " Esc ".bold().cyan(),
-        format!("{escape_action}  ").dim(),
-        " Ctrl-C ".bold().cyan(),
-        "cancel".dim(),
+        ratatui::text::Span::styled(" Tab ", Palette::primary().bold()),
+        ratatui::text::Span::styled("next  ", Palette::muted()),
+        ratatui::text::Span::styled(" Shift-Tab ", Palette::primary().bold()),
+        ratatui::text::Span::styled("previous  ", Palette::muted()),
+        ratatui::text::Span::styled(" Enter ", Palette::primary().bold()),
+        ratatui::text::Span::styled(format!("{action}  "), Palette::muted()),
+        ratatui::text::Span::styled(" Esc ", Palette::primary().bold()),
+        ratatui::text::Span::styled(format!("{escape_action}  "), Palette::muted()),
+        ratatui::text::Span::styled(" Ctrl-C ", Palette::primary().bold()),
+        ratatui::text::Span::styled("cancel", Palette::muted()),
     ]);
     frame.render_widget(Paragraph::new(footer).block(Block::bordered()), area);
 }
@@ -1200,6 +1306,7 @@ fn test_backend_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> Stri
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
 
     use super::{
         event_allowed_while_undersized, test_backend_text, Action, ConnectionStatus,
@@ -1237,6 +1344,80 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height))?;
         terminal.draw(|frame| super::render(frame, model))?;
         Ok(test_backend_text(&terminal))
+    }
+
+    fn rendered_color(
+        model: &OnboardingModel,
+        symbol: &str,
+    ) -> Result<Color, Box<dyn std::error::Error>> {
+        let mut terminal =
+            Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
+        terminal.draw(|frame| super::render(frame, model))?;
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .find(|cell| cell.symbol() == symbol)
+            .map(|cell| cell.fg)
+            .ok_or_else(|| format!("rendered symbol {symbol:?} was not found").into())
+    }
+
+    #[test]
+    fn supported_terminal_shows_branded_lockup_and_package_version(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let rendered = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model())?;
+
+        assert!(rendered.contains("██████  ██████   █████   ██████"));
+        assert!(rendered.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert_eq!(rendered_color(&model(), "█")?, Color::Cyan);
+        Ok(())
+    }
+
+    #[test]
+    fn fields_use_non_color_cues_and_semantic_state_colors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut focused = model();
+        let focused_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(focused_text.contains("› Atlassian API token (focused)"));
+        assert_eq!(rendered_color(&focused, "›")?, Color::Cyan);
+
+        focused.error = Some("Atlassian API token is required.".to_owned());
+        let invalid_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(invalid_text.contains("✕ Atlassian API token (invalid)"));
+        assert_eq!(rendered_color(&focused, "✕")?, Color::Red);
+
+        focused.error = None;
+        focused.can_retain_jira_token = true;
+        focused.focus = 1;
+        let retained_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(retained_text.contains("◇ Atlassian API token (stored)"));
+        assert!(retained_text.contains("leave blank to retain"));
+        assert_eq!(rendered_color(&focused, "◇")?, Color::Yellow);
+
+        focused.can_retain_jira_token = false;
+        focused.jira_token = "never-render-this-secret".to_owned();
+        let populated_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
+        assert!(populated_text.contains("● Atlassian API token"));
+        assert!(populated_text.contains("••••"));
+        assert!(!populated_text.contains("never-render-this-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn actions_use_non_color_cues_and_semantic_status_colors(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut model = model();
+        model.jira_status = ConnectionStatus::Pending;
+        let pending = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        assert!(pending.contains("… Verifying Connect Jira…"));
+        assert_eq!(rendered_color(&model, "…")?, Color::Yellow);
+
+        model.jira_status = ConnectionStatus::Connected;
+        let connected = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        assert!(connected.contains("✓ Connect Jira connected"));
+        assert_eq!(rendered_color(&model, "✓")?, Color::Green);
+        Ok(())
     }
 
     #[test]
