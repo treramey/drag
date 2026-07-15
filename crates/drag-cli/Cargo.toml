@@ -36,6 +36,7 @@ webbrowser = { version = "1.2", features = ["hardened"] }
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
+tokio = { version = "1", features = ["test-util"] }
 rpassword = "7.4"
 tempfile = "3.20"
 

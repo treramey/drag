@@ -14,12 +14,15 @@ use crossterm::terminal::{
 };
 use futures_util::{Stream, StreamExt};
 use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use tachyonfx::{fx, CellFilter, Effect, Interpolation};
+use tachyonfx::{
+    color_from_hsl, color_to_hsl, fx, CellFilter, Effect, Interpolatable, Interpolation, SimpleRng,
+};
 
 use crate::config::normalize_jira_site;
 use crate::setup::{
@@ -36,13 +39,24 @@ const SPACE_SM: u16 = 1;
 const SPACE_MD: u16 = 2;
 const REVIEW_LABEL_WIDTH: usize = 11;
 const REDUCED_MOTION_ENV: &str = "DRAG_REDUCED_MOTION";
-const ENTRANCE_TICK_RATE: Duration = Duration::from_millis(40);
+const ANIMATION_TICK_RATE: Duration = Duration::from_millis(40);
+const PLAYFUL_FRAME_RATE: Duration = Duration::from_millis(80);
+const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
+const ANIMATION_RNG_SEED: u32 = 0x4452_4147;
 const ENTRANCE_DURATION_MS: u32 = 240;
 const REDUCED_MOTION_DURATION_MS: u32 = 140;
 const PRIMARY_COLOR: Color = Color::Rgb(116, 39, 127);
 const MUTED_COLOR: Color = Color::Rgb(101, 92, 82);
+const SUCCESS_COLOR: Color = Color::Rgb(0, 121, 133);
 
 const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const REVIEW_CONNECTOR_FRAMES: [&str; 4] = ["•  ▶", "─• ▶", "──•▶", "──▶ "];
+const REVIEW_CONNECTOR_VERTICAL_FRAMES: [&str; 4] = ["·", "•", "▼", "▼"];
+const STAGE_SEPARATOR: &str = " ─── ";
+const STAGE_SEPARATOR_WIDTH: u16 = 5;
+// Mirrors Exabind's selected-category perimeter pace without animating field content.
+const FOCUS_BORDER_CELLS_PER_SECOND: f32 = 30.0;
 
 struct Palette;
 
@@ -68,7 +82,7 @@ impl Palette {
     }
 
     const fn success() -> Style {
-        Style::new().fg(Color::Rgb(0, 121, 133))
+        Style::new().fg(SUCCESS_COLOR)
     }
 
     const fn warning() -> Style {
@@ -116,21 +130,26 @@ struct ScriptedSession {
 
 struct AnimationTicker {
     state: Option<(tokio::time::Interval, tokio::time::Instant)>,
+    active: bool,
 }
 
 impl AnimationTicker {
     fn terminal() -> Self {
-        let start = tokio::time::Instant::now() + ENTRANCE_TICK_RATE;
-        let mut interval = tokio::time::interval_at(start, ENTRANCE_TICK_RATE);
+        let start = tokio::time::Instant::now() + ANIMATION_TICK_RATE;
+        let mut interval = tokio::time::interval_at(start, ANIMATION_TICK_RATE);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         Self {
             state: Some((interval, tokio::time::Instant::now())),
+            active: false,
         }
     }
 
     #[cfg(test)]
     const fn disabled() -> Self {
-        Self { state: None }
+        Self {
+            state: None,
+            active: false,
+        }
     }
 
     async fn tick(&mut self) -> Duration {
@@ -144,6 +163,23 @@ impl AnimationTicker {
             }
             None => std::future::pending().await,
         }
+    }
+
+    fn restart(&mut self) {
+        let Some((interval, previous_tick)) = self.state.as_mut() else {
+            return;
+        };
+        let now = tokio::time::Instant::now();
+        *interval = tokio::time::interval_at(now + ANIMATION_TICK_RATE, ANIMATION_TICK_RATE);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        *previous_tick = now;
+    }
+
+    fn set_active(&mut self, active: bool) {
+        if active && !self.active {
+            self.restart();
+        }
+        self.active = active;
     }
 }
 
@@ -355,13 +391,13 @@ enum ConnectionStatus {
     Connected,
 }
 
-struct EntranceAnimation {
+struct BufferAnimation {
     effect: Option<Effect>,
     elapsed: Duration,
 }
 
-impl EntranceAnimation {
-    fn new(reduced_motion: bool) -> Self {
+impl BufferAnimation {
+    fn entrance(reduced_motion: bool) -> Self {
         let effect = if reduced_motion {
             fx::fade_from_fg(
                 MUTED_COLOR,
@@ -373,10 +409,42 @@ impl EntranceAnimation {
             ]))
         } else {
             fx::coalesce((ENTRANCE_DURATION_MS, Interpolation::CubicOut))
+                .with_rng(SimpleRng::new(ANIMATION_RNG_SEED))
                 .with_filter(CellFilter::Text)
         };
         Self {
             effect: Some(effect),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    fn connection(reduced_motion: bool) -> Self {
+        let effect = if reduced_motion {
+            fx::fade_from_fg(
+                MUTED_COLOR,
+                (REDUCED_MOTION_DURATION_MS, Interpolation::CubicOut),
+            )
+            .with_filter(CellFilter::FgColor(SUCCESS_COLOR))
+        } else {
+            fx::coalesce((ENTRANCE_DURATION_MS, Interpolation::CubicOut))
+                .with_rng(SimpleRng::new(ANIMATION_RNG_SEED))
+                .with_filter(CellFilter::Text)
+        };
+        Self {
+            effect: Some(effect),
+            elapsed: Duration::ZERO,
+        }
+    }
+
+    fn reduced_connector() -> Self {
+        Self {
+            effect: Some(
+                fx::fade_from_fg(
+                    MUTED_COLOR,
+                    (REDUCED_MOTION_DURATION_MS, Interpolation::CubicOut),
+                )
+                .with_filter(CellFilter::FgColor(PRIMARY_COLOR)),
+            ),
             elapsed: Duration::ZERO,
         }
     }
@@ -408,13 +476,85 @@ impl EntranceAnimation {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConnectedService {
+    Jira,
+    Tempo,
+}
+
+struct ConnectionAnimation {
+    service: ConnectedService,
+    buffer: BufferAnimation,
+}
+
+struct ReviewConnectorAnimation {
+    progress: Duration,
+    reduced_fade: Option<BufferAnimation>,
+}
+
+impl ReviewConnectorAnimation {
+    fn new(reduced_motion: bool) -> Self {
+        Self {
+            progress: Duration::ZERO,
+            reduced_fade: reduced_motion.then(BufferAnimation::reduced_connector),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        self.reduced_fade.as_ref().map_or(
+            self.progress < Duration::from_millis(ENTRANCE_DURATION_MS.into()),
+            |fade| fade.is_active(),
+        )
+    }
+
+    fn advance(&mut self, elapsed: Duration) {
+        if let Some(fade) = self.reduced_fade.as_mut() {
+            fade.advance(elapsed);
+        } else {
+            self.progress += elapsed;
+        }
+    }
+
+    fn frame(&self, side_by_side: bool) -> &'static str {
+        if self.reduced_fade.is_some() {
+            return if side_by_side { "──▶" } else { "▼" };
+        }
+        let frame = (self.progress.as_millis() / PLAYFUL_FRAME_RATE.as_millis())
+            .min((REVIEW_CONNECTOR_FRAMES.len() - 1) as u128) as usize;
+        if side_by_side {
+            REVIEW_CONNECTOR_FRAMES[frame]
+        } else {
+            REVIEW_CONNECTOR_VERTICAL_FRAMES[frame]
+        }
+    }
+
+    fn render_reduced(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        if let Some(fade) = self.reduced_fade.as_mut() {
+            fade.render(frame, area);
+        }
+    }
+
+    fn complete(&mut self) {
+        self.progress = Duration::from_millis(ENTRANCE_DURATION_MS.into());
+        if let Some(fade) = self.reduced_fade.as_mut() {
+            fade.complete();
+        }
+    }
+}
+
 enum OnboardingEvent {
     Terminal(Event),
     Tick(Duration),
 }
 
 struct OnboardingModel {
-    entrance_animation: EntranceAnimation,
+    entrance_animation: BufferAnimation,
+    connection_animation: Option<ConnectionAnimation>,
+    review_connector_animation: Option<ReviewConnectorAnimation>,
+    pending_animation_elapsed: Duration,
+    focus_border_elapsed: Duration,
+    cursor_blink_elapsed: Duration,
+    reduced_motion: bool,
     stage: UiStage,
     focus: usize,
     hostname: String,
@@ -440,7 +580,13 @@ struct OnboardingModel {
 impl OnboardingModel {
     fn new(workflow: &OnboardingWorkflow<'_>, reduced_motion: bool) -> Self {
         Self {
-            entrance_animation: EntranceAnimation::new(reduced_motion),
+            entrance_animation: BufferAnimation::entrance(reduced_motion),
+            connection_animation: None,
+            review_connector_animation: None,
+            pending_animation_elapsed: Duration::ZERO,
+            focus_border_elapsed: Duration::ZERO,
+            cursor_blink_elapsed: Duration::ZERO,
+            reduced_motion,
             stage: UiStage::JiraDetails,
             focus: 0,
             hostname: workflow.hostname_default().unwrap_or_default().to_owned(),
@@ -468,15 +614,112 @@ impl OnboardingModel {
         match event {
             OnboardingEvent::Tick(elapsed) => {
                 self.entrance_animation.advance(elapsed);
+                if let Some(animation) = self.connection_animation.as_mut() {
+                    animation.buffer.advance(elapsed);
+                }
+                if let Some(animation) = self.review_connector_animation.as_mut() {
+                    animation.advance(elapsed);
+                }
+                if self.connection_pending() {
+                    self.pending_animation_elapsed += elapsed;
+                }
+                if self.focus_border_animation_active() {
+                    self.focus_border_elapsed += elapsed;
+                }
+                if self.cursor_blink_animation_active() {
+                    self.cursor_blink_elapsed += elapsed;
+                }
                 Action::None
             }
             OnboardingEvent::Terminal(event) => {
                 if matches!(event, Event::Key(_)) {
                     self.entrance_animation.complete();
+                    if let Some(animation) = self.connection_animation.as_mut() {
+                        animation.buffer.complete();
+                    }
+                    if let Some(animation) = self.review_connector_animation.as_mut() {
+                        animation.complete();
+                    }
                 }
                 self.handle_event(event)
             }
         }
+    }
+
+    fn animations_active(&self) -> bool {
+        self.entrance_animation.is_active()
+            || self
+                .connection_animation
+                .as_ref()
+                .is_some_and(|animation| animation.buffer.is_active())
+            || self
+                .review_connector_animation
+                .as_ref()
+                .is_some_and(ReviewConnectorAnimation::is_active)
+            || (!self.reduced_motion && self.connection_pending())
+            || self.focus_border_animation_active()
+            || self.cursor_blink_animation_active()
+    }
+
+    fn focus_border_animation_active(&self) -> bool {
+        !self.reduced_motion && self.text_input_focused()
+    }
+
+    fn cursor_blink_animation_active(&self) -> bool {
+        !self.reduced_motion && self.text_input_focused()
+    }
+
+    fn text_input_focused(&self) -> bool {
+        matches!(
+            (self.stage, self.focus),
+            (UiStage::JiraDetails, 0 | 1) | (UiStage::JiraToken | UiStage::Tempo, 0)
+        )
+    }
+
+    fn cursor_visible(&self) -> bool {
+        self.reduced_motion
+            || (self.cursor_blink_elapsed.as_millis() / CURSOR_BLINK_HALF_PERIOD.as_millis())
+                .is_multiple_of(2)
+    }
+
+    fn reset_cursor_blink(&mut self) {
+        self.cursor_blink_elapsed = Duration::ZERO;
+    }
+
+    fn connection_pending(&self) -> bool {
+        self.jira_status == ConnectionStatus::Pending
+            || self.tempo_status == ConnectionStatus::Pending
+    }
+
+    fn start_pending_animation(&mut self) {
+        self.pending_animation_elapsed = Duration::ZERO;
+    }
+
+    fn pending_symbol(&self) -> &'static str {
+        if self.reduced_motion || !self.connection_pending() {
+            return "…";
+        }
+        let frame = (self.pending_animation_elapsed.as_millis() / PLAYFUL_FRAME_RATE.as_millis())
+            % SPINNER_FRAMES.len() as u128;
+        SPINNER_FRAMES[frame as usize]
+    }
+
+    fn start_connection_animation(&mut self, service: ConnectedService) {
+        self.connection_animation = Some(ConnectionAnimation {
+            service,
+            buffer: BufferAnimation::connection(self.reduced_motion),
+        });
+    }
+
+    fn start_review_connector_animation(&mut self) {
+        self.review_connector_animation = Some(ReviewConnectorAnimation::new(self.reduced_motion));
+    }
+
+    fn review_connector(&self, side_by_side: bool) -> &'static str {
+        self.review_connector_animation.as_ref().map_or_else(
+            || if side_by_side { "──▶" } else { "▼" },
+            |animation| animation.frame(side_by_side),
+        )
     }
 
     fn handle_event(&mut self, event: Event) -> Action {
@@ -495,12 +738,14 @@ impl OnboardingModel {
     fn set_stage(&mut self, stage: UiStage) {
         self.stage = stage;
         self.focus = 0;
+        self.reset_cursor_blink();
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Action {
         if !matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
             return Action::None;
         }
+        self.reset_cursor_blink();
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Action::Cancel;
         }
@@ -561,10 +806,12 @@ impl OnboardingModel {
 
     fn focus_next(&mut self) {
         self.focus = (self.focus + 1) % self.focus_count();
+        self.reset_cursor_blink();
     }
 
     fn focus_previous(&mut self) {
         self.focus = (self.focus + self.focus_count() - 1) % self.focus_count();
+        self.reset_cursor_blink();
     }
 
     fn focused_input_mut(&mut self) -> Option<&mut String> {
@@ -586,6 +833,7 @@ impl OnboardingModel {
     }
 
     fn input_changed(&mut self) {
+        self.reset_cursor_blink();
         match self.stage {
             UiStage::JiraDetails | UiStage::JiraToken => {
                 self.jira_status = ConnectionStatus::NotConnected;
@@ -721,7 +969,7 @@ where
         let event = next_onboarding_event(
             events,
             animation_ticker,
-            model.entrance_animation.is_active() && !undersized,
+            model.animations_active() && !undersized,
         )
         .await?;
         if let OnboardingEvent::Terminal(terminal_event) = &event {
@@ -787,6 +1035,8 @@ where
                 model.error = None;
                 model.jira_status = ConnectionStatus::Pending;
                 model.tempo_status = ConnectionStatus::NotConnected;
+                model.start_pending_animation();
+                animation_ticker.restart();
                 draw(terminal, &mut model, &mut observe)?;
 
                 let hostname = model.hostname.clone();
@@ -817,6 +1067,10 @@ where
                                 }
                                 draw(terminal, &mut model, &mut observe)?;
                             }
+                            elapsed = animation_ticker.tick(), if !undersized => {
+                                model.handle_onboarding_event(OnboardingEvent::Tick(elapsed));
+                                draw(terminal, &mut model, &mut observe)?;
+                            }
                         }
                     }
                 };
@@ -830,6 +1084,8 @@ where
                         model.email = workflow.email_default().unwrap_or_default().to_owned();
                         model.tempo_page_loaded = false;
                         model.warning = None;
+                        model.start_connection_animation(ConnectedService::Jira);
+                        animation_ticker.restart();
                         transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
@@ -854,6 +1110,8 @@ where
 
                 model.error = None;
                 model.tempo_status = ConnectionStatus::Pending;
+                model.start_pending_animation();
+                animation_ticker.restart();
                 draw(terminal, &mut model, &mut observe)?;
 
                 let token = if model.tempo_token.is_empty() && model.can_retain_tempo_token {
@@ -883,6 +1141,10 @@ where
                                 }
                                 draw(terminal, &mut model, &mut observe)?;
                             }
+                            elapsed = animation_ticker.tick(), if !undersized => {
+                                model.handle_onboarding_event(OnboardingEvent::Tick(elapsed));
+                                draw(terminal, &mut model, &mut observe)?;
+                            }
                         }
                     }
                 };
@@ -905,6 +1167,9 @@ where
                         model.tempo_token.clear();
                         model.can_retain_tempo_token = true;
                         model.warning = None;
+                        model.start_connection_animation(ConnectedService::Tempo);
+                        model.start_review_connector_animation();
+                        animation_ticker.restart();
                         transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Save)?;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
@@ -1000,6 +1265,7 @@ async fn next_onboarding_event<S>(
 where
     S: Stream<Item = io::Result<Event>> + Unpin,
 {
+    animation_ticker.set_active(animation_active);
     if !animation_active {
         return next_event(events).await.map(OnboardingEvent::Terminal);
     }
@@ -1032,6 +1298,11 @@ where
     B::Error: BackendFailure,
     O: FnMut(&Terminal<B>) -> Result<(), CliError>,
 {
+    // Keep the hardware cursor hidden so animated diffs cannot expose the backend's
+    // intermediate cursor moves. `render_field` draws the model-driven caret instead.
+    terminal
+        .hide_cursor()
+        .map_err(BackendFailure::into_cli_error)?;
     terminal
         .draw(|frame| render_animated(frame, model))
         .map_err(BackendFailure::into_cli_error)?;
@@ -1052,14 +1323,41 @@ const fn size_is_undersized(width: u16, height: u16) -> bool {
 }
 
 fn render_animated(frame: &mut Frame<'_>, model: &mut OnboardingModel) {
-    let Some(header) = render(frame, model) else {
+    let Some(areas) = render(frame, model) else {
         return;
     };
-    let brand = Rect::new(header.x, header.y, header.width, 2);
-    model.entrance_animation.render(frame, brand);
+    model.entrance_animation.render(frame, areas.brand);
+    if let Some(animation) = model.connection_animation.as_mut() {
+        let area = match animation.service {
+            ConnectedService::Jira => areas.jira_status,
+            ConnectedService::Tempo => areas.tempo_status,
+        };
+        animation.buffer.render(frame, area);
+    }
+    if let (Some(animation), Some(connector)) = (
+        model.review_connector_animation.as_mut(),
+        areas.review_connector,
+    ) {
+        animation.render_reduced(frame, connector);
+    }
+    if let Some(focused_input) = areas.focused_input {
+        render_focus_border(
+            frame.buffer_mut(),
+            focused_input,
+            model.focus_border_elapsed,
+        );
+    }
 }
 
-fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<Rect> {
+struct AnimatedAreas {
+    brand: Rect,
+    jira_status: Rect,
+    tempo_status: Rect,
+    review_connector: Option<Rect>,
+    focused_input: Option<Rect>,
+}
+
+fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<AnimatedAreas> {
     if frame.area().width < MIN_TERMINAL_WIDTH || frame.area().height < MIN_TERMINAL_HEIGHT {
         render_resize_message(frame, frame.area());
         return None;
@@ -1082,15 +1380,33 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<Rect> {
     let body = constrain_width_left(constrain_content_width(body), body_width);
     let footer = constrain_content_width(footer);
 
-    render_header(frame, header, model);
-    match model.stage {
-        UiStage::JiraDetails => render_jira_details(frame, body, model),
-        UiStage::JiraToken => render_jira_token(frame, body, model),
-        UiStage::Tempo => render_tempo(frame, body, model),
-        UiStage::Save => render_save(frame, body, model),
-    }
+    let header_areas = render_header(frame, header, model);
+    let (review_connector, focused_input) = match model.stage {
+        UiStage::JiraDetails => {
+            let focused_input = render_jira_details(frame, body, model);
+            (None, focused_input)
+        }
+        UiStage::JiraToken => {
+            let focused_input = render_jira_token(frame, body, model);
+            (None, focused_input)
+        }
+        UiStage::Tempo => {
+            let focused_input = render_tempo(frame, body, model);
+            (None, focused_input)
+        }
+        UiStage::Save => (Some(render_save(frame, body, model)), None),
+    };
     render_footer(frame, footer, model);
-    Some(header)
+    Some(AnimatedAreas {
+        brand: Rect::new(header.x, header.y, header.width, 2),
+        jira_status: header_areas.jira_status,
+        tempo_status: header_areas.tempo_status,
+        review_connector,
+        focused_input: model
+            .focus_border_animation_active()
+            .then_some(focused_input)
+            .flatten(),
+    })
 }
 
 fn constrain_content_width(area: Rect) -> Rect {
@@ -1158,24 +1474,37 @@ fn render_resize_message(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+struct HeaderAnimatedAreas {
+    jira_status: Rect,
+    tempo_status: Rect,
+}
+
+fn render_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &OnboardingModel,
+) -> HeaderAnimatedAreas {
+    let pending_symbol = model.pending_symbol();
     let stages = Line::from(vec![
         stage_span(
             "Jira account",
             matches!(model.stage, UiStage::JiraDetails | UiStage::JiraToken),
             model.jira_status,
+            pending_symbol,
         ),
-        ratatui::text::Span::styled(" ─── ", Palette::muted()),
+        ratatui::text::Span::styled(STAGE_SEPARATOR, Palette::muted()),
         stage_span(
             "Tempo account",
             model.stage == UiStage::Tempo,
             model.tempo_status,
+            pending_symbol,
         ),
-        ratatui::text::Span::styled(" ─── ", Palette::muted()),
+        ratatui::text::Span::styled(STAGE_SEPARATOR, Palette::muted()),
         stage_span(
             "Review & save",
             model.stage == UiStage::Save,
             ConnectionStatus::NotConnected,
+            pending_symbol,
         ),
     ]);
     let mut title = DRAG_ART
@@ -1199,16 +1528,28 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
             1,
         ),
     );
+    let jira_width = u16::try_from("Jira account".len() + 2).unwrap_or(area.width);
+    let tempo_width = u16::try_from("Tempo account".len() + 2).unwrap_or(area.width);
+    HeaderAnimatedAreas {
+        jira_status: Rect::new(area.x, area.y + 3, jira_width, 1),
+        tempo_status: Rect::new(
+            area.x + jira_width + STAGE_SEPARATOR_WIDTH,
+            area.y + 3,
+            tempo_width,
+            1,
+        ),
+    }
 }
 
 fn stage_span(
     label: &'static str,
     active: bool,
     status: ConnectionStatus,
+    pending_symbol: &str,
 ) -> ratatui::text::Span<'static> {
     let text = match status {
         ConnectionStatus::Connected => format!("✓ {label}"),
-        ConnectionStatus::Pending => format!("… {label}"),
+        ConnectionStatus::Pending => format!("{pending_symbol} {label}"),
         ConnectionStatus::NotConnected if active => format!("● {label}"),
         ConnectionStatus::NotConnected => format!("○ {label}"),
     };
@@ -1221,7 +1562,7 @@ fn stage_span(
     ratatui::text::Span::styled(text, style)
 }
 
-fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
     let spacing = form_spacing(area, 20);
     let [intro, _, hostname, host_help, _, email, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
@@ -1254,6 +1595,7 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
         &model.hostname,
         FieldPresentation {
             focused: model.focus == 0,
+            cursor_visible: model.cursor_visible(),
             invalid: model
                 .error
                 .as_deref()
@@ -1268,6 +1610,7 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
         &model.email,
         FieldPresentation {
             focused: model.focus == 1,
+            cursor_visible: model.cursor_visible(),
             invalid: model
                 .error
                 .as_deref()
@@ -1281,11 +1624,17 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
         "Continue to API token",
         model.focus == 2,
         ConnectionStatus::NotConnected,
+        model.pending_symbol(),
     );
     render_feedback(frame, feedback, model);
+    match model.focus {
+        0 => Some(hostname),
+        1 => Some(email),
+        _ => None,
+    }
 }
 
-fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
     let fallback_height = if !model.jira_page_can_open || model.warning.is_some() {
         3
     } else {
@@ -1311,6 +1660,7 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
         &model.jira_token,
         FieldPresentation {
             focused: model.focus == 0,
+            cursor_visible: model.cursor_visible(),
             masked: true,
             can_retain_secret: model.can_retain_jira_token,
             invalid: model
@@ -1333,11 +1683,13 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
         "Connect Jira",
         model.focus == 1,
         model.jira_status,
+        model.pending_symbol(),
     );
     render_feedback(frame, feedback, model);
+    (model.focus == 0).then_some(token)
 }
 
-fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
     let fallback_height = if !model.tempo_page_can_open || model.warning.is_some() {
         3
     } else {
@@ -1363,6 +1715,7 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         &model.tempo_token,
         FieldPresentation {
             focused: model.focus == 0,
+            cursor_visible: model.cursor_visible(),
             masked: true,
             can_retain_secret: model.can_retain_tempo_token,
             invalid: model
@@ -1385,8 +1738,10 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         "Connect Tempo",
         model.focus == 1,
         model.tempo_status,
+        model.pending_symbol(),
     );
     render_feedback(frame, feedback, model);
+    (model.focus == 0).then_some(token)
 }
 
 fn render_token_url_fallback(
@@ -1409,7 +1764,7 @@ fn render_token_url_fallback(
     }
 }
 
-fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Rect {
     let side_by_side = area.width >= 96;
     let manifest_height = if side_by_side { 6 } else { 13 };
     let [intro, _, manifest, _, action, feedback, _] = Layout::vertical([
@@ -1429,15 +1784,17 @@ fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         ])),
         intro,
     );
-    render_connection_manifest(frame, manifest, model, side_by_side);
+    let connector = render_connection_manifest(frame, manifest, model, side_by_side);
     render_action(
         frame,
         constrain_width_left(action, 26),
         "Save configuration",
         true,
         ConnectionStatus::Connected,
+        model.pending_symbol(),
     );
     render_feedback(frame, feedback, model);
+    connector
 }
 
 fn render_connection_manifest(
@@ -1445,7 +1802,7 @@ fn render_connection_manifest(
     area: Rect,
     model: &OnboardingModel,
     side_by_side: bool,
-) {
+) -> Rect {
     let jira_details = || {
         vec![
             detail_line("Site", &model.hostname),
@@ -1463,13 +1820,15 @@ fn render_connection_manifest(
         ])
         .areas(area);
         render_connection_endpoint(frame, jira, "JIRA", jira_details());
+        let connector = Rect::new(connector.x, connector.y + 2, connector.width, 1);
         frame.render_widget(
-            Paragraph::new("──▶")
+            Paragraph::new(model.review_connector(true))
                 .centered()
                 .style(Palette::primary().bold()),
-            Rect::new(connector.x, connector.y + 2, connector.width, 1),
+            connector,
         );
         render_tempo_endpoint(frame, tempo, model);
+        connector
     } else {
         let [jira, connector, tempo] = Layout::vertical([
             Constraint::Length(6),
@@ -1479,12 +1838,13 @@ fn render_connection_manifest(
         .areas(area);
         render_connection_endpoint(frame, jira, "JIRA", jira_details());
         frame.render_widget(
-            Paragraph::new("▼")
+            Paragraph::new(model.review_connector(false))
                 .centered()
                 .style(Palette::primary().bold()),
             connector,
         );
         render_tempo_endpoint(frame, tempo, model);
+        connector
     }
 }
 
@@ -1543,6 +1903,7 @@ fn edit_line(shortcut: &'static str, label: &'static str) -> Line<'static> {
 #[derive(Default)]
 struct FieldPresentation {
     focused: bool,
+    cursor_visible: bool,
     masked: bool,
     can_retain_secret: bool,
     invalid: bool,
@@ -1557,6 +1918,7 @@ fn render_field(
 ) {
     let FieldPresentation {
         focused,
+        cursor_visible,
         masked,
         can_retain_secret,
         invalid,
@@ -1590,13 +1952,114 @@ fn render_field(
     let block = Block::bordered().title(title).border_style(border_style);
     frame.render_widget(Paragraph::new(display.as_str()).block(block), area);
 
-    if focused && area.width > 2 && !retained {
+    if focused && cursor_visible && area.width > 2 && !retained {
         let cursor_offset = display
             .chars()
             .count()
             .min(usize::from(area.width.saturating_sub(3))) as u16;
-        frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, area.y + 1));
+        if let Some(cell) = frame
+            .buffer_mut()
+            .cell_mut(Position::new(area.x + 1 + cursor_offset, area.y + 1))
+        {
+            cell.set_style(Style::new().reversed());
+        }
     }
+}
+
+fn render_focus_border(buffer: &mut Buffer, area: Rect, elapsed: Duration) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let phase = (elapsed.as_secs_f32() * FOCUS_BORDER_CELLS_PER_SECOND) as usize;
+    let mut border_index = 0;
+
+    for x in area.x..area.right() {
+        tint_focus_border_cell(buffer, Position::new(x, area.y), phase + border_index);
+        border_index += 1;
+    }
+    for y in area.y + 1..area.bottom() - 1 {
+        tint_focus_border_cell(
+            buffer,
+            Position::new(area.right() - 1, y),
+            phase + border_index,
+        );
+        border_index += 1;
+    }
+    for x in (area.x..area.right()).rev() {
+        tint_focus_border_cell(
+            buffer,
+            Position::new(x, area.bottom() - 1),
+            phase + border_index,
+        );
+        border_index += 1;
+    }
+    for y in (area.y + 1..area.bottom() - 1).rev() {
+        tint_focus_border_cell(buffer, Position::new(area.x, y), phase + border_index);
+        border_index += 1;
+    }
+}
+
+fn tint_focus_border_cell(buffer: &mut Buffer, position: Position, color_index: usize) {
+    let Some(cell) = buffer.cell_mut(position) else {
+        return;
+    };
+    if matches!(
+        cell.symbol(),
+        "─" | "│" | "┌" | "┐" | "└" | "┘" | "━" | "┃" | "┏" | "┓" | "┗" | "┛"
+    ) {
+        cell.set_fg(focus_border_color(color_index));
+    }
+}
+
+fn focus_border_color(index: usize) -> Color {
+    let (hue, saturation, lightness) = color_to_hsl(&PRIMARY_COLOR);
+    let stops = [
+        (4, color_from_hsl(hue, saturation, 40.0)),
+        (2, color_from_hsl(hue, saturation, 80.0)),
+        (
+            4,
+            color_from_hsl(
+                (hue - 25.0).rem_euclid(360.0),
+                saturation,
+                (lightness + 10.0).min(100.0),
+            ),
+        ),
+        (
+            7,
+            color_from_hsl(
+                hue,
+                (saturation - 20.0).max(0.0),
+                (lightness + 10.0).min(100.0),
+            ),
+        ),
+        (
+            7,
+            color_from_hsl(
+                (hue + 25.0).rem_euclid(360.0),
+                saturation,
+                (lightness + 10.0).min(100.0),
+            ),
+        ),
+        (
+            7,
+            color_from_hsl(
+                hue,
+                (saturation + 20.0).min(100.0),
+                (lightness + 10.0).min(100.0),
+            ),
+        ),
+    ];
+    let cycle_length = stops.iter().map(|(length, _)| length).sum::<usize>();
+    let mut offset = index % cycle_length;
+    let mut previous = PRIMARY_COLOR;
+    for (length, target) in stops {
+        if offset < length {
+            return previous.lerp(&target, offset as f32 / length as f32);
+        }
+        offset -= length;
+        previous = target;
+    }
+    PRIMARY_COLOR
 }
 
 fn render_action(
@@ -1605,12 +2068,13 @@ fn render_action(
     label: &str,
     focused: bool,
     status: ConnectionStatus,
+    pending_symbol: &str,
 ) {
     let focused_action = focused
         && status != ConnectionStatus::Pending
         && (status == ConnectionStatus::NotConnected || label == "Save configuration");
     let text = match status {
-        ConnectionStatus::Pending => format!("… Verifying {label}…"),
+        ConnectionStatus::Pending => format!("{pending_symbol} Verifying {label}…"),
         ConnectionStatus::Connected if label != "Save configuration" => {
             format!("✓ {label} connected")
         }
@@ -1720,16 +2184,16 @@ fn test_backend_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> Stri
 mod tests {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Modifier};
 
     use super::{
         event_allowed_while_undersized, reduced_motion_value, test_backend_text, Action,
-        ConnectionStatus, EntranceAnimation, OnboardingEvent, OnboardingModel, Terminal, UiStage,
+        BufferAnimation, ConnectionStatus, OnboardingEvent, OnboardingModel, Terminal, UiStage,
         DRAG_ART, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
     };
 
-    const fn inactive_animation() -> EntranceAnimation {
-        EntranceAnimation {
+    const fn inactive_animation() -> BufferAnimation {
+        BufferAnimation {
             effect: None,
             elapsed: std::time::Duration::ZERO,
         }
@@ -1738,6 +2202,12 @@ mod tests {
     fn model() -> OnboardingModel {
         OnboardingModel {
             entrance_animation: inactive_animation(),
+            connection_animation: None,
+            review_connector_animation: None,
+            pending_animation_elapsed: std::time::Duration::ZERO,
+            focus_border_elapsed: std::time::Duration::ZERO,
+            cursor_blink_elapsed: std::time::Duration::ZERO,
+            reduced_motion: false,
             stage: UiStage::JiraToken,
             focus: 0,
             hostname: String::new(),
@@ -1764,7 +2234,7 @@ mod tests {
     #[test]
     fn ticks_advance_the_model_owned_entrance_animation() {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::new(false);
+        model.entrance_animation = BufferAnimation::entrance(false);
 
         assert!(matches!(
             model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(
@@ -1779,16 +2249,51 @@ mod tests {
         assert!(model.entrance_animation.is_active());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn reactivated_ticker_excludes_time_spent_inactive() {
+        let mut ticker = super::AnimationTicker::terminal();
+        ticker.set_active(true);
+        tokio::time::advance(super::ANIMATION_TICK_RATE).await;
+        assert_eq!(ticker.tick().await, super::ANIMATION_TICK_RATE);
+
+        ticker.set_active(false);
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        ticker.set_active(true);
+        tokio::time::advance(super::ANIMATION_TICK_RATE).await;
+
+        assert_eq!(ticker.tick().await, super::ANIMATION_TICK_RATE);
+    }
+
+    #[test]
+    fn independently_constructed_reveals_render_identical_frames(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut first = model();
+        first.entrance_animation = BufferAnimation::entrance(false);
+        first.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
+
+        let mut second = model();
+        second.entrance_animation = BufferAnimation::entrance(false);
+        second
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
+
+        assert_eq!(
+            render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut first)?,
+            render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut second)?
+        );
+        Ok(())
+    }
+
     #[test]
     fn entrance_frames_are_deterministic_without_wall_clock_time(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::new(false);
+        model.entrance_animation = BufferAnimation::entrance(false);
         let initial = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
 
         model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
         let intermediate =
             render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
+        let active_at_midpoint = model.entrance_animation.is_active();
 
         model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
         let completed = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
@@ -1796,7 +2301,7 @@ mod tests {
         assert!(initial.contains("Connect Jira"));
         assert!(initial.contains("● Jira account"));
         assert_ne!(initial, intermediate);
-        assert_ne!(intermediate, completed);
+        assert!(active_at_midpoint);
         let outside_brand = |frame: &str| {
             frame
                 .lines()
@@ -1817,7 +2322,7 @@ mod tests {
     #[test]
     fn key_input_completes_the_animation_and_keeps_its_normal_behavior() {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::new(false);
+        model.entrance_animation = BufferAnimation::entrance(false);
         model.set_stage(UiStage::JiraDetails);
 
         let action = model.handle_onboarding_event(OnboardingEvent::Terminal(Event::Key(
@@ -1887,11 +2392,26 @@ mod tests {
             .ok_or_else(|| format!("rendered symbol {symbol:?} was not found").into())
     }
 
+    fn rendered_cursor_cells(
+        model: &mut OnboardingModel,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut terminal =
+            Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
+        terminal.draw(|frame| super::render_animated(frame, model))?;
+        Ok(terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
+            .count())
+    }
+
     #[test]
     fn reduced_motion_uses_a_short_color_only_brand_transition(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::new(true);
+        model.entrance_animation = BufferAnimation::entrance(true);
 
         assert_eq!(
             rendered_animation_color(&mut model, "█")?,
@@ -2007,13 +2527,147 @@ mod tests {
         let mut model = model();
         model.jira_status = ConnectionStatus::Pending;
         let pending = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
-        assert!(pending.contains("… Verifying Connect Jira…"));
-        assert_eq!(rendered_color(&model, "…")?, Color::Yellow);
+        assert!(pending.contains("⠋ Verifying Connect Jira…"));
+        assert_eq!(rendered_color(&model, "⠋")?, Color::Yellow);
 
         model.jira_status = ConnectionStatus::Connected;
         let connected = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
         assert!(connected.contains("✓ Connect Jira connected"));
         assert_eq!(rendered_color(&model, "✓")?, Color::Rgb(0, 121, 133));
+        Ok(())
+    }
+
+    #[test]
+    fn pending_spinner_advances_after_two_animation_ticks() {
+        let mut pending = model();
+        pending.jira_status = ConnectionStatus::Pending;
+        pending.start_pending_animation();
+
+        assert_eq!(pending.pending_symbol(), "⠋");
+        pending
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(40)));
+        assert_eq!(pending.pending_symbol(), "⠋");
+        pending
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(40)));
+        assert_eq!(pending.pending_symbol(), "⠙");
+    }
+
+    #[test]
+    fn reduced_motion_keeps_pending_indicator_static() {
+        let mut pending = model();
+        pending.reduced_motion = true;
+        pending.jira_status = ConnectionStatus::Pending;
+        pending.start_pending_animation();
+        pending
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(240)));
+
+        assert_eq!(pending.pending_symbol(), "…");
+    }
+
+    #[test]
+    fn focused_input_border_cycles_around_the_field() -> Result<(), Box<dyn std::error::Error>> {
+        let mut focused = model();
+
+        let initial = rendered_animation_color(&mut focused, "└")?;
+        focused
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(80)));
+        let advanced = rendered_animation_color(&mut focused, "└")?;
+
+        assert_ne!(initial, advanced);
+        Ok(())
+    }
+
+    #[test]
+    fn animated_draw_uses_one_software_cursor() -> Result<(), Box<dyn std::error::Error>> {
+        let mut focused = model();
+        focused.set_stage(UiStage::JiraDetails);
+        focused.hostname = "silvervine.atlassian.net".to_owned();
+        let mut terminal =
+            Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
+
+        super::draw(&mut terminal, &mut focused, &mut |_| Ok(()))?;
+
+        assert!(!terminal.backend().cursor_visible());
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .filter(|cell| cell.modifier.contains(Modifier::REVERSED))
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn software_cursor_blink_is_deterministic_and_resets_on_input(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut focused = model();
+
+        assert_eq!(rendered_cursor_cells(&mut focused)?, 1);
+        focused.handle_onboarding_event(OnboardingEvent::Tick(super::CURSOR_BLINK_HALF_PERIOD));
+        assert_eq!(rendered_cursor_cells(&mut focused)?, 0);
+        focused.handle_onboarding_event(OnboardingEvent::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(rendered_cursor_cells(&mut focused)?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn focus_border_animation_stops_on_actions_and_under_reduced_motion() {
+        let mut focused = model();
+        assert!(focused.animations_active());
+
+        focused.focus = 1;
+        assert!(!focused.animations_active());
+
+        focused.focus = 0;
+        focused.reduced_motion = true;
+        assert!(!focused.animations_active());
+    }
+
+    #[test]
+    fn connected_service_animation_keeps_the_next_form_readable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut connected = model();
+        connected.jira_status = ConnectionStatus::Connected;
+        connected.set_stage(UiStage::Tempo);
+        connected.start_connection_animation(super::ConnectedService::Jira);
+
+        let initial =
+            render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut connected)?;
+        assert!(initial.contains("Connect Tempo"));
+
+        connected
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(240)));
+        let completed =
+            render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut connected)?;
+        assert!(completed.contains("✓ Jira account"));
+        Ok(())
+    }
+
+    #[test]
+    fn review_connector_carries_a_signal_between_static_cards(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut review = model();
+        review.set_stage(UiStage::Save);
+        review.start_review_connector_animation();
+
+        let initial = render_text(super::TEST_WIDTH, super::TEST_HEIGHT, &review)?;
+        assert!(initial.contains("•  ▶"));
+
+        review
+            .handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(160)));
+        let traveling = render_text(super::TEST_WIDTH, super::TEST_HEIGHT, &review)?;
+        assert!(traveling.contains("──•▶"));
+
+        review.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(80)));
+        let completed = render_text(super::TEST_WIDTH, super::TEST_HEIGHT, &review)?;
+        assert!(completed.contains("──▶"));
         Ok(())
     }
 
