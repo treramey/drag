@@ -261,6 +261,8 @@ struct OnboardingModel {
     tempo_instruction: String,
     jira_url: String,
     tempo_url: String,
+    jira_page_loaded: bool,
+    tempo_page_loaded: bool,
     jira_status: ConnectionStatus,
     tempo_status: ConnectionStatus,
     error: Option<String>,
@@ -282,6 +284,8 @@ impl OnboardingModel {
             tempo_instruction: String::new(),
             jira_url: String::new(),
             tempo_url: String::new(),
+            jira_page_loaded: false,
+            tempo_page_loaded: false,
             jira_status: ConnectionStatus::NotConnected,
             tempo_status: ConnectionStatus::NotConnected,
             error: None,
@@ -300,6 +304,11 @@ impl OnboardingModel {
             }
             _ => Action::None,
         }
+    }
+
+    fn set_stage(&mut self, stage: UiStage) {
+        self.stage = stage;
+        self.focus = 0;
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -497,10 +506,7 @@ where
     O: FnMut(&Terminal<B>) -> Result<(), CliError>,
 {
     let mut model = OnboardingModel::new(&workflow);
-    let jira_page = workflow.jira_token_page()?;
-    model.jira_instruction = jira_page.instruction.to_owned();
-    model.jira_url = jira_page.url.to_string();
-    present_page(&mut model, browser_launcher, &jira_page);
+    enter_stage(&mut model, &mut workflow, browser_launcher, UiStage::Jira)?;
     let mut undersized = terminal_is_undersized(terminal)?;
 
     loop {
@@ -520,19 +526,16 @@ where
                     UiStage::Jira => return Err(setup_cancelled()),
                     UiStage::Tempo => {
                         model.tempo_token.clear();
-                        model.stage = UiStage::Jira;
-                        model.focus = 0;
+                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Jira)?;
                     }
                     UiStage::Save => {
-                        model.stage = UiStage::Tempo;
-                        model.focus = 0;
+                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
                     }
                 }
             }
             Action::ConnectJira => {
                 if model.jira_status == ConnectionStatus::Connected {
-                    model.stage = UiStage::Tempo;
-                    model.focus = 0;
+                    transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
                     continue;
                 }
 
@@ -584,13 +587,9 @@ where
                         model.can_retain_jira_token = true;
                         model.hostname = workflow.hostname_default().unwrap_or_default().to_owned();
                         model.email = workflow.email_default().unwrap_or_default().to_owned();
-                        model.stage = UiStage::Tempo;
-                        model.focus = 0;
+                        model.tempo_page_loaded = false;
                         model.warning = None;
-                        let tempo_page = workflow.tempo_token_page()?;
-                        model.tempo_instruction = tempo_page.instruction.to_owned();
-                        model.tempo_url = tempo_page.url.to_string();
-                        present_page(&mut model, browser_launcher, &tempo_page);
+                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
@@ -604,8 +603,7 @@ where
             }
             Action::ConnectTempo => {
                 if model.tempo_status == ConnectionStatus::Connected {
-                    model.stage = UiStage::Save;
-                    model.focus = 0;
+                    transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Save)?;
                     continue;
                 }
 
@@ -651,8 +649,7 @@ where
                 let Some(outcome) = outcome else {
                     model.tempo_token.clear();
                     model.tempo_status = ConnectionStatus::NotConnected;
-                    model.stage = UiStage::Jira;
-                    model.focus = 0;
+                    transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Jira)?;
                     continue;
                 };
 
@@ -661,9 +658,8 @@ where
                         model.tempo_status = ConnectionStatus::Connected;
                         model.tempo_token.clear();
                         model.can_retain_tempo_token = true;
-                        model.stage = UiStage::Save;
-                        model.focus = 0;
                         model.warning = None;
+                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Save)?;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
@@ -678,6 +674,46 @@ where
             Action::Save => return Ok(workflow),
         }
     }
+}
+
+fn transition_to(
+    model: &mut OnboardingModel,
+    workflow: &mut OnboardingWorkflow<'_>,
+    browser_launcher: &dyn BrowserLauncher,
+    stage: UiStage,
+) -> Result<(), CliError> {
+    model.set_stage(stage);
+    enter_stage(model, workflow, browser_launcher, stage)
+}
+
+fn enter_stage(
+    model: &mut OnboardingModel,
+    workflow: &mut OnboardingWorkflow<'_>,
+    browser_launcher: &dyn BrowserLauncher,
+    stage: UiStage,
+) -> Result<(), CliError> {
+    let page = match stage {
+        UiStage::Jira if !model.jira_page_loaded => {
+            let page = workflow.jira_token_page()?;
+            model.jira_instruction = page.instruction.to_owned();
+            model.jira_url = page.url.to_string();
+            model.jira_page_loaded = true;
+            Some(page)
+        }
+        UiStage::Tempo if !model.tempo_page_loaded => {
+            let page = workflow.tempo_token_page()?;
+            model.tempo_instruction = page.instruction.to_owned();
+            model.tempo_url = page.url.to_string();
+            model.tempo_page_loaded = true;
+            Some(page)
+        }
+        UiStage::Jira | UiStage::Tempo | UiStage::Save => None,
+    };
+
+    if let Some(page) = page {
+        present_page(model, browser_launcher, &page);
+    }
+    Ok(())
 }
 
 fn present_page(
@@ -1121,6 +1157,8 @@ mod tests {
             tempo_instruction: String::new(),
             jira_url: "https://id.atlassian.com/manage-profile/security/api-tokens".to_owned(),
             tempo_url: String::new(),
+            jira_page_loaded: true,
+            tempo_page_loaded: false,
             jira_status: ConnectionStatus::NotConnected,
             tempo_status: ConnectionStatus::NotConnected,
             error: None,

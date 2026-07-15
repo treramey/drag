@@ -1587,6 +1587,7 @@ mod tests {
             // Return through Tempo to Jira and edit the verified identity.
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Paste(".updated".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Paste(".updated".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
@@ -2816,6 +2817,7 @@ mod tests {
         let directory = TempDir::new()?;
         let path = directory.path().join("config.json");
         existing_config().save(&path)?;
+        let browser_state = Arc::new(Mutex::new(PromptState::default()));
         let frames = Arc::new(Mutex::new(Vec::new()));
         let app = App::with_onboarding_session(
             path.clone(),
@@ -2827,7 +2829,9 @@ mod tests {
                 tempo_results: Mutex::new(VecDeque::from([Ok(()), Ok(()), Ok(())])),
             },
             RatatuiOnboardingSession::scripted(
-                NoopBrowserLauncher,
+                FakeBrowserLauncher {
+                    state: Arc::clone(&browser_state),
+                },
                 reconfiguration_tui_events(),
                 Arc::clone(&frames),
             ),
@@ -2836,7 +2840,7 @@ mod tests {
         let result = app
             .setup(SetupArgs {
                 from_env: false,
-                no_open: true,
+                no_open: false,
             })
             .await?;
 
@@ -2850,7 +2854,7 @@ mod tests {
                 saved.account_id.as_deref(),
             ),
             (
-                Some("old.atlassian.net"),
+                Some("old.atlassian.net.updated"),
                 Some("old@example.com.updated"),
                 Some("replacement-jira-token"),
                 Some("replacement-tempo-token"),
@@ -2870,6 +2874,7 @@ mod tests {
         }));
         assert!(captured_frames.iter().any(|frame| {
             frame.contains("Connect Tempo")
+                && frame.contains("old.atlassian.net.updated")
                 && frame.contains("Stored credential available")
                 && frame.contains("Esc")
                 && frame.contains("back")
@@ -2887,6 +2892,16 @@ mod tests {
                 && frame.contains("✓ Jira connected")
                 && frame.contains("✓ Tempo connected")
         }));
+        assert_eq!(
+            browser_state
+                .lock()
+                .map_err(|_| "test browser lock poisoned")?
+                .browser_urls,
+            [
+                ATLASSIAN_TOKEN_URL,
+                "https://old.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration",
+            ]
+        );
 
         let rendered = format!("{} {}", result.human, result.data);
         for secret in [
@@ -2910,6 +2925,7 @@ mod tests {
         let directory = TempDir::new()?;
         let path = directory.path().join("config.json");
         existing_config().save(&path)?;
+        let browser_state = Arc::new(Mutex::new(PromptState::default()));
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
             // Complete setup once with retained credentials.
@@ -2937,17 +2953,31 @@ mod tests {
                 jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
                 tempo_results: Mutex::new(VecDeque::from([Ok(())])),
             },
-            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+            RatatuiOnboardingSession::scripted(
+                FakeBrowserLauncher {
+                    state: Arc::clone(&browser_state),
+                },
+                events,
+                Arc::clone(&frames),
+            ),
         );
 
         app.setup(SetupArgs {
             from_env: false,
-            no_open: true,
+            no_open: false,
         })
         .await?;
 
         let saved = Config::load(&path)?;
         assert_eq!(saved.account_id.as_deref(), Some("derived-account"));
+        assert_eq!(
+            browser_state
+                .lock()
+                .map_err(|_| "test browser lock poisoned")?
+                .browser_urls
+                .len(),
+            2
+        );
         assert!(frames
             .lock()
             .map_err(|_| "test frame lock poisoned")?
