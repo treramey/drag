@@ -1,6 +1,7 @@
 //! Ratatui presentation and Crossterm runtime for interactive setup.
 
 use std::io::{self, IsTerminal};
+use std::time::Duration;
 
 use crossterm::cursor::Show;
 use crossterm::event::{
@@ -33,6 +34,7 @@ const MAX_FORM_WIDTH: u16 = 80;
 const SPACE_SM: u16 = 1;
 const SPACE_MD: u16 = 2;
 const REVIEW_LABEL_WIDTH: usize = 11;
+const ENTRANCE_TICK_RATE: Duration = Duration::from_millis(80);
 
 const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
 
@@ -108,6 +110,33 @@ struct ScriptedSession {
     frames: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+struct AnimationTicker {
+    interval: Option<tokio::time::Interval>,
+}
+
+impl AnimationTicker {
+    fn terminal() -> Self {
+        let start = tokio::time::Instant::now() + ENTRANCE_TICK_RATE;
+        Self {
+            interval: Some(tokio::time::interval_at(start, ENTRANCE_TICK_RATE)),
+        }
+    }
+
+    #[cfg(test)]
+    const fn disabled() -> Self {
+        Self { interval: None }
+    }
+
+    async fn tick(&mut self) {
+        match self.interval.as_mut() {
+            Some(interval) => {
+                interval.tick().await;
+            }
+            None => std::future::pending().await,
+        }
+    }
+}
+
 impl RatatuiOnboardingSession {
     pub(crate) fn terminal() -> Self {
         Self {
@@ -138,9 +167,11 @@ impl RatatuiOnboardingSession {
     ) -> Result<OnboardingWorkflow<'a>, CliError> {
         let mut terminal = StderrTerminal::new()?;
         let mut events = EventStream::new();
+        let mut animation_ticker = AnimationTicker::terminal();
         let result = run_onboarding(
             terminal.terminal_mut(),
             &mut events,
+            &mut animation_ticker,
             workflow,
             self.browser_launcher.as_ref(),
             |_| Ok(()),
@@ -171,6 +202,7 @@ impl RatatuiOnboardingSession {
             .take()
             .ok_or_else(|| CliError::Io(io::Error::other("scripted session already consumed")))?;
         let mut events = stream::iter(events.into_iter().map(Ok));
+        let mut animation_ticker = AnimationTicker::disabled();
         let backend = TestBackend::new(TEST_WIDTH, TEST_HEIGHT);
         let mut terminal = Terminal::new(backend).map_err(BackendFailure::into_cli_error)?;
         let frames = std::sync::Arc::clone(&scripted.frames);
@@ -178,6 +210,7 @@ impl RatatuiOnboardingSession {
         run_onboarding(
             &mut terminal,
             &mut events,
+            &mut animation_ticker,
             workflow,
             self.browser_launcher.as_ref(),
             move |terminal| {
@@ -294,7 +327,37 @@ enum ConnectionStatus {
     Connected,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntranceAnimation {
+    FirstLine,
+    Lockup,
+    Complete,
+}
+
+impl EntranceAnimation {
+    const fn is_active(self) -> bool {
+        !matches!(self, Self::Complete)
+    }
+
+    fn advance(&mut self) {
+        *self = match self {
+            Self::FirstLine => Self::Lockup,
+            Self::Lockup | Self::Complete => Self::Complete,
+        };
+    }
+
+    fn complete(&mut self) {
+        *self = Self::Complete;
+    }
+}
+
+enum OnboardingEvent {
+    Terminal(Event),
+    Tick,
+}
+
 struct OnboardingModel {
+    entrance_animation: EntranceAnimation,
     stage: UiStage,
     focus: usize,
     hostname: String,
@@ -320,6 +383,7 @@ struct OnboardingModel {
 impl OnboardingModel {
     fn new(workflow: &OnboardingWorkflow<'_>) -> Self {
         Self {
+            entrance_animation: EntranceAnimation::FirstLine,
             stage: UiStage::JiraDetails,
             focus: 0,
             hostname: workflow.hostname_default().unwrap_or_default().to_owned(),
@@ -340,6 +404,21 @@ impl OnboardingModel {
             tempo_status: ConnectionStatus::NotConnected,
             error: None,
             warning: None,
+        }
+    }
+
+    fn handle_onboarding_event(&mut self, event: OnboardingEvent) -> Action {
+        match event {
+            OnboardingEvent::Tick => {
+                self.entrance_animation.advance();
+                Action::None
+            }
+            OnboardingEvent::Terminal(event) => {
+                if matches!(event, Event::Key(_)) {
+                    self.entrance_animation.complete();
+                }
+                self.handle_event(event)
+            }
         }
     }
 
@@ -565,6 +644,7 @@ enum Action {
 async fn run_onboarding<'a, B, S, O>(
     terminal: &mut Terminal<B>,
     events: &mut S,
+    animation_ticker: &mut AnimationTicker,
     mut workflow: OnboardingWorkflow<'a>,
     browser_launcher: &dyn BrowserLauncher,
     mut observe: O,
@@ -580,12 +660,19 @@ where
 
     loop {
         draw(terminal, &model, &mut observe)?;
-        let event = next_event(events).await?;
-        update_undersized_state(&mut undersized, &event);
-        if undersized && !event_allowed_while_undersized(&event) {
-            continue;
+        let event = next_onboarding_event(
+            events,
+            animation_ticker,
+            model.entrance_animation.is_active() && !undersized,
+        )
+        .await?;
+        if let OnboardingEvent::Terminal(terminal_event) = &event {
+            update_undersized_state(&mut undersized, terminal_event);
+            if undersized && !event_allowed_while_undersized(terminal_event) {
+                continue;
+            }
         }
-        match model.handle_event(event) {
+        match model.handle_onboarding_event(event) {
             Action::None => {}
             Action::Cancel => return Err(setup_cancelled()),
             Action::Continue => match model.stage {
@@ -847,6 +934,25 @@ where
     event_result(events.next().await)
 }
 
+async fn next_onboarding_event<S>(
+    events: &mut S,
+    animation_ticker: &mut AnimationTicker,
+    animation_active: bool,
+) -> Result<OnboardingEvent, CliError>
+where
+    S: Stream<Item = io::Result<Event>> + Unpin,
+{
+    if !animation_active {
+        return next_event(events).await.map(OnboardingEvent::Terminal);
+    }
+
+    tokio::select! {
+        biased;
+        event = events.next() => event_result(event).map(OnboardingEvent::Terminal),
+        () = animation_ticker.tick() => Ok(OnboardingEvent::Tick),
+    }
+}
+
 fn event_result(event: Option<io::Result<Event>>) -> Result<Event, CliError> {
     match event {
         Some(Ok(event)) => Ok(event),
@@ -1005,27 +1111,34 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
             ConnectionStatus::NotConnected,
         ),
     ]);
-    let mut title = DRAG_ART
-        .iter()
-        .map(|line| Line::styled(*line, Palette::primary().bold()))
-        .collect::<Vec<_>>();
+    let mut title = vec![Line::styled(DRAG_ART[0], Palette::primary().bold())];
+    if matches!(
+        model.entrance_animation,
+        EntranceAnimation::Lockup | EntranceAnimation::Complete
+    ) {
+        title.push(Line::styled(DRAG_ART[1], Palette::primary().bold()));
+    } else {
+        title.push(Line::default());
+    }
     title.push(Line::default());
     title.push(stages);
     let title = Text::from(title);
     frame.render_widget(Paragraph::new(title), area);
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let version_width = u16::try_from(version.len())
-        .unwrap_or(area.width)
-        .min(area.width);
-    frame.render_widget(
-        Paragraph::new(version).style(Palette::muted()),
-        Rect::new(
-            area.right().saturating_sub(version_width),
-            area.y,
-            version_width,
-            1,
-        ),
-    );
+    if model.entrance_animation == EntranceAnimation::Complete {
+        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let version_width = u16::try_from(version.len())
+            .unwrap_or(area.width)
+            .min(area.width);
+        frame.render_widget(
+            Paragraph::new(version).style(Palette::muted()),
+            Rect::new(
+                area.right().saturating_sub(version_width),
+                area.y,
+                version_width,
+                1,
+            ),
+        );
+    }
 }
 
 fn stage_span(
@@ -1551,11 +1664,13 @@ mod tests {
 
     use super::{
         event_allowed_while_undersized, test_backend_text, Action, ConnectionStatus,
-        OnboardingModel, Terminal, UiStage, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
+        EntranceAnimation, OnboardingEvent, OnboardingModel, Terminal, UiStage, DRAG_ART,
+        MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
     };
 
     fn model() -> OnboardingModel {
         OnboardingModel {
+            entrance_animation: EntranceAnimation::Complete,
             stage: UiStage::JiraToken,
             focus: 0,
             hostname: String::new(),
@@ -1577,6 +1692,63 @@ mod tests {
             error: None,
             warning: None,
         }
+    }
+
+    #[test]
+    fn ticks_advance_the_model_owned_entrance_animation() {
+        let mut model = model();
+        model.entrance_animation = EntranceAnimation::FirstLine;
+
+        assert!(matches!(
+            model.handle_onboarding_event(OnboardingEvent::Tick),
+            Action::None
+        ));
+        assert_eq!(model.entrance_animation, EntranceAnimation::Lockup);
+
+        assert!(matches!(
+            model.handle_onboarding_event(OnboardingEvent::Tick),
+            Action::None
+        ));
+        assert_eq!(model.entrance_animation, EntranceAnimation::Complete);
+    }
+
+    #[test]
+    fn entrance_frames_are_deterministic_without_wall_clock_time(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut model = model();
+        model.entrance_animation = EntranceAnimation::FirstLine;
+        let initial = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+
+        model.handle_onboarding_event(OnboardingEvent::Tick);
+        let intermediate = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+
+        model.handle_onboarding_event(OnboardingEvent::Tick);
+        let completed = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+
+        assert!(initial.contains(DRAG_ART[0]));
+        assert!(!initial.contains(DRAG_ART[1]));
+        assert!(!initial.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(intermediate.contains(DRAG_ART[1]));
+        assert!(!intermediate.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(completed.contains(DRAG_ART[1]));
+        assert!(completed.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(completed.contains("Connect Jira"));
+        Ok(())
+    }
+
+    #[test]
+    fn key_input_completes_the_animation_and_keeps_its_normal_behavior() {
+        let mut model = model();
+        model.entrance_animation = EntranceAnimation::FirstLine;
+        model.set_stage(UiStage::JiraDetails);
+
+        let action = model.handle_onboarding_event(OnboardingEvent::Terminal(Event::Key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+        )));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(model.entrance_animation, EntranceAnimation::Complete);
+        assert_eq!(model.hostname, "x");
     }
 
     fn render_text(

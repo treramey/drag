@@ -9,8 +9,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 - Ratatui onboarding for interactive setup, with masked token input,
   asynchronous connection progress, backward navigation, safe stored-token
-  reuse and replacement, an explicit review-and-save step, responsive resize
-  handling, and actionable guidance for undersized terminals.
+  reuse and replacement, an explicit review-and-save step, an interruptible
+  entrance reveal, responsive resize handling, and actionable guidance for
+  undersized terminals.
 - Guided Jira and Tempo setup with read-only credential verification,
   automatic Atlassian account-ID discovery, safe credential reuse, and one
   transactional save.
