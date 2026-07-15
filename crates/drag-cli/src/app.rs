@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::future::Future;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, Read};
 use std::path::PathBuf;
-use std::pin::Pin;
 
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
@@ -23,7 +21,18 @@ use crate::cli::{
     AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, LogInput, SetupArgs,
     TrackerIssueArgs, TrackerStartArgs, TrackerStopArgs,
 };
-use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
+#[cfg(test)]
+use crate::config::{normalize_jira_site, JiraCredentials};
+use crate::config::{Config, Credentials, TempoCredentials};
+#[cfg(test)]
+use crate::onboarding::{
+    setup_cancelled, BrowserLauncher, ConnectionOutcome, NoopBrowserLauncher, OnboardingFuture,
+    SecretInput, SetupPrompter, TerminalSetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
+};
+use crate::onboarding::{
+    ConnectionVerifier, LineOnboardingSession, OnboardingOutcome, OnboardingSession,
+    OnboardingWorkflow, RemoteConnectionVerifier, SetupCredentials,
+};
 use crate::{CliError, Rendered, EXIT_USAGE};
 
 pub struct App {
@@ -32,50 +41,7 @@ pub struct App {
     debug: bool,
     connection_verifier: Box<dyn ConnectionVerifier>,
     connection_environment: Box<dyn ConnectionEnvironment>,
-    setup_prompter: Box<dyn SetupPrompter>,
-    browser_launcher: Box<dyn BrowserLauncher>,
-}
-
-const ATLASSIAN_TOKEN_URL: &str = "https://id.atlassian.com/manage-profile/security/api-tokens";
-const TEMPO_TOKEN_PATH: &str =
-    "/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration";
-
-type VerificationFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
-
-trait ConnectionVerifier: Send + Sync {
-    fn verify_jira<'a>(
-        &'a self,
-        connection: &'a JiraCredentials,
-        debug: bool,
-    ) -> VerificationFuture<'a, String>;
-
-    fn verify_tempo<'a>(
-        &'a self,
-        connection: &'a TempoCredentials,
-        debug: bool,
-    ) -> VerificationFuture<'a, ()>;
-}
-
-trait BrowserLauncher: Send + Sync {
-    fn open(&self, url: &Url) -> io::Result<()>;
-}
-
-struct SystemBrowserLauncher;
-
-impl BrowserLauncher for SystemBrowserLauncher {
-    fn open(&self, url: &Url) -> io::Result<()> {
-        webbrowser::open(url.as_str())
-    }
-}
-
-#[cfg(test)]
-struct NoopBrowserLauncher;
-
-#[cfg(test)]
-impl BrowserLauncher for NoopBrowserLauncher {
-    fn open(&self, _url: &Url) -> io::Result<()> {
-        Ok(())
-    }
+    onboarding_session: Box<dyn OnboardingSession>,
 }
 
 trait ConnectionEnvironment: Send + Sync {
@@ -106,175 +72,6 @@ impl ConnectionEnvironment for EmptyConnectionEnvironment {
 
     fn is_set(&self, _name: &str) -> bool {
         false
-    }
-}
-
-struct RemoteConnectionVerifier;
-
-impl ConnectionVerifier for RemoteConnectionVerifier {
-    fn verify_jira<'a>(
-        &'a self,
-        connection: &'a JiraCredentials,
-        debug: bool,
-    ) -> VerificationFuture<'a, String> {
-        Box::pin(async move {
-            let api = ApiClient::new(connection.to_credentials(), debug)?;
-            api.get_current_user_account_id().await
-        })
-    }
-
-    fn verify_tempo<'a>(
-        &'a self,
-        connection: &'a TempoCredentials,
-        debug: bool,
-    ) -> VerificationFuture<'a, ()> {
-        Box::pin(async move {
-            let api = ApiClient::new(connection.to_credentials(), debug)?;
-            api.verify_tempo_connection().await
-        })
-    }
-}
-
-impl JiraCredentials {
-    fn to_credentials(&self) -> Credentials {
-        Credentials {
-            tempo_token: String::new(),
-            account_id: String::new(),
-            atlassian_user_email: self.atlassian_user_email.clone(),
-            atlassian_token: self.atlassian_token.clone(),
-            hostname: self.hostname.clone(),
-        }
-    }
-}
-
-impl TempoCredentials {
-    fn to_credentials(&self) -> Credentials {
-        Credentials {
-            tempo_token: self.tempo_token.clone(),
-            account_id: self.account_id.clone(),
-            atlassian_user_email: String::new(),
-            atlassian_token: String::new(),
-            hostname: String::new(),
-        }
-    }
-}
-
-trait SetupPrompter: Send + Sync {
-    fn is_terminal(&self) -> bool;
-    fn message(&self, message: &str) -> Result<(), CliError>;
-    fn prompt_text(&self, label: &str, default: Option<&str>) -> Result<String, CliError>;
-    fn prompt_secret(&self, label: &str, can_retain: bool) -> Result<Option<String>, CliError>;
-}
-
-struct TerminalSetupPrompter;
-
-impl SetupPrompter for TerminalSetupPrompter {
-    fn is_terminal(&self) -> bool {
-        io::stdin().is_terminal()
-    }
-
-    fn message(&self, message: &str) -> Result<(), CliError> {
-        writeln!(io::stderr().lock(), "{message}")?;
-        Ok(())
-    }
-
-    fn prompt_text(&self, label: &str, default: Option<&str>) -> Result<String, CliError> {
-        let mut stderr = io::stderr().lock();
-        match default {
-            Some(default) => write!(stderr, "{label} [{default}]: ")?,
-            None => write!(stderr, "{label}: ")?,
-        }
-        stderr.flush()?;
-
-        let mut input = String::new();
-        let bytes_read = io::stdin()
-            .read_line(&mut input)
-            .map_err(map_setup_input_error)?;
-        if bytes_read == 0 {
-            return Err(setup_cancelled());
-        }
-        let value = input.trim();
-        if value.is_empty() {
-            Ok(default.unwrap_or_default().to_owned())
-        } else {
-            Ok(value.to_owned())
-        }
-    }
-
-    fn prompt_secret(&self, label: &str, can_retain: bool) -> Result<Option<String>, CliError> {
-        let prompt = if can_retain {
-            format!(
-                "{label} (pasted input will not be displayed; press Enter to keep the existing token): "
-            )
-        } else {
-            format!("{label} (pasted input will not be displayed): ")
-        };
-        let config = rpassword::ConfigBuilder::new()
-            .output_writer(io::stderr())
-            .build();
-        let value = rpassword::prompt_password_with_config(prompt, config)
-            .map_err(map_setup_input_error)?;
-        let value = value.trim();
-        if value.is_empty() && can_retain {
-            Ok(None)
-        } else {
-            Ok(Some(value.to_owned()))
-        }
-    }
-}
-
-struct SetupCredentials {
-    tempo_token: String,
-    atlassian_user_email: String,
-    atlassian_token: String,
-    hostname: String,
-}
-
-impl SetupCredentials {
-    fn from_environment(environment: &dyn ConnectionEnvironment) -> Result<Self, CliError> {
-        Self::from_source(|name| required_setup_environment(environment, name))
-    }
-
-    fn from_source(
-        mut source: impl FnMut(&str) -> Result<String, CliError>,
-    ) -> Result<Self, CliError> {
-        let hostname = normalize_jira_site(&source("ATLASSIAN_HOST")?)?;
-        let atlassian_user_email = source("ATLASSIAN_EMAIL")?.trim().to_owned();
-        let atlassian_token = source("ATLASSIAN_TOKEN")?.trim().to_owned();
-        let tempo_token = source("TEMPO_TOKEN")?.trim().to_owned();
-        Ok(Self {
-            tempo_token,
-            atlassian_user_email,
-            atlassian_token,
-            hostname,
-        })
-    }
-
-    fn to_credentials(&self, account_id: String) -> Credentials {
-        Credentials {
-            tempo_token: self.tempo_token.clone(),
-            account_id,
-            atlassian_user_email: self.atlassian_user_email.clone(),
-            atlassian_token: self.atlassian_token.clone(),
-            hostname: self.hostname.clone(),
-        }
-    }
-
-    fn jira_connection(&self) -> JiraCredentials {
-        JiraCredentials {
-            atlassian_user_email: self.atlassian_user_email.clone(),
-            atlassian_token: self.atlassian_token.clone(),
-            hostname: self.hostname.clone(),
-        }
-    }
-}
-
-impl From<&Credentials> for TempoCredentials {
-    fn from(credentials: &Credentials) -> Self {
-        Self {
-            tempo_token: credentials.tempo_token.clone(),
-            account_id: credentials.account_id.clone(),
-        }
     }
 }
 
@@ -366,8 +163,7 @@ impl App {
             debug,
             connection_verifier: Box::new(RemoteConnectionVerifier),
             connection_environment: Box::new(ProcessConnectionEnvironment),
-            setup_prompter: Box::new(TerminalSetupPrompter),
-            browser_launcher: Box::new(SystemBrowserLauncher),
+            onboarding_session: Box::new(LineOnboardingSession::terminal()),
         }
     }
 
@@ -382,8 +178,10 @@ impl App {
             debug: false,
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
-            setup_prompter: Box::new(TerminalSetupPrompter),
-            browser_launcher: Box::new(NoopBrowserLauncher),
+            onboarding_session: Box::new(LineOnboardingSession::with_dependencies(
+                TerminalSetupPrompter,
+                NoopBrowserLauncher,
+            )),
         }
     }
 
@@ -400,8 +198,26 @@ impl App {
             debug: false,
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
-            setup_prompter: Box::new(setup_prompter),
-            browser_launcher: Box::new(browser_launcher),
+            onboarding_session: Box::new(LineOnboardingSession::with_dependencies(
+                setup_prompter,
+                browser_launcher,
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_onboarding_session(
+        path: PathBuf,
+        connection_verifier: impl ConnectionVerifier + 'static,
+        onboarding_session: impl OnboardingSession + 'static,
+    ) -> Self {
+        Self {
+            path,
+            timezone: chrono_tz::UTC,
+            debug: false,
+            connection_verifier: Box::new(connection_verifier),
+            connection_environment: Box::new(EmptyConnectionEnvironment),
+            onboarding_session: Box::new(onboarding_session),
         }
     }
 
@@ -409,15 +225,16 @@ impl App {
         if args.from_env {
             // Validate before network requests; reload afterward to preserve concurrent updates.
             Config::load(&self.path)?;
-            let setup_credentials =
-                SetupCredentials::from_environment(self.connection_environment.as_ref())?;
+            let setup_credentials = SetupCredentials::from_source(|name| {
+                required_setup_environment(self.connection_environment.as_ref(), name)
+            })?;
             return self
                 .verify_and_save_environment_setup(setup_credentials)
                 .await;
         }
 
         let config = Config::load(&self.path)?;
-        if !self.setup_prompter.is_terminal() {
+        if !self.onboarding_session.is_terminal() {
             return Err(CliError::InvalidInput(
                 "interactive setup requires a terminal; use `drag setup --from-env` for automation"
                     .to_owned(),
@@ -547,16 +364,13 @@ impl App {
         existing: &Config,
         open_browser: bool,
     ) -> Result<Rendered, CliError> {
-        self.setup_prompter.message(
-            "Connect Jira, connect Tempo, then save. Nothing is saved until both connections succeed.",
-        )?;
-
-        let (jira_credentials, account_id) = self.connect_jira(existing, open_browser).await?;
-        let credentials = self
-            .connect_tempo(existing, jira_credentials, account_id, open_browser)
-            .await?;
-
-        self.setup_prompter.message("\nSave")?;
+        let workflow = OnboardingWorkflow::new(
+            existing,
+            self.connection_verifier.as_ref(),
+            self.debug,
+            open_browser,
+        );
+        let OnboardingOutcome::Save(credentials) = self.onboarding_session.run(workflow).await?;
         let data = json!({
             "configured": true,
             "path": self.path,
@@ -573,156 +387,6 @@ impl App {
         );
         self.save_setup_credentials(credentials)?;
         Ok(Rendered::new(data, human))
-    }
-
-    async fn connect_jira(
-        &self,
-        existing: &Config,
-        open_browser: bool,
-    ) -> Result<(SetupCredentials, String), CliError> {
-        self.setup_prompter.message("\nConnect Jira")?;
-        let mut hostname_default = existing.hostname.clone();
-        let mut email_default = existing.atlassian_user_email.clone();
-        let token_url = Url::parse(ATLASSIAN_TOKEN_URL)?;
-        let mut should_open_browser = open_browser;
-        loop {
-            let hostname = self.prompt_jira_site(hostname_default.as_deref())?;
-            let email = self.prompt_non_empty_text("Atlassian email", email_default.as_deref())?;
-            hostname_default = Some(hostname.clone());
-            email_default = Some(email.clone());
-            self.present_token_page(
-                "Create or manage your Atlassian API token:",
-                &token_url,
-                should_open_browser,
-            )?;
-            should_open_browser = false;
-            let atlassian_token =
-                self.prompt_token("Atlassian API token", existing.atlassian_token.as_deref())?;
-            let setup_credentials = SetupCredentials {
-                tempo_token: String::new(),
-                atlassian_user_email: email,
-                atlassian_token,
-                hostname,
-            };
-            match self
-                .connection_verifier
-                .verify_jira(&setup_credentials.jira_connection(), self.debug)
-                .await
-            {
-                Ok(account_id) => return Ok((setup_credentials, account_id)),
-                Err(error @ CliError::Authentication(_)) => self.setup_prompter.message(&format!(
-                    "Could not connect to Jira: {error}\nCheck the Jira site, email, and token, then try again."
-                ))?,
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    async fn connect_tempo(
-        &self,
-        existing: &Config,
-        mut setup_credentials: SetupCredentials,
-        account_id: String,
-        open_browser: bool,
-    ) -> Result<Credentials, CliError> {
-        self.setup_prompter.message("\nConnect Tempo")?;
-        let tempo_url = Url::parse(&format!(
-            "https://{}{TEMPO_TOKEN_PATH}",
-            setup_credentials.hostname
-        ))?;
-        let mut should_open_browser = open_browser;
-        loop {
-            self.present_token_page(
-                "Create or manage your Tempo API token:",
-                &tempo_url,
-                should_open_browser,
-            )?;
-            should_open_browser = false;
-            setup_credentials.tempo_token =
-                self.prompt_token("Tempo API token", existing.tempo_token.as_deref())?;
-            let credentials = setup_credentials.to_credentials(account_id.clone());
-            match self
-                .connection_verifier
-                .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
-                .await
-            {
-                Ok(()) => return Ok(credentials),
-                Err(error @ CliError::Authentication(_)) => {
-                    self.setup_prompter.message(&format!(
-                    "Could not connect to Tempo: {error}\nCheck the Tempo token, then try again."
-                ))?
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn present_token_page(
-        &self,
-        instruction: &str,
-        url: &Url,
-        open_browser: bool,
-    ) -> Result<(), CliError> {
-        self.setup_prompter
-            .message(&format!("{instruction}\n{url}"))?;
-        if open_browser {
-            if let Err(error) = self.browser_launcher.open(url) {
-                self.setup_prompter.message(&format!(
-                    "Warning: could not open this page in your browser: {error}. Continue with the URL above."
-                ))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn prompt_jira_site(&self, default: Option<&str>) -> Result<String, CliError> {
-        loop {
-            let input = self
-                .setup_prompter
-                .prompt_text("Jira site (hostname or HTTPS URL)", default)?;
-            match normalize_jira_site(&input) {
-                Ok(hostname) => return Ok(hostname),
-                Err(error) => self.setup_prompter.message(&format!(
-                    "Invalid Jira site: {error}\nPaste a bare hostname or any HTTPS URL from your Jira site."
-                ))?,
-            }
-        }
-    }
-
-    fn prompt_non_empty_text(
-        &self,
-        label: &str,
-        default: Option<&str>,
-    ) -> Result<String, CliError> {
-        loop {
-            let value = self.setup_prompter.prompt_text(label, default)?;
-            let value = value.trim();
-            if !value.is_empty() {
-                return Ok(value.to_owned());
-            }
-            self.setup_prompter
-                .message(&format!("{label} must not be empty; try again."))?;
-        }
-    }
-
-    fn prompt_token(&self, label: &str, existing: Option<&str>) -> Result<String, CliError> {
-        let existing = existing.filter(|value| !value.is_empty());
-        loop {
-            match self
-                .setup_prompter
-                .prompt_secret(label, existing.is_some())?
-            {
-                Some(value) if !value.trim().is_empty() => return Ok(value.trim().to_owned()),
-                None => {
-                    return existing
-                        .map(str::to_owned)
-                        .ok_or_else(|| CliError::InvalidInput("token is required".to_owned()));
-                }
-                Some(_) => self
-                    .setup_prompter
-                    .message(&format!("{label} must not be empty; try again."))?,
-            }
-        }
     }
 
     fn save_setup_credentials(&self, credentials: Credentials) -> Result<(), CliError> {
@@ -1243,23 +907,6 @@ fn required_setup_environment(
     }
 }
 
-fn setup_cancelled() -> CliError {
-    CliError::InvalidInput(
-        "interactive setup was cancelled; configuration was not changed".to_owned(),
-    )
-}
-
-fn map_setup_input_error(error: io::Error) -> CliError {
-    if matches!(
-        error.kind(),
-        io::ErrorKind::Interrupted | io::ErrorKind::UnexpectedEof
-    ) {
-        setup_cancelled()
-    } else {
-        CliError::Io(error)
-    }
-}
-
 fn worklogs_table(
     date: chrono::NaiveDate,
     worklogs: &[Worklog],
@@ -1428,8 +1075,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        normalize_jira_site, App, BrowserLauncher, Config, ConnectionVerifier, JiraCredentials,
-        SetupCredentials, SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
+        normalize_jira_site, App, BrowserLauncher, Config, ConnectionOutcome, ConnectionVerifier,
+        JiraCredentials, OnboardingFuture, OnboardingOutcome, OnboardingSession,
+        OnboardingWorkflow, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
+        VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
     use crate::cli::{DoctorArgs, SetupArgs};
     use crate::CliError;
@@ -1546,6 +1195,10 @@ mod tests {
         tempo_results: Mutex<VecDeque<Result<(), VerificationFailure>>>,
     }
 
+    struct ScriptedOnboardingSession {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
     struct DoctorVerifier {
         jira_result: Mutex<Option<Result<String, VerificationFailure>>>,
         tempo_result: Mutex<Option<Result<(), VerificationFailure>>>,
@@ -1555,6 +1208,53 @@ mod tests {
     enum VerificationFailure {
         Authentication(String),
         Fatal(String),
+    }
+
+    impl OnboardingSession for ScriptedOnboardingSession {
+        fn is_terminal(&self) -> bool {
+            true
+        }
+
+        fn run<'a>(&'a self, mut workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a> {
+            let events = Arc::clone(&self.events);
+            Box::pin(async move {
+                let jira_page = workflow.jira_token_page()?;
+                events
+                    .lock()
+                    .map_err(|_| CliError::Api("test session lock was poisoned".to_owned()))?
+                    .push(format!("jira-browser:{}", jira_page.open_browser));
+                match workflow
+                    .connect_jira(
+                        "https://Example.atlassian.net/jira/software".to_owned(),
+                        " scripted@example.com ".to_owned(),
+                        SecretInput::Replace("scripted-jira-token".to_owned()),
+                    )
+                    .await?
+                {
+                    ConnectionOutcome::Connected => {}
+                    ConnectionOutcome::Rejected(error) => return Err(error),
+                }
+
+                let tempo_page = workflow.tempo_token_page()?;
+                events
+                    .lock()
+                    .map_err(|_| CliError::Api("test session lock was poisoned".to_owned()))?
+                    .push(format!("tempo-browser:{}", tempo_page.open_browser));
+                match workflow
+                    .connect_tempo(SecretInput::Replace("scripted-tempo-token".to_owned()))
+                    .await?
+                {
+                    ConnectionOutcome::Connected => {}
+                    ConnectionOutcome::Rejected(error) => return Err(error),
+                }
+
+                events
+                    .lock()
+                    .map_err(|_| CliError::Api("test session lock was poisoned".to_owned()))?
+                    .push("save".to_owned());
+                Ok(OnboardingOutcome::Save(workflow.finish()?))
+            })
+        }
     }
 
     impl VerificationFailure {
@@ -2185,6 +1885,75 @@ mod tests {
         session.expect(Eof)?;
 
         assert_eq!(fs::read(path)?, before);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn high_level_onboarding_session_drives_verification_and_transactional_save(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let initial = existing_config();
+        initial.save(&path)?;
+        let mut concurrent = initial;
+        concurrent
+            .aliases
+            .insert("meeting".to_owned(), "ABC-3".to_owned());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
+        let app = App::with_onboarding_session(
+            path.clone(),
+            FakeVerifier {
+                jira_error: None,
+                tempo_error: None,
+                tempo_accounts: Arc::clone(&tempo_accounts),
+                config_update: Some((path.clone(), concurrent)),
+            },
+            ScriptedOnboardingSession {
+                events: Arc::clone(&events),
+            },
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let saved = Config::load(&path)?;
+        let observed = (
+            saved.hostname.as_deref(),
+            saved.atlassian_user_email.as_deref(),
+            saved.atlassian_token.as_deref(),
+            saved.tempo_token.as_deref(),
+            saved.account_id.as_deref(),
+            saved.aliases.get("meeting").map(String::as_str),
+        );
+        assert_eq!(
+            observed,
+            (
+                Some("example.atlassian.net"),
+                Some("scripted@example.com"),
+                Some("scripted-jira-token"),
+                Some("scripted-tempo-token"),
+                Some("derived-account"),
+                Some("ABC-3"),
+            )
+        );
+        assert_eq!(
+            tempo_accounts
+                .lock()
+                .map_err(|_| "test verifier lock was poisoned")?
+                .as_slice(),
+            ["derived-account"]
+        );
+        assert_eq!(
+            events
+                .lock()
+                .map_err(|_| "test session lock was poisoned")?
+                .as_slice(),
+            ["jira-browser:false", "tempo-browser:false", "save"]
+        );
         Ok(())
     }
 
