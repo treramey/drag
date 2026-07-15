@@ -236,7 +236,9 @@ impl Drop for StderrTerminal {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum UiStage {
-    Jira,
+    Welcome,
+    JiraDetails,
+    JiraToken,
     Tempo,
     Save,
 }
@@ -272,7 +274,7 @@ struct OnboardingModel {
 impl OnboardingModel {
     fn new(workflow: &OnboardingWorkflow<'_>) -> Self {
         Self {
-            stage: UiStage::Jira,
+            stage: UiStage::Welcome,
             focus: 0,
             hostname: workflow.hostname_default().unwrap_or_default().to_owned(),
             email: workflow.email_default().unwrap_or_default().to_owned(),
@@ -320,7 +322,7 @@ impl OnboardingModel {
         }
 
         match key.code {
-            KeyCode::Esc if self.stage == UiStage::Jira => Action::Cancel,
+            KeyCode::Esc if self.stage == UiStage::Welcome => Action::Cancel,
             KeyCode::Esc => Action::Back,
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
                 self.focus_previous();
@@ -355,7 +357,9 @@ impl OnboardingModel {
 
     fn focus_count(&self) -> usize {
         match self.stage {
-            UiStage::Jira => 4,
+            UiStage::Welcome => 1,
+            UiStage::JiraDetails => 3,
+            UiStage::JiraToken => 2,
             UiStage::Tempo => 2,
             UiStage::Save => 1,
         }
@@ -371,9 +375,9 @@ impl OnboardingModel {
 
     fn focused_input_mut(&mut self) -> Option<&mut String> {
         match (self.stage, self.focus) {
-            (UiStage::Jira, 0) => Some(&mut self.hostname),
-            (UiStage::Jira, 1) => Some(&mut self.email),
-            (UiStage::Jira, 2) => Some(&mut self.jira_token),
+            (UiStage::JiraDetails, 0) => Some(&mut self.hostname),
+            (UiStage::JiraDetails, 1) => Some(&mut self.email),
+            (UiStage::JiraToken, 0) => Some(&mut self.jira_token),
             (UiStage::Tempo, 0) => Some(&mut self.tempo_token),
             _ => None,
         }
@@ -389,19 +393,21 @@ impl OnboardingModel {
 
     fn input_changed(&mut self) {
         match self.stage {
-            UiStage::Jira => {
+            UiStage::JiraDetails | UiStage::JiraToken => {
                 self.jira_status = ConnectionStatus::NotConnected;
                 self.tempo_status = ConnectionStatus::NotConnected;
             }
             UiStage::Tempo => self.tempo_status = ConnectionStatus::NotConnected,
-            UiStage::Save => {}
+            UiStage::Welcome | UiStage::Save => {}
         }
         self.error = None;
     }
 
     fn activate_or_advance(&mut self) -> Action {
         match self.stage {
-            UiStage::Jira if self.focus == 3 => Action::ConnectJira,
+            UiStage::Welcome => Action::Continue,
+            UiStage::JiraDetails if self.focus == 2 => Action::Continue,
+            UiStage::JiraToken if self.focus == 1 => Action::ConnectJira,
             UiStage::Tempo if self.focus == 1 => Action::ConnectTempo,
             UiStage::Save => Action::Save,
             _ => {
@@ -411,7 +417,7 @@ impl OnboardingModel {
         }
     }
 
-    fn validate_jira(&mut self) -> bool {
+    fn validate_jira_details(&mut self) -> bool {
         if self.hostname.trim().is_empty() {
             self.focus = 0;
             self.error = Some(
@@ -431,8 +437,12 @@ impl OnboardingModel {
             self.error = Some("Atlassian email is required.".to_owned());
             return false;
         }
+        true
+    }
+
+    fn validate_jira_token(&mut self) -> bool {
         if self.jira_token.trim().is_empty() && !self.can_retain_jira_token {
-            self.focus = 2;
+            self.focus = 0;
             self.error = Some("Atlassian API token is required.".to_owned());
             return false;
         }
@@ -485,6 +495,7 @@ fn update_undersized_state(undersized: &mut bool, event: &Event) {
 
 enum Action {
     None,
+    Continue,
     ConnectJira,
     ConnectTempo,
     Save,
@@ -506,7 +517,6 @@ where
     O: FnMut(&Terminal<B>) -> Result<(), CliError>,
 {
     let mut model = OnboardingModel::new(&workflow);
-    enter_stage(&mut model, &mut workflow, browser_launcher, UiStage::Jira)?;
     let mut undersized = terminal_is_undersized(terminal)?;
 
     loop {
@@ -519,14 +529,50 @@ where
         match model.handle_event(event) {
             Action::None => {}
             Action::Cancel => return Err(setup_cancelled()),
+            Action::Continue => match model.stage {
+                UiStage::Welcome => transition_to(
+                    &mut model,
+                    &mut workflow,
+                    browser_launcher,
+                    UiStage::JiraDetails,
+                )?,
+                UiStage::JiraDetails => {
+                    if model.validate_jira_details() {
+                        transition_to(
+                            &mut model,
+                            &mut workflow,
+                            browser_launcher,
+                            UiStage::JiraToken,
+                        )?;
+                    }
+                }
+                UiStage::JiraToken | UiStage::Tempo | UiStage::Save => {}
+            },
             Action::Back => {
                 model.error = None;
                 model.warning = None;
                 match model.stage {
-                    UiStage::Jira => return Err(setup_cancelled()),
+                    UiStage::Welcome => return Err(setup_cancelled()),
+                    UiStage::JiraDetails => transition_to(
+                        &mut model,
+                        &mut workflow,
+                        browser_launcher,
+                        UiStage::Welcome,
+                    )?,
+                    UiStage::JiraToken => transition_to(
+                        &mut model,
+                        &mut workflow,
+                        browser_launcher,
+                        UiStage::JiraDetails,
+                    )?,
                     UiStage::Tempo => {
                         model.tempo_token.clear();
-                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Jira)?;
+                        transition_to(
+                            &mut model,
+                            &mut workflow,
+                            browser_launcher,
+                            UiStage::JiraToken,
+                        )?;
                     }
                     UiStage::Save => {
                         transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
@@ -539,7 +585,7 @@ where
                     continue;
                 }
 
-                if !model.validate_jira() {
+                if !model.validate_jira_token() {
                     continue;
                 }
 
@@ -595,7 +641,7 @@ where
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.jira_status = ConnectionStatus::NotConnected;
                         model.jira_token.clear();
-                        model.focus = 2;
+                        model.focus = 0;
                         model.error = Some(format!("Could not connect to Jira: {error}"));
                     }
                     Err(error) => return Err(error),
@@ -649,7 +695,12 @@ where
                 let Some(outcome) = outcome else {
                     model.tempo_token.clear();
                     model.tempo_status = ConnectionStatus::NotConnected;
-                    transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Jira)?;
+                    transition_to(
+                        &mut model,
+                        &mut workflow,
+                        browser_launcher,
+                        UiStage::JiraToken,
+                    )?;
                     continue;
                 };
 
@@ -693,7 +744,7 @@ fn enter_stage(
     stage: UiStage,
 ) -> Result<(), CliError> {
     let page = match stage {
-        UiStage::Jira if !model.jira_page_loaded => {
+        UiStage::JiraToken if !model.jira_page_loaded => {
             let page = workflow.jira_token_page()?;
             model.jira_instruction = page.instruction.to_owned();
             model.jira_url = page.url.to_string();
@@ -707,7 +758,11 @@ fn enter_stage(
             model.tempo_page_loaded = true;
             Some(page)
         }
-        UiStage::Jira | UiStage::Tempo | UiStage::Save => None,
+        UiStage::Welcome
+        | UiStage::JiraDetails
+        | UiStage::JiraToken
+        | UiStage::Tempo
+        | UiStage::Save => None,
     };
 
     if let Some(page) = page {
@@ -792,7 +847,9 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
 
     render_header(frame, header, model);
     match model.stage {
-        UiStage::Jira => render_jira(frame, body, model),
+        UiStage::Welcome => render_welcome(frame, body, model),
+        UiStage::JiraDetails => render_jira_details(frame, body, model),
+        UiStage::JiraToken => render_jira_token(frame, body, model),
         UiStage::Tempo => render_tempo(frame, body, model),
         UiStage::Save => render_save(frame, body, model),
     }
@@ -826,7 +883,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let stages = Line::from(vec![
         stage_span(
             "Connect Jira",
-            model.stage == UiStage::Jira,
+            matches!(model.stage, UiStage::JiraDetails | UiStage::JiraToken),
             model.jira_status,
         ),
         "  →  ".dim(),
@@ -866,11 +923,44 @@ fn stage_span(
     }
 }
 
-fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let [intro, hostname, email, token, url, status, feedback, _] = Layout::vertical([
+fn render_welcome(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+    let [intro, sequence, action, _] = Layout::vertical([
+        Constraint::Length(4),
+        Constraint::Length(6),
+        Constraint::Length(3),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from("Welcome to Drag setup").bold(),
+            Line::from("Connect your Jira and Tempo accounts, then review before saving."),
+            Line::from("Nothing opens or saves until you explicitly continue.").dim(),
+        ])),
+        intro,
+    );
+    frame.render_widget(
+        Paragraph::new(Text::from(vec![
+            Line::from("1. Jira site and Atlassian email"),
+            Line::from("2. Atlassian API token and Jira verification"),
+            Line::from("3. Tempo API token and verification"),
+            Line::from("4. Review and save"),
+        ]))
+        .block(Block::bordered().title(" What you'll need ")),
+        sequence,
+    );
+    render_action(
+        frame,
+        action,
+        "Start setup",
+        model.focus == 0,
+        ConnectionStatus::NotConnected,
+    );
+}
+
+fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+    let [intro, hostname, email, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(3),
-        Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Length(3),
         Constraint::Length(3),
@@ -879,7 +969,7 @@ fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     ])
     .areas(area);
     frame.render_widget(
-        Paragraph::new("Connect Jira with your site, Atlassian email, and API token."),
+        Paragraph::new("First, identify the Jira account you want Drag to use."),
         intro,
     );
     render_field(
@@ -900,12 +990,36 @@ fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         false,
         false,
     );
+    render_action(
+        frame,
+        action,
+        "Continue to API token",
+        model.focus == 2,
+        ConnectionStatus::NotConnected,
+    );
+    render_feedback(frame, feedback, model);
+}
+
+fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
+    let [intro, token, url, status, feedback, _] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(2),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new("Now create or enter an Atlassian API token, then connect Jira."),
+        intro,
+    );
     render_field(
         frame,
         token,
         "Atlassian API token",
         &model.jira_token,
-        model.focus == 2,
+        model.focus == 0,
         true,
         model.can_retain_jira_token,
     );
@@ -921,7 +1035,7 @@ fn render_jira(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         frame,
         status,
         "Connect Jira",
-        model.focus == 3,
+        model.focus == 1,
         model.jira_status,
     );
     render_feedback(frame, feedback, model);
@@ -1093,13 +1207,15 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let action = match model.stage {
-        UiStage::Jira if model.jira_status == ConnectionStatus::Connected => "continue",
+        UiStage::Welcome => "start setup",
+        UiStage::JiraDetails => "continue to API token",
+        UiStage::JiraToken if model.jira_status == ConnectionStatus::Connected => "continue",
         UiStage::Tempo if model.tempo_status == ConnectionStatus::Connected => "continue",
-        UiStage::Jira => "connect Jira",
+        UiStage::JiraToken => "connect Jira",
         UiStage::Tempo => "connect Tempo",
         UiStage::Save => "save",
     };
-    let escape_action = if model.stage == UiStage::Jira {
+    let escape_action = if model.stage == UiStage::Welcome {
         "cancel"
     } else {
         "back"
@@ -1145,7 +1261,7 @@ mod tests {
 
     fn model() -> OnboardingModel {
         OnboardingModel {
-            stage: UiStage::Jira,
+            stage: UiStage::JiraToken,
             focus: 0,
             hostname: String::new(),
             email: String::new(),
@@ -1191,6 +1307,7 @@ mod tests {
     fn resize_event_preserves_entered_state_until_terminal_is_large_enough(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
+        model.set_stage(UiStage::JiraDetails);
         assert!(matches!(
             model.handle_event(Event::Paste("example.atlassian.net".to_owned())),
             Action::None
