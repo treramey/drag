@@ -29,6 +29,7 @@ use crate::CliError;
 const MIN_TERMINAL_WIDTH: u16 = 84;
 const MIN_TERMINAL_HEIGHT: u16 = 28;
 const MAX_CONTENT_WIDTH: u16 = 100;
+const MAX_FORM_WIDTH: u16 = 76;
 const SPACE_SM: u16 = 1;
 const SPACE_MD: u16 = 2;
 
@@ -867,14 +868,14 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
 
     let [_top_padding, header, body, footer] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(7),
+        Constraint::Length(8),
         Constraint::Fill(1),
         Constraint::Length(3),
     ])
     .areas(frame.area());
 
     let header = constrain_content_width(header);
-    let body = constrain_content_width(body);
+    let body = constrain_width(body, MAX_FORM_WIDTH);
     let footer = constrain_content_width(footer);
 
     render_header(frame, header, model);
@@ -888,7 +889,11 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
 }
 
 fn constrain_content_width(area: Rect) -> Rect {
-    let width = area.width.min(MAX_CONTENT_WIDTH);
+    constrain_width(area, MAX_CONTENT_WIDTH)
+}
+
+fn constrain_width(area: Rect, maximum: u16) -> Rect {
+    let width = area.width.min(maximum);
     Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y,
@@ -1248,13 +1253,11 @@ fn render_field(
     let title = if invalid {
         format!(" ✕ {label} (invalid) ")
     } else if focused {
-        format!(" › {label} (focused) ")
+        format!(" › {label} ")
     } else if retained {
         format!(" ◇ {label} (stored) ")
-    } else if !value.is_empty() {
-        format!(" ● {label} ")
     } else {
-        format!(" ○ {label} ")
+        format!(" {label} ")
     };
     let block = Block::bordered().title(title).border_style(border_style);
     frame.render_widget(Paragraph::new(display.as_str()).block(block), area);
@@ -1283,7 +1286,7 @@ fn render_action(
         _ => format!("[ {label} ]"),
     };
     let text = if focused {
-        format!("› {status_text} (focused)")
+        format!("› {status_text}")
     } else {
         status_text
     };
@@ -1296,13 +1299,7 @@ fn render_action(
     } else {
         Palette::muted()
     };
-    frame.render_widget(
-        Paragraph::new(text)
-            .centered()
-            .style(style)
-            .block(Block::bordered().border_style(style)),
-        area,
-    );
+    frame.render_widget(Paragraph::new(text).centered().style(style), area);
 }
 
 fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
@@ -1342,7 +1339,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         ratatui::text::Span::styled(" Ctrl-C ", Palette::primary().bold()),
         ratatui::text::Span::styled("cancel", Palette::muted()),
     ]);
-    frame.render_widget(Paragraph::new(footer).block(Block::bordered()), area);
+    frame.render_widget(Paragraph::new(footer).centered(), area);
 }
 
 #[cfg(test)]
@@ -1436,7 +1433,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut focused = model();
         let focused_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
-        assert!(focused_text.contains("› Atlassian API token (focused)"));
+        assert!(focused_text.contains("› Atlassian API token"));
         assert_eq!(rendered_color(&focused, "›")?, Color::Cyan);
 
         focused.error = Some("Atlassian API token is required.".to_owned());
@@ -1455,7 +1452,7 @@ mod tests {
         focused.can_retain_jira_token = false;
         focused.jira_token = "never-render-this-secret".to_owned();
         let populated_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
-        assert!(populated_text.contains("● Atlassian API token"));
+        assert!(populated_text.contains("Atlassian API token"));
         assert!(populated_text.contains("••••"));
         assert!(!populated_text.contains("never-render-this-secret"));
         Ok(())

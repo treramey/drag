@@ -2274,7 +2274,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         session.get_process_mut().set_window_size(100, 30)?;
         session
-            .expect("Jira site (focused)")
+            .expect("› Jira site")
             .map_err(|error| format!("waiting for restored Jira stage: {error}"))?;
         session
             .expect("example.atlassian.net")
