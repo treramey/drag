@@ -25,14 +25,17 @@ use crate::cli::{
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
 #[cfg(test)]
-use crate::onboarding::{
+use crate::setup::LineOnboardingSession;
+#[cfg(test)]
+use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, NoopBrowserLauncher, OnboardingFuture,
     SecretInput, SetupPrompter, TerminalSetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
-use crate::onboarding::{
-    ConnectionVerifier, LineOnboardingSession, OnboardingSession, OnboardingWorkflow,
-    RemoteConnectionVerifier, SetupCredentials,
+use crate::setup::{
+    ConnectionVerifier, OnboardingSession, OnboardingWorkflow, RemoteConnectionVerifier,
+    SetupCredentials,
 };
+use crate::setup_tui::RatatuiOnboardingSession;
 use crate::{CliError, Rendered, EXIT_USAGE};
 
 pub struct App {
@@ -163,7 +166,7 @@ impl App {
             debug,
             connection_verifier: Box::new(RemoteConnectionVerifier),
             connection_environment: Box::new(ProcessConnectionEnvironment),
-            onboarding_session: Box::new(LineOnboardingSession::terminal()),
+            onboarding_session: Box::new(RatatuiOnboardingSession::terminal()),
         }
     }
 
@@ -1067,6 +1070,7 @@ mod tests {
     #[cfg(unix)]
     use std::time::Duration;
 
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use drag::tracker::Tracker;
     #[cfg(unix)]
     use expectrl::session::OsSession;
@@ -1076,8 +1080,9 @@ mod tests {
 
     use super::{
         normalize_jira_site, App, BrowserLauncher, Config, ConnectionOutcome, ConnectionVerifier,
-        JiraCredentials, OnboardingFuture, OnboardingSession, OnboardingWorkflow, SecretInput,
-        SetupCredentials, SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
+        JiraCredentials, NoopBrowserLauncher, OnboardingFuture, OnboardingSession,
+        OnboardingWorkflow, RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupPrompter,
+        TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
     };
     use crate::cli::{DoctorArgs, SetupArgs};
     use crate::CliError;
@@ -1200,6 +1205,8 @@ mod tests {
 
     struct IncompleteOnboardingSession;
 
+    struct PendingJiraVerifier;
+
     struct DoctorVerifier {
         jira_result: Mutex<Option<Result<String, VerificationFailure>>>,
         tempo_result: Mutex<Option<Result<(), VerificationFailure>>>,
@@ -1309,6 +1316,28 @@ mod tests {
         }
     }
 
+    impl ConnectionVerifier for PendingJiraVerifier {
+        fn verify_jira<'a>(
+            &'a self,
+            _connection: &'a JiraCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, String> {
+            Box::pin(std::future::pending())
+        }
+
+        fn verify_tempo<'a>(
+            &'a self,
+            _connection: &'a TempoCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, ()> {
+            Box::pin(async {
+                Err(CliError::Api(
+                    "Tempo verification should not start".to_owned(),
+                ))
+            })
+        }
+    }
+
     impl ConnectionVerifier for DoctorVerifier {
         fn verify_jira<'a>(
             &'a self,
@@ -1387,6 +1416,37 @@ mod tests {
                 state: browser_state,
             },
         )
+    }
+
+    fn first_run_tui_events(save: bool) -> Vec<Event> {
+        let mut events = vec![
+            Event::Paste("https://Example.atlassian.net/jira/software".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Paste("person".to_owned()),
+            Event::Key(KeyEvent::new(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Event::Paste("example.com".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Paste("scripted-jira-secret".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("scripted-tempo-secret".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        if save {
+            events.push(Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )));
+        } else {
+            events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        }
+        events
     }
 
     #[cfg(unix)]
@@ -1965,6 +2025,167 @@ mod tests {
                 .as_slice(),
             ["jira-browser:false", "tempo-browser:false", "save"]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_first_run_masks_secrets_verifies_and_saves_from_scripted_events(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let prompt_state = Arc::new(Mutex::new(PromptState {
+            browser_failure: Some("no default browser".to_owned()),
+            ..PromptState::default()
+        }));
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(
+                FakeBrowserLauncher {
+                    state: Arc::clone(&prompt_state),
+                },
+                first_run_tui_events(true),
+                Arc::clone(&frames),
+            ),
+        );
+
+        let result = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(
+            (
+                saved.hostname.as_deref(),
+                saved.atlassian_user_email.as_deref(),
+                saved.atlassian_token.as_deref(),
+                saved.tempo_token.as_deref(),
+                saved.account_id.as_deref(),
+            ),
+            (
+                Some("example.atlassian.net"),
+                Some("person@example.com"),
+                Some("scripted-jira-secret"),
+                Some("scripted-tempo-secret"),
+                Some("derived-account"),
+            )
+        );
+        assert_eq!(result.data["source"], "interactive");
+
+        let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
+        assert!(captured_frames
+            .iter()
+            .any(|frame| frame.contains("Warning: Could not open")));
+        assert!(!captured_frames
+            .last()
+            .ok_or("Ratatui did not render a Save frame")?
+            .contains("Warning:"));
+        let frames = captured_frames.join("\n--- frame ---\n");
+        for visible in [
+            "Connect Jira",
+            "Connect Tempo",
+            "Save",
+            "Verifying Connect Jira",
+            "Verifying Connect Tempo",
+            "example.atlassian.net",
+            "person@example.com",
+            ATLASSIAN_TOKEN_URL,
+            "api-integration",
+            "Nothing has been saved yet",
+        ] {
+            assert!(frames.contains(visible), "missing rendered text: {visible}");
+        }
+        for secret in [
+            "scripted-jira-secret",
+            "scripted-tempo-secret",
+            "derived-account",
+        ] {
+            assert!(!frames.contains(secret), "rendered secret: {secret}");
+        }
+
+        let prompt_state = prompt_state
+            .lock()
+            .map_err(|_| "test browser lock poisoned")?;
+        assert_eq!(
+            prompt_state.browser_urls,
+            [
+                ATLASSIAN_TOKEN_URL,
+                "https://example.atlassian.net/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration",
+            ]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_first_run_does_not_write_before_explicit_save(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(
+                NoopBrowserLauncher,
+                first_run_tui_events(false),
+                Arc::new(Mutex::new(Vec::new())),
+            ),
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await
+            .err()
+            .ok_or("setup unexpectedly saved without the Save action")?;
+
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_verification_keeps_terminal_events_responsive(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let mut events = first_run_tui_events(true);
+        events.truncate(11);
+        events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        let app = App::with_onboarding_session(
+            path.clone(),
+            PendingJiraVerifier,
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: true,
+            })
+            .await
+            .err()
+            .ok_or("pending Jira verification ignored cancellation")?;
+
+        assert!(error.to_string().contains("cancelled"));
+        assert!(!path.exists());
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| frame.contains("Verifying Connect Jira")));
         Ok(())
     }
 

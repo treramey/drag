@@ -38,21 +38,23 @@ Run setup in a terminal:
 drag setup
 ```
 
-The wizard has three stages: **Connect Jira**, **Connect Tempo**, and **Save**.
-For Jira, enter either a bare hostname such as `yourcompany.atlassian.net` or
-any HTTPS URL from that Jira site. Setup asks for your Atlassian email and
-token, verifies the connection, and gets your account ID directly from Jira.
-It then asks for a Tempo token and verifies Tempo.
+The Ratatui wizard has three stages: **Connect Jira**, **Connect Tempo**, and
+**Save**. Use Tab and Shift-Tab to move between fields and actions, Enter to
+continue, and Escape to cancel. For Jira, enter either a bare hostname such as
+`yourcompany.atlassian.net` or any HTTPS URL from that Jira site. Setup verifies
+Jira and Tempo without blocking keyboard input, then shows a non-secret review
+before anything is saved.
 
-Token input is hidden, so pasted tokens do not appear in the terminal. Before
-each token prompt, setup prints the relevant token page and tries to open it in
-your default browser. Use `drag setup --no-open` to print the same links without
-launching a browser, such as over SSH. A browser error is only a warning; use
-the printed link and continue.
+Typed and pasted tokens are masked. Each connection stage shows the relevant
+token page and tries to open it in your default browser. Use `drag setup
+--no-open` to keep the links in the terminal without launching a browser, such
+as over SSH. A browser error is only a warning; use the displayed link and
+continue.
 
 When reconfiguring, the current Jira site and email are offered as defaults.
 Each saved token can be retained without displaying or copying it. If Jira or
-Tempo rejects credentials, setup retries only that connection.
+Tempo rejects credentials, setup keeps the current stage available for another
+attempt.
 
 ### Headless setup
 

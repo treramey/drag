@@ -2,7 +2,8 @@ mod api;
 mod app;
 mod cli;
 mod config;
-mod onboarding;
+mod setup;
+mod setup_tui;
 
 use std::error::Error as StdError;
 use std::ffi::OsString;
@@ -257,6 +258,10 @@ fn schema() -> Rendered {
             "setup": {
                 "sideEffects": true,
                 "interactive": true,
+                "interactiveInterface": "ratatui",
+                "interactiveTerminalRequired": true,
+                "interactiveEvents": "asynchronousCrossterm",
+                "interactiveRendering": "stderr",
                 "fromEnv": true,
                 "noOpen": true,
                 "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
