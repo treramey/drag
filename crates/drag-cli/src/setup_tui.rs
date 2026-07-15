@@ -862,7 +862,8 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
         return;
     }
 
-    let [header, body, footer] = Layout::vertical([
+    let [_top_padding, header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(8),
         Constraint::Fill(1),
         Constraint::Length(3),
