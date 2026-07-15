@@ -1421,7 +1421,12 @@ mod tests {
         let mut events = vec![
             Event::Paste("https://Example.atlassian.net/jira/software".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
-            Event::Paste("person@example.com".to_owned()),
+            Event::Paste("person".to_owned()),
+            Event::Key(KeyEvent::new(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            )),
+            Event::Paste("example.com".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
@@ -2027,7 +2032,10 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
         let path = directory.path().join("config.json");
-        let prompt_state = Arc::new(Mutex::new(PromptState::default()));
+        let prompt_state = Arc::new(Mutex::new(PromptState {
+            browser_failure: Some("no default browser".to_owned()),
+            ..PromptState::default()
+        }));
         let frames = Arc::new(Mutex::new(Vec::new()));
         let app = App::with_onboarding_session(
             path.clone(),
@@ -2070,10 +2078,15 @@ mod tests {
         );
         assert_eq!(result.data["source"], "interactive");
 
-        let frames = frames
-            .lock()
-            .map_err(|_| "test frame lock poisoned")?
-            .join("\n--- frame ---\n");
+        let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
+        assert!(captured_frames
+            .iter()
+            .any(|frame| frame.contains("Warning: Could not open")));
+        assert!(!captured_frames
+            .last()
+            .ok_or("Ratatui did not render a Save frame")?
+            .contains("Warning:"));
+        let frames = captured_frames.join("\n--- frame ---\n");
         for visible in [
             "Connect Jira",
             "Connect Tempo",
@@ -2148,7 +2161,7 @@ mod tests {
         let path = directory.path().join("config.json");
         let frames = Arc::new(Mutex::new(Vec::new()));
         let mut events = first_run_tui_events(true);
-        events.truncate(9);
+        events.truncate(11);
         events.push(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         let app = App::with_onboarding_session(
             path.clone(),

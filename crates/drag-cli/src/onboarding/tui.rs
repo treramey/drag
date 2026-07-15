@@ -327,9 +327,7 @@ impl OnboardingModel {
                 }
                 Action::None
             }
-            KeyCode::Char(character)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
+            KeyCode::Char(character) if text_input_modifiers(key.modifiers) => {
                 if let Some(input) = self.focused_input_mut() {
                     input.push(character);
                     self.error = None;
@@ -388,6 +386,12 @@ impl OnboardingModel {
             _ => false,
         }
     }
+}
+
+fn text_input_modifiers(modifiers: KeyModifiers) -> bool {
+    matches!(modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        || modifiers == KeyModifiers::CONTROL | KeyModifiers::ALT
+        || modifiers == KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT
 }
 
 enum Action {
@@ -461,6 +465,7 @@ where
                         model.email = workflow.email_default().unwrap_or_default().to_owned();
                         model.stage = UiStage::Tempo;
                         model.focus = 0;
+                        model.warning = None;
                         let tempo_page = workflow.tempo_token_page()?;
                         model.tempo_instruction = tempo_page.instruction.to_owned();
                         model.tempo_url = tempo_page.url.to_string();
@@ -508,6 +513,7 @@ where
                         model.tempo_token.clear();
                         model.stage = UiStage::Save;
                         model.focus = 0;
+                        model.warning = None;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
