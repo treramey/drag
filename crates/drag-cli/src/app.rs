@@ -1537,7 +1537,6 @@ mod tests {
 
     fn first_run_tui_events(save: bool) -> Vec<Event> {
         let mut events = vec![
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Paste("https://Example.atlassian.net/jira/software".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Paste("person".to_owned()),
@@ -1573,8 +1572,6 @@ mod tests {
 
     fn reconfiguration_tui_events() -> Vec<Event> {
         vec![
-            // Leave Welcome, advance through the prefilled Jira identity.
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             // Retain the stored Jira credential and verify the prefilled identity.
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
@@ -1780,8 +1777,6 @@ mod tests {
         let path = directory.path().join("config.json");
         let mut session = spawn_setup_pty(&path, "ratatui-fatal")?;
 
-        session.expect("Welcome to Drag setup")?;
-        session.send("\r")?;
         session.expect("Jira site")?;
         session.send("example.atlassian.net")?;
         session.send("\t")?;
@@ -2128,8 +2123,6 @@ mod tests {
         let path = directory.path().join("config.json");
         let mut session = spawn_setup_pty(&path, "success")?;
 
-        session.expect("Welcome to Drag setup")?;
-        session.send("\r")?;
         session.expect("Jira site")?;
         send_paste(&mut session, "https://Example.atlassian.net/jira/software")?;
         session.send("\t")?;
@@ -2170,8 +2163,6 @@ mod tests {
         let path = directory.path().join("config.json");
         let mut session = spawn_setup_pty(&path, "retry")?;
 
-        session.expect("Welcome to Drag setup")?;
-        session.send("\r")?;
         session.expect("Jira site")?;
         send_paste(&mut session, "example.atlassian.net")?;
         session.send("\t")?;
@@ -2214,8 +2205,6 @@ mod tests {
         existing_config().save(&path)?;
         let mut session = spawn_setup_pty(&path, "reconfigure")?;
 
-        session.expect("Welcome to Drag setup")?;
-        session.send("\r")?;
         session.expect("old.atlassian.net")?;
         session.send("\t\t\r")?;
         session.expect("Atlassian API token")?;
@@ -2245,8 +2234,6 @@ mod tests {
         let before = fs::read(&path)?;
         let mut session = spawn_setup_pty(&path, "late-cancel")?;
 
-        session.expect("Welcome to Drag setup")?;
-        session.send("\r")?;
         session.expect("old.atlassian.net")?;
         session.send("\t\t\r")?;
         session.expect("Atlassian API token")?;
@@ -2271,10 +2258,6 @@ mod tests {
         let path = directory.path().join("config.json");
         let mut session = spawn_setup_pty(&path, "resize")?;
 
-        session
-            .expect("Welcome to Drag setup")
-            .map_err(|error| format!("waiting for Welcome stage: {error}"))?;
-        session.send("\r")?;
         session
             .expect("Jira site")
             .map_err(|error| format!("waiting for initial Jira details stage: {error}"))?;
@@ -2314,8 +2297,6 @@ mod tests {
         let path = directory.path().join("config.json");
         let mut session = spawn_setup_pty(&path, "ratatui-panic")?;
 
-        session.expect("Welcome to Drag setup")?;
-        session.send("\r")?;
         session.expect("Jira site")?;
         send_paste(&mut session, "example.atlassian.net")?;
         session.send("\t")?;
@@ -2506,7 +2487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ratatui_welcome_waits_without_opening_a_browser_or_changing_config(
+    async fn ratatui_opens_atlassian_only_after_explicit_token_stage_entry(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;
         let path = directory.path().join("config.json");
@@ -2525,10 +2506,12 @@ mod tests {
                 FakeBrowserLauncher {
                     state: Arc::clone(&browser_state),
                 },
-                vec![Event::Key(KeyEvent::new(
-                    KeyCode::Char('c'),
-                    KeyModifiers::CONTROL,
-                ))],
+                vec![
+                    Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                    Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+                    Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                    Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+                ],
                 Arc::clone(&frames),
             ),
         );
@@ -2540,23 +2523,90 @@ mod tests {
             })
             .await
             .err()
-            .ok_or("Welcome advanced without explicit input")?;
+            .ok_or("token-stage checkpoint unexpectedly completed setup")?;
 
         assert!(error.to_string().contains("cancelled"));
         assert_eq!(fs::read(path)?, before);
-        assert!(browser_state
-            .lock()
-            .map_err(|_| "test browser lock poisoned")?
-            .browser_urls
-            .is_empty());
+        assert_eq!(
+            browser_state
+                .lock()
+                .map_err(|_| "test browser lock poisoned")?
+                .browser_urls,
+            [ATLASSIAN_TOKEN_URL]
+        );
+        let frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
+        assert!(frames.first().is_some_and(|frame| {
+            frame.contains("Jira site")
+                && frame.contains("Atlassian email")
+                && frame.contains("Continue to API token")
+                && !frame.contains(ATLASSIAN_TOKEN_URL)
+        }));
+        assert!(frames
+            .iter()
+            .any(|frame| frame.contains(ATLASSIAN_TOKEN_URL)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ratatui_back_from_jira_token_discards_only_the_unverified_buffer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let before = fs::read(&path)?;
+        let browser_state = Arc::new(Mutex::new(PromptState::default()));
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Paste("unverified-jira-token".to_owned()),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::new()),
+                tempo_results: Mutex::new(VecDeque::new()),
+            },
+            RatatuiOnboardingSession::scripted(
+                FakeBrowserLauncher {
+                    state: Arc::clone(&browser_state),
+                },
+                events,
+                Arc::clone(&frames),
+            ),
+        );
+
+        let error = app
+            .setup(SetupArgs {
+                from_env: false,
+                no_open: false,
+            })
+            .await
+            .err()
+            .ok_or("unverified Jira token buffer unexpectedly completed setup")?;
+
+        assert!(error.to_string().contains("cancelled"));
+        assert_eq!(fs::read(path)?, before);
+        assert_eq!(
+            browser_state
+                .lock()
+                .map_err(|_| "test browser lock poisoned")?
+                .browser_urls,
+            [ATLASSIAN_TOKEN_URL]
+        );
         assert!(frames
             .lock()
             .map_err(|_| "test frame lock poisoned")?
-            .first()
+            .last()
             .is_some_and(|frame| {
-                frame.contains("Welcome to Drag setup")
-                    && frame.contains("Nothing opens or saves until you explicitly continue")
-                    && !frame.contains(ATLASSIAN_TOKEN_URL)
+                frame.contains("Stored credential available")
+                    && !frame.contains("unverified-jira-token")
             }));
         Ok(())
     }
@@ -2571,7 +2621,6 @@ mod tests {
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
             // Reject an invalid site and an empty Jira form before any verification call.
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Paste("/".to_owned()),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
@@ -2777,7 +2826,6 @@ mod tests {
         existing_config().save(&path)?;
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -2955,8 +3003,8 @@ mod tests {
 
         let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
         assert!(captured_frames.first().is_some_and(|frame| {
-            frame.contains("Welcome to Drag setup")
-                && frame.contains("Start setup")
+            frame.contains("old.atlassian.net")
+                && frame.contains("old@example.com")
                 && frame.contains("Esc")
                 && frame.contains("cancel")
                 && !frame.contains(ATLASSIAN_TOKEN_URL)
@@ -3026,7 +3074,6 @@ mod tests {
         let browser_state = Arc::new(Mutex::new(PromptState::default()));
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -3096,7 +3143,6 @@ mod tests {
         existing_config().save(&path)?;
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -3152,7 +3198,6 @@ mod tests {
         let before = fs::read(&path)?;
         let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
-            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
@@ -3201,9 +3246,11 @@ mod tests {
         let path = directory.path().join("config.json");
         existing_config().save(&path)?;
         let before = fs::read(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
         let events = vec![
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
             Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
@@ -3216,11 +3263,7 @@ mod tests {
                 jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
                 tempo_results: Mutex::new(VecDeque::from([Ok(())])),
             },
-            RatatuiOnboardingSession::scripted(
-                NoopBrowserLauncher,
-                events,
-                Arc::new(Mutex::new(Vec::new())),
-            ),
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
         );
 
         let error = app
@@ -3234,6 +3277,11 @@ mod tests {
 
         assert!(error.to_string().contains("cancelled"));
         assert_eq!(fs::read(path)?, before);
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| frame.contains("Save configuration")));
         Ok(())
     }
 
