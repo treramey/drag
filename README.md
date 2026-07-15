@@ -38,13 +38,20 @@ Run setup in a terminal:
 drag setup
 ```
 
-The Ratatui wizard has three stages: **Connect Jira**, **Connect Tempo**, and
-**Save**. Use Tab and Shift-Tab to move between fields and actions, Enter to
-continue, and Escape to return to the previous stage. Escape cancels from
-Connect Jira. For Jira, enter either a bare hostname such as
+The Ratatui wizard requires terminal-capable standard input and standard error
+and has three stages: **Connect Jira**, **Connect Tempo**, and **Save**. Use Tab
+and Shift-Tab to move between fields and actions, Enter to continue, and Escape
+to return to the previous stage. Escape cancels from Connect Jira; Ctrl-C
+cancels from any stage, including during a connection check. Cancellation
+never saves configuration. For Jira, enter either a bare hostname such as
 `yourcompany.atlassian.net` or any HTTPS URL from that Jira site. Setup
 verifies Jira and Tempo without blocking keyboard input, then shows a
 non-secret review before anything is saved.
+
+Resize events preserve entered values and redraw the wizard. Terminals smaller
+than 84 columns by 28 rows show a resize instruction until enough space is
+available. Focus, pending, connected, warning, and error states use text and
+symbols as well as color.
 
 Typed and pasted tokens are masked. Each connection stage shows the relevant
 token page and tries to open it in your default browser. Use `drag setup
@@ -58,6 +65,11 @@ Tempo rejects credentials, setup keeps the current stage available for another
 attempt. Editing verified Jira details requires both connections to be checked
 again; replacing only the Tempo token keeps Jira connected. Nothing changes on
 disk until the final Save action.
+
+The wizard renders on standard error and restores raw mode, the alternate
+screen, cursor visibility, and bracketed paste before printing its result.
+Consequently, `drag --output json setup` keeps successful JSON on standard
+output free of terminal control sequences and onboarding text.
 
 ### Headless setup
 

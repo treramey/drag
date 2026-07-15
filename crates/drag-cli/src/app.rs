@@ -1066,6 +1066,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     #[cfg(unix)]
+    use std::panic::AssertUnwindSafe;
+    #[cfg(unix)]
     use std::process::Command;
     #[cfg(unix)]
     use std::time::Duration;
@@ -1076,6 +1078,8 @@ mod tests {
     use expectrl::session::OsSession;
     #[cfg(unix)]
     use expectrl::{ControlCode, Eof, Expect, Session};
+    #[cfg(unix)]
+    use futures_util::FutureExt;
     use tempfile::TempDir;
 
     use super::{
@@ -1198,6 +1202,9 @@ mod tests {
         jira_results: Mutex<VecDeque<Result<String, VerificationFailure>>>,
         tempo_results: Mutex<VecDeque<Result<(), VerificationFailure>>>,
     }
+
+    #[cfg(unix)]
+    struct PanickingVerifier;
 
     struct RecordingSequenceVerifier {
         jira_results: Mutex<VecDeque<Result<String, VerificationFailure>>>,
@@ -1332,6 +1339,31 @@ mod tests {
                     .pop_front()
                     .ok_or_else(|| CliError::Api("unexpected Tempo verification".to_owned()))?
                     .map_err(VerificationFailure::into_cli_error)
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    impl ConnectionVerifier for PanickingVerifier {
+        fn verify_jira<'a>(
+            &'a self,
+            _connection: &'a JiraCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, String> {
+            Box::pin(async move {
+                std::panic::resume_unwind(Box::new("intentional PTY verifier panic"))
+            })
+        }
+
+        fn verify_tempo<'a>(
+            &'a self,
+            _connection: &'a TempoCredentials,
+            _debug: bool,
+        ) -> VerificationFuture<'a, ()> {
+            Box::pin(async move {
+                Err(CliError::Api(
+                    "Tempo verification must not run after a Jira panic".to_owned(),
+                ))
             })
         }
     }
@@ -1573,20 +1605,89 @@ mod tests {
         path: &std::path::Path,
         scenario: &str,
     ) -> Result<OsSession, Box<dyn std::error::Error>> {
-        let mut command = Command::new(std::env::current_exe()?);
+        let executable = std::env::current_exe()?;
+        let mut command = Command::new("sh");
         command
             .args([
-                "--exact",
-                "app::tests::pty_setup_helper",
-                "--ignored",
-                "--nocapture",
-                "--test-threads=1",
+                "-c",
+                "exec \"$1\" --exact app::tests::pty_setup_helper --ignored --nocapture --test-threads=1 >\"$2\"",
+                "drag-pty-wrapper",
             ])
+            .arg(executable)
+            .arg(pty_output_path(path))
             .env("DRAG_PTY_CONFIG", path)
             .env("DRAG_PTY_SCENARIO", scenario);
+        for variable in [
+            "TEMPO_TOKEN",
+            "TEMPO_ACCOUNT_ID",
+            "ATLASSIAN_EMAIL",
+            "ATLASSIAN_TOKEN",
+            "ATLASSIAN_HOST",
+        ] {
+            command.env_remove(variable);
+        }
         let mut session = Session::spawn(command)?;
+        session.get_process_mut().set_window_size(100, 30)?;
         session.set_expect_timeout(Some(Duration::from_secs(10)));
         Ok(session)
+    }
+
+    #[cfg(unix)]
+    fn pty_output_path(config_path: &std::path::Path) -> PathBuf {
+        config_path.with_extension("stdout.json")
+    }
+
+    #[cfg(unix)]
+    fn read_pty_json_output(
+        config_path: &std::path::Path,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let output = fs::read_to_string(pty_output_path(config_path))?;
+        assert!(!output.contains('\u{1b}'));
+        assert!(!output.contains("Drag setup"));
+        assert!(!output.contains("Connect Jira"));
+
+        let json_start = output
+            .find("{\n  \"ok\": true,")
+            .ok_or("PTY stdout did not contain a JSON success envelope")?;
+        let json_end = output
+            .rfind("\n}")
+            .map(|offset| offset + 2)
+            .ok_or("PTY stdout contained an incomplete JSON success envelope")?;
+        assert_eq!(
+            output[..json_start].trim(),
+            "running 1 test\ntest app::tests::pty_setup_helper ..."
+        );
+        assert!(output[json_end..].starts_with("\nok\n\ntest result: ok."));
+
+        Ok(serde_json::from_str(&output[json_start..json_end])?)
+    }
+
+    #[cfg(unix)]
+    fn send_paste(session: &mut OsSession, value: &str) -> Result<(), Box<dyn std::error::Error>> {
+        session.send(format!("\u{1b}[200~{value}\u{1b}[201~"))?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn assert_terminal_restored(output: &[u8]) {
+        let output = String::from_utf8_lossy(output);
+        for restoration in ["\u{1b}[?2004l", "\u{1b}[?1049l", "\u{1b}[?25h"] {
+            assert!(
+                output.contains(restoration),
+                "missing terminal restoration sequence {restoration:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    fn expect_terminal_restoration(
+        session: &mut OsSession,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let paste = session.expect("\u{1b}[?2004l")?;
+        let output = paste.before().to_vec();
+        session.expect("\u{1b}[?1049l")?;
+        session.expect("\u{1b}[?25h")?;
+        Ok(output)
     }
 
     #[cfg(unix)]
@@ -1596,7 +1697,7 @@ mod tests {
         let path = PathBuf::from(std::env::var("DRAG_PTY_CONFIG")?);
         let scenario = std::env::var("DRAG_PTY_SCENARIO")?;
         let (jira_results, tempo_results) = match scenario.as_str() {
-            "success" | "reconfigure" | "late-cancel" => (
+            "success" | "reconfigure" | "late-cancel" | "resize" => (
                 VecDeque::from([Ok("pty-account".to_owned())]),
                 VecDeque::from([Ok(())]),
             ),
@@ -1620,27 +1721,41 @@ mod tests {
                 ))]),
                 VecDeque::new(),
             ),
+            "ratatui-panic" => (VecDeque::new(), VecDeque::new()),
             _ => return Err(format!("unknown PTY scenario: {scenario}").into()),
         };
         let verifier = SequenceVerifier {
             jira_results: Mutex::new(jira_results),
             tempo_results: Mutex::new(tempo_results),
         };
-        let app = if scenario == "ratatui-fatal" {
-            App::with_onboarding_session(path, verifier, RatatuiOnboardingSession::terminal())
+        let app = if scenario == "ratatui-panic" {
+            App::with_onboarding_session(
+                path,
+                PanickingVerifier,
+                RatatuiOnboardingSession::terminal(),
+            )
         } else {
-            App::with_connection_verifier(path, verifier)
+            App::with_onboarding_session(path, verifier, RatatuiOnboardingSession::terminal())
         };
 
-        let result = app
-            .setup(SetupArgs {
-                from_env: false,
-                no_open: scenario == "ratatui-fatal",
-            })
-            .await;
-        if scenario == "ratatui-fatal" {
+        let setup = app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        });
+        if scenario == "ratatui-panic" {
+            let outcome = AssertUnwindSafe(setup).catch_unwind().await;
             assert!(!crossterm::terminal::is_raw_mode_enabled()?);
+            let Err(payload) = outcome else {
+                return Err("expected the PTY verifier to panic".into());
+            };
+            if payload.downcast_ref::<&str>().copied() != Some("intentional PTY verifier panic") {
+                return Err("PTY verifier produced an unexpected panic payload".into());
+            }
+            return Ok(());
         }
+
+        let result = setup.await;
+        assert!(!crossterm::terminal::is_raw_mode_enabled()?);
         match result {
             Ok(result) => crate::emit_result(result, ResolvedOutputMode::Json)?,
             Err(error) => crate::emit_error(&error, ResolvedOutputMode::Json),
@@ -2002,21 +2117,27 @@ mod tests {
         let mut session = spawn_setup_pty(&path, "success")?;
 
         session.expect("Connect Jira")?;
-        session.expect("Jira site (hostname or HTTPS URL)")?;
-        session.send_line("https://Example.atlassian.net/jira/software")?;
+        send_paste(&mut session, "https://Example.atlassian.net/jira/software")?;
+        session.send("\t")?;
         session.expect("Atlassian email")?;
-        session.send_line("person@example.com")?;
-        session.expect(ATLASSIAN_TOKEN_URL)?;
-        session.expect("pasted input will not be displayed")?;
-        session.send_line("pty-jira-secret")?;
-        let jira_output = session.expect("Connect Tempo")?;
+        send_paste(&mut session, "person@example.com")?;
+        session.send("\t")?;
+        send_paste(&mut session, "pty-jira-secret")?;
+        session.send("\t\r")?;
+        let jira_output = session.expect("Tempo API token")?;
         assert!(!String::from_utf8_lossy(jira_output.before()).contains("pty-jira-secret"));
         session.expect("api-integration")?;
-        session.expect("pasted input will not be displayed")?;
-        session.send_line("pty-tempo-secret")?;
-        let success_output = session.expect("\"source\": \"interactive\"")?;
-        assert!(!String::from_utf8_lossy(success_output.before()).contains("pty-tempo-secret"));
+        send_paste(&mut session, "pty-tempo-secret")?;
+        session.send("\t\r")?;
+        let tempo_output = session.expect("Save configuration")?;
+        assert!(!String::from_utf8_lossy(tempo_output.before()).contains("pty-tempo-secret"));
+        session.send("\r")?;
+        expect_terminal_restoration(&mut session)?;
         session.expect(Eof)?;
+
+        let body = read_pty_json_output(&path)?;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["data"]["source"], "interactive");
 
         let saved = Config::load(&path)?;
         assert_eq!(saved.hostname.as_deref(), Some("example.atlassian.net"));
@@ -2034,26 +2155,25 @@ mod tests {
         let path = directory.path().join("config.json");
         let mut session = spawn_setup_pty(&path, "retry")?;
 
-        session.expect("Jira site (hostname or HTTPS URL)")?;
-        session.send_line("example.atlassian.net")?;
-        session.expect("Atlassian email")?;
-        session.send_line("person@example.com")?;
-        session.expect("pasted input will not be displayed")?;
-        session.send_line("bad-jira-token")?;
+        session.expect("Connect Jira")?;
+        send_paste(&mut session, "example.atlassian.net")?;
+        session.send("\t")?;
+        send_paste(&mut session, "person@example.com")?;
+        session.send("\t")?;
+        send_paste(&mut session, "bad-jira-token")?;
+        session.send("\t\r")?;
         session.expect("Could not connect to Jira")?;
-        session.expect("Jira site (hostname or HTTPS URL) [example.atlassian.net]")?;
-        session.send_line("")?;
-        session.expect("Atlassian email [person@example.com]")?;
-        session.send_line("")?;
-        session.expect("pasted input will not be displayed")?;
-        session.send_line("good-jira-token")?;
-        session.expect("Connect Tempo")?;
-        session.expect("pasted input will not be displayed")?;
-        session.send_line("bad-tempo-token")?;
+        send_paste(&mut session, "good-jira-token")?;
+        session.send("\t\r")?;
+        session.expect("Tempo API token")?;
+        send_paste(&mut session, "bad-tempo-token")?;
+        session.send("\t\r")?;
         session.expect("Could not connect to Tempo")?;
-        session.expect("pasted input will not be displayed")?;
-        session.send_line("good-tempo-token")?;
-        session.expect("\"source\": \"interactive\"")?;
+        send_paste(&mut session, "good-tempo-token")?;
+        session.send("\t\r")?;
+        session.expect("Save configuration")?;
+        session.send("\r")?;
+        expect_terminal_restoration(&mut session)?;
         session.expect(Eof)?;
 
         let saved = Config::load(&path)?;
@@ -2076,16 +2196,13 @@ mod tests {
         existing_config().save(&path)?;
         let mut session = spawn_setup_pty(&path, "reconfigure")?;
 
-        session.expect("Jira site (hostname or HTTPS URL) [old.atlassian.net]")?;
-        session.send_line("")?;
-        session.expect("Atlassian email [old@example.com]")?;
-        session.send_line("")?;
-        session.expect("press Enter to keep the existing token")?;
-        session.send_line("")?;
-        session.expect("Connect Tempo")?;
-        session.expect("press Enter to keep the existing token")?;
-        session.send_line("")?;
-        session.expect("\"source\": \"interactive\"")?;
+        session.expect("old.atlassian.net")?;
+        session.send("\t\t\t\r")?;
+        session.expect("Tempo API token")?;
+        session.send("\t\r")?;
+        session.expect("Save configuration")?;
+        session.send("\r")?;
+        expect_terminal_restoration(&mut session)?;
         session.expect(Eof)?;
 
         let saved = Config::load(&path)?;
@@ -2106,18 +2223,82 @@ mod tests {
         let before = fs::read(&path)?;
         let mut session = spawn_setup_pty(&path, "late-cancel")?;
 
-        session.expect("Jira site (hostname or HTTPS URL) [old.atlassian.net]")?;
-        session.send_line("")?;
-        session.expect("Atlassian email [old@example.com]")?;
-        session.send_line("")?;
-        session.expect("press Enter to keep the existing token")?;
-        session.send_line("")?;
-        session.expect("Connect Tempo")?;
-        session.expect("press Enter to keep the existing token")?;
+        session.expect("old.atlassian.net")?;
+        session.send("\t\t\t\r")?;
+        session.expect("Tempo API token")?;
+        session.send("\t\r")?;
+        session.expect("Save configuration")?;
         session.send(ControlCode::EndOfText)?;
+        let cancelled = session.expect("interactive setup was cancelled")?;
+        assert_terminal_restored(cancelled.before());
         session.expect(Eof)?;
 
         assert_eq!(fs::read(path)?, before);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_resize_message_preserves_entered_state_and_allows_cancellation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let mut session = spawn_setup_pty(&path, "resize")?;
+
+        session
+            .expect("Connect Jira")
+            .map_err(|error| format!("waiting for initial Jira stage: {error}"))?;
+        send_paste(&mut session, "example.atlassian.net")?;
+        session
+            .expect("example.atlassian.net")
+            .map_err(|error| format!("waiting for pasted Jira host: {error}"))?;
+        session.get_process_mut().set_window_size(50, 10)?;
+        session
+            .expect("Terminal too small")
+            .map_err(|error| format!("waiting for undersized message: {error}"))?;
+        send_paste(&mut session, "hidden-input-must-be-ignored")?;
+        session.send("\t\t\t\r")?;
+        std::thread::sleep(Duration::from_millis(100));
+        session.get_process_mut().set_window_size(100, 30)?;
+        session
+            .expect("Jira site (focused)")
+            .map_err(|error| format!("waiting for restored Jira stage: {error}"))?;
+        session
+            .expect("example.atlassian.net")
+            .map_err(|error| format!("waiting for preserved Jira host: {error}"))?;
+        session.send(ControlCode::EndOfText)?;
+        let cancelled = session
+            .expect("interactive setup was cancelled")
+            .map_err(|error| format!("waiting for cancellation result: {error}"))?;
+        assert_terminal_restored(cancelled.before());
+        session.expect(Eof)?;
+
+        assert!(!path.exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_panic_restores_terminal_state() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let mut session = spawn_setup_pty(&path, "ratatui-panic")?;
+
+        session.expect("Connect Jira")?;
+        send_paste(&mut session, "example.atlassian.net")?;
+        session.send("\t")?;
+        send_paste(&mut session, "person@example.com")?;
+        session.send("\t")?;
+        send_paste(&mut session, "panic-jira-token")?;
+        session.send("\t\r")?;
+        let panicked = expect_terminal_restoration(&mut session)?;
+        session.expect(Eof)?;
+
+        assert!(!String::from_utf8_lossy(&panicked).contains("panic-jira-token"));
+        let stdout = fs::read_to_string(pty_output_path(&path))?;
+        assert!(stdout.contains("test app::tests::pty_setup_helper ... ok"));
+        assert!(!stdout.contains("FAILED"));
+        assert!(!path.exists());
         Ok(())
     }
 
