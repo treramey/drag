@@ -29,7 +29,9 @@ codes.
 - `drag::tracker`: persistent timer state machine.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
 - `drag_cli::api`: authentication, pagination, endpoint validation.
-- `drag_cli::onboarding`: setup state, connection verification, and terminal transport boundary.
+- `drag_cli::onboarding`: setup state and connection verification.
+- `drag_cli::onboarding::tui`: Ratatui rendering, Crossterm events, and the
+  stderr terminal lifecycle for interactive setup.
 - `drag_cli::app`: use-case orchestration and partial tracker upload safety.
 
 ## Safety invariants

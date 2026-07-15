@@ -1,5 +1,7 @@
 use std::future::Future;
-use std::io::{self, IsTerminal, Write};
+use std::io;
+#[cfg(test)]
+use std::io::{IsTerminal, Write};
 use std::pin::Pin;
 
 use url::Url;
@@ -7,6 +9,10 @@ use url::Url;
 use crate::api::ApiClient;
 use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
 use crate::CliError;
+
+mod tui;
+
+pub(crate) use tui::RatatuiOnboardingSession;
 
 pub(crate) const ATLASSIAN_TOKEN_URL: &str =
     "https://id.atlassian.com/manage-profile/security/api-tokens";
@@ -104,6 +110,7 @@ impl BrowserLauncher for NoopBrowserLauncher {
     }
 }
 
+#[cfg(test)]
 pub(crate) trait SetupPrompter: Send + Sync {
     fn is_terminal(&self) -> bool;
     fn message(&self, message: &str) -> Result<(), CliError>;
@@ -111,8 +118,10 @@ pub(crate) trait SetupPrompter: Send + Sync {
     fn prompt_secret(&self, label: &str, can_retain: bool) -> Result<Option<String>, CliError>;
 }
 
+#[cfg(test)]
 pub(crate) struct TerminalSetupPrompter;
 
+#[cfg(test)]
 impl SetupPrompter for TerminalSetupPrompter {
     fn is_terminal(&self) -> bool {
         io::stdin().is_terminal()
@@ -224,20 +233,14 @@ pub(crate) trait OnboardingSession: Send + Sync {
     fn run<'a>(&'a self, workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a>;
 }
 
+#[cfg(test)]
 pub(crate) struct LineOnboardingSession {
     prompter: Box<dyn SetupPrompter>,
     browser_launcher: Box<dyn BrowserLauncher>,
 }
 
+#[cfg(test)]
 impl LineOnboardingSession {
-    pub(crate) fn terminal() -> Self {
-        Self {
-            prompter: Box::new(TerminalSetupPrompter),
-            browser_launcher: Box::new(SystemBrowserLauncher),
-        }
-    }
-
-    #[cfg(test)]
     pub(crate) fn with_dependencies(
         prompter: impl SetupPrompter + 'static,
         browser_launcher: impl BrowserLauncher + 'static,
@@ -309,7 +312,7 @@ impl LineOnboardingSession {
             let input = self
                 .prompter
                 .prompt_text("Jira site (hostname or HTTPS URL)", default)?;
-            match OnboardingWorkflow::normalize_jira_site(&input) {
+            match normalize_jira_site(&input) {
                 Ok(hostname) => return Ok(hostname),
                 Err(error) => self.prompter.message(&format!(
                     "Invalid Jira site: {error}\nPaste a bare hostname or any HTTPS URL from your Jira site."
@@ -349,6 +352,7 @@ impl LineOnboardingSession {
     }
 }
 
+#[cfg(test)]
 impl OnboardingSession for LineOnboardingSession {
     fn is_terminal(&self) -> bool {
         self.prompter.is_terminal()
@@ -440,10 +444,6 @@ impl<'a> OnboardingWorkflow<'a> {
 
     pub(crate) fn can_retain_tempo_token(&self) -> bool {
         self.tempo_token.is_some()
-    }
-
-    pub(crate) fn normalize_jira_site(input: &str) -> Result<String, CliError> {
-        normalize_jira_site(input)
     }
 
     pub(crate) fn jira_token_page(&mut self) -> Result<TokenPage, CliError> {
@@ -583,6 +583,7 @@ pub(crate) fn setup_cancelled() -> CliError {
     )
 }
 
+#[cfg(test)]
 fn map_setup_input_error(error: io::Error) -> CliError {
     if matches!(
         error.kind(),

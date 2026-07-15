@@ -18,10 +18,12 @@ chrono-tz.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 comfy-table = "7.1"
+crossterm = { version = "0.29", features = ["event-stream"] }
 dirs = "6.0"
+futures-util = "0.3"
 iana-time-zone = "0.1"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
-rpassword = "7.4"
 serde.workspace = true
 serde_json.workspace = true
 drag = { version = "0.1.0", path = "../drag" }
@@ -33,6 +35,7 @@ webbrowser = { version = "1.2", features = ["hardened"] }
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.1"
+rpassword = "7.4"
 tempfile = "3.20"
 
 [target.'cfg(unix)'.dev-dependencies]

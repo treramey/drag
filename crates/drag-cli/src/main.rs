@@ -257,6 +257,10 @@ fn schema() -> Rendered {
             "setup": {
                 "sideEffects": true,
                 "interactive": true,
+                "interactiveInterface": "ratatui",
+                "interactiveTerminalRequired": true,
+                "interactiveEvents": "asynchronousCrossterm",
+                "interactiveRendering": "stderr",
                 "fromEnv": true,
                 "noOpen": true,
                 "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],

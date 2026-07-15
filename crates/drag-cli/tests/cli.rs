@@ -180,6 +180,14 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     let body: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(body["data"]["commands"]["log"]["dryRun"], true);
     assert_eq!(body["data"]["commands"]["setup"]["interactive"], true);
+    assert_eq!(
+        body["data"]["commands"]["setup"]["interactiveInterface"],
+        "ratatui"
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["interactiveRendering"],
+        "stderr"
+    );
     assert_eq!(body["data"]["commands"]["setup"]["sideEffects"], true);
     assert_eq!(body["data"]["commands"]["setup"]["fromEnv"], true);
     assert_eq!(
@@ -249,7 +257,9 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("opens Ratatui"));
     assert!(stdout.contains("Connect Jira, Connect Tempo, and Save"));
+    assert!(stdout.contains("Tab and Shift-Tab"));
     assert!(stdout.contains("--from-env"));
     assert!(stdout.contains("--no-open"));
     assert!(stdout.contains("Print token URLs without launching a browser"));

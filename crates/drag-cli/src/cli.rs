@@ -52,8 +52,9 @@ pub enum Command {
     Delete(DeleteArgs),
     /// Connect Jira and Tempo, verify both connections, then save.
     ///
-    /// Interactive setup guides you through Connect Jira, Connect Tempo, and Save.
-    /// Use --from-env for unattended setup or --no-open to keep token links in the
+    /// Interactive setup opens Ratatui for Connect Jira, Connect Tempo, and Save.
+    /// Use Tab and Shift-Tab to move, Enter to continue, and Escape to cancel. Use
+    /// --from-env for unattended setup or --no-open to keep token links in the
     /// terminal without launching a browser.
     Setup(SetupArgs),
     /// Manage issue-key aliases.
