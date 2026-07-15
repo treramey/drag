@@ -867,7 +867,7 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
 
     let [_top_padding, header, body, footer] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(8),
+        Constraint::Length(7),
         Constraint::Fill(1),
         Constraint::Length(3),
     ])
@@ -897,13 +897,27 @@ fn constrain_content_width(area: Rect) -> Rect {
     )
 }
 
-const fn form_gap(area: Rect) -> u16 {
-    if area.height >= 20 {
-        SPACE_MD
+struct FormSpacing {
+    related: u16,
+    section: u16,
+}
+
+const fn form_spacing(area: Rect, spacious_height: u16) -> FormSpacing {
+    if area.height >= spacious_height {
+        FormSpacing {
+            related: SPACE_SM,
+            section: SPACE_MD,
+        }
     } else if area.height >= 16 {
-        SPACE_SM
+        FormSpacing {
+            related: SPACE_SM,
+            section: SPACE_SM,
+        }
     } else {
-        0
+        FormSpacing {
+            related: 0,
+            section: 0,
+        }
     }
 }
 
@@ -994,14 +1008,14 @@ fn stage_span(
 }
 
 fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let gap = form_gap(area);
+    let spacing = form_spacing(area, 18);
     let [intro, _, hostname, _, email, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.related),
         Constraint::Length(3),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
@@ -1050,14 +1064,14 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
 }
 
 fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let gap = form_gap(area);
+    let spacing = form_spacing(area, 18);
     let [intro, _, token, _, url, _, status, feedback, _] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.related),
         Constraint::Length(3),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
@@ -1101,14 +1115,14 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
 }
 
 fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let gap = form_gap(area);
+    let spacing = form_spacing(area, 19);
     let [intro, _, token, _, url, _, status, feedback, _] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.related),
         Constraint::Length(4),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
@@ -1157,12 +1171,12 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
 }
 
 fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
-    let gap = form_gap(area);
+    let spacing = form_spacing(area, 18);
     let [intro, _, review, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(7),
-        Constraint::Length(gap),
+        Constraint::Length(spacing.section),
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
