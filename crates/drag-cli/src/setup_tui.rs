@@ -464,6 +464,16 @@ fn text_input_modifiers(modifiers: KeyModifiers) -> bool {
         || modifiers == KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT
 }
 
+fn event_allowed_while_undersized(event: &Event) -> bool {
+    matches!(event, Event::Resize(_, _)) || OnboardingModel::pending_cancel(event)
+}
+
+fn update_undersized_state(undersized: &mut bool, event: &Event) {
+    if let Event::Resize(width, height) = event {
+        *undersized = size_is_undersized(*width, *height);
+    }
+}
+
 enum Action {
     None,
     ConnectJira,
@@ -491,10 +501,15 @@ where
     model.jira_instruction = jira_page.instruction.to_owned();
     model.jira_url = jira_page.url.to_string();
     present_page(&mut model, browser_launcher, &jira_page);
+    let mut undersized = terminal_is_undersized(terminal)?;
 
     loop {
         draw(terminal, &model, &mut observe)?;
         let event = next_event(events).await?;
+        update_undersized_state(&mut undersized, &event);
+        if undersized && !event_allowed_while_undersized(&event) {
+            continue;
+        }
         match model.handle_event(event) {
             Action::None => {}
             Action::Cancel => return Err(setup_cancelled()),
@@ -547,6 +562,10 @@ where
                             result = &mut verification => break result,
                             event = events.next() => {
                                 let event = event_result(event)?;
+                                update_undersized_state(&mut undersized, &event);
+                                if undersized && !event_allowed_while_undersized(&event) {
+                                    continue;
+                                }
                                 if OnboardingModel::pending_cancel(&event)
                                     || OnboardingModel::pending_back(&event)
                                 {
@@ -613,6 +632,10 @@ where
                             result = &mut verification => break Some(result),
                             event = events.next() => {
                                 let event = event_result(event)?;
+                                update_undersized_state(&mut undersized, &event);
+                                if undersized && !event_allowed_while_undersized(&event) {
+                                    continue;
+                                }
                                 if OnboardingModel::pending_cancel(&event) {
                                     return Err(setup_cancelled());
                                 }
@@ -703,6 +726,19 @@ where
         .draw(|frame| render(frame, model))
         .map_err(BackendFailure::into_cli_error)?;
     observe(terminal)
+}
+
+fn terminal_is_undersized<B>(terminal: &Terminal<B>) -> Result<bool, CliError>
+where
+    B: Backend,
+    B::Error: BackendFailure,
+{
+    let size = terminal.size().map_err(BackendFailure::into_cli_error)?;
+    Ok(size_is_undersized(size.width, size.height))
+}
+
+const fn size_is_undersized(width: u16, height: u16) -> bool {
+    width < MIN_TERMINAL_WIDTH || height < MIN_TERMINAL_HEIGHT
 }
 
 fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
@@ -1063,12 +1099,12 @@ fn test_backend_text(terminal: &Terminal<ratatui::backend::TestBackend>) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use crossterm::event::Event;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use ratatui::backend::TestBackend;
 
     use super::{
-        test_backend_text, Action, ConnectionStatus, OnboardingModel, Terminal, UiStage,
-        MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
+        event_allowed_while_undersized, test_backend_text, Action, ConnectionStatus,
+        OnboardingModel, Terminal, UiStage, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
     };
 
     fn model() -> OnboardingModel {
@@ -1134,5 +1170,21 @@ mod tests {
         assert!(small.contains("Your entered setup values are preserved"));
         assert!(restored.contains("example.atlassian.net"));
         Ok(())
+    }
+
+    #[test]
+    fn undersized_event_gate_allows_only_resize_and_ctrl_c() {
+        assert!(event_allowed_while_undersized(&Event::Resize(84, 28)));
+        assert!(event_allowed_while_undersized(&Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(!event_allowed_while_undersized(&Event::Paste(
+            "secret".to_owned()
+        )));
+        assert!(!event_allowed_while_undersized(&Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
     }
 }

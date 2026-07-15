@@ -265,6 +265,8 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
     assert!(stdout.contains("terminal-capable stdin and stderr"));
     assert!(stdout.contains("Connect Jira, Connect Tempo, and Save"));
     assert!(stdout.contains("Tab and Shift-Tab"));
+    assert!(stdout.contains("Escape goes back"));
+    assert!(stdout.contains("cancels from Connect Jira"));
     assert!(stdout.contains("Ctrl-C"));
     assert!(stdout.contains("--from-env"));
     assert!(stdout.contains("--no-open"));

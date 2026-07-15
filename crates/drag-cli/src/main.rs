@@ -320,25 +320,11 @@ fn resolve_mode(mode: OutputMode) -> ResolvedOutputMode {
 }
 
 fn emit_result(result: Rendered, mode: ResolvedOutputMode) -> Result<(), CliError> {
-    emit_result_to(
-        result,
-        mode,
-        &mut io::stdout().lock(),
-        &mut io::stderr().lock(),
-    )
-}
-
-fn emit_result_to(
-    result: Rendered,
-    mode: ResolvedOutputMode,
-    stdout: &mut impl Write,
-    stderr: &mut impl Write,
-) -> Result<(), CliError> {
     if let Some(failure) = result.failure {
         match mode {
-            ResolvedOutputMode::Human => writeln!(stderr, "{}", result.human)?,
+            ResolvedOutputMode::Human => eprintln!("{}", result.human),
             ResolvedOutputMode::Json => write_json(
-                stderr,
+                &mut io::stderr().lock(),
                 &DiagnosticFailure {
                     ok: false,
                     error: DiagnosticError {
@@ -352,9 +338,9 @@ fn emit_result_to(
         return Ok(());
     }
     match mode {
-        ResolvedOutputMode::Human => writeln!(stdout, "{}", result.human)?,
+        ResolvedOutputMode::Human => println!("{}", result.human),
         ResolvedOutputMode::Json => write_json(
-            stdout,
+            &mut io::stdout().lock(),
             &Success {
                 ok: true,
                 data: result.data,
