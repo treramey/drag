@@ -1614,26 +1614,69 @@ mod tests {
                     Ok(()),
                 ]),
             ),
+            "ratatui-fatal" => (
+                VecDeque::from([Err(VerificationFailure::Fatal(
+                    "fatal PTY verification failure".to_owned(),
+                ))]),
+                VecDeque::new(),
+            ),
             _ => return Err(format!("unknown PTY scenario: {scenario}").into()),
         };
-        let app = App::with_connection_verifier(
-            path,
-            SequenceVerifier {
-                jira_results: Mutex::new(jira_results),
-                tempo_results: Mutex::new(tempo_results),
-            },
-        );
+        let verifier = SequenceVerifier {
+            jira_results: Mutex::new(jira_results),
+            tempo_results: Mutex::new(tempo_results),
+        };
+        let app = if scenario == "ratatui-fatal" {
+            App::with_onboarding_session(path, verifier, RatatuiOnboardingSession::terminal())
+        } else {
+            App::with_connection_verifier(path, verifier)
+        };
 
-        match app
+        let result = app
             .setup(SetupArgs {
                 from_env: false,
-                no_open: false,
+                no_open: scenario == "ratatui-fatal",
             })
-            .await
-        {
+            .await;
+        if scenario == "ratatui-fatal" {
+            assert!(!crossterm::terminal::is_raw_mode_enabled()?);
+        }
+        match result {
             Ok(result) => crate::emit_result(result, ResolvedOutputMode::Json)?,
             Err(error) => crate::emit_error(&error, ResolvedOutputMode::Json),
         }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_fatal_error_restores_ratatui_before_emitting_structured_error(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let mut session = spawn_setup_pty(&path, "ratatui-fatal")?;
+
+        session.expect("Connect Jira")?;
+        session.send("example.atlassian.net")?;
+        session.send("\t")?;
+        session.send("person@example.com")?;
+        session.send("\t")?;
+        session.send("pty-fatal-jira-token")?;
+        session.send("\t")?;
+        session.send("\r")?;
+
+        let error_output = session.expect("\"code\": \"api_error\"")?;
+        let before_error = String::from_utf8_lossy(error_output.before());
+        for restoration in ["\u{1b}[?2004l", "\u{1b}[?1049l", "\u{1b}[?25h"] {
+            assert!(
+                before_error.contains(restoration),
+                "missing terminal restoration sequence before structured error"
+            );
+        }
+        assert!(!before_error.contains("pty-fatal-jira-token"));
+        session.expect("fatal PTY verification failure")?;
+        session.expect(Eof)?;
+        assert!(!path.exists());
         Ok(())
     }
 
