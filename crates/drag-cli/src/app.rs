@@ -1640,6 +1640,11 @@ mod tests {
         let mut session = Session::spawn(command)?;
         session.get_process_mut().set_window_size(100, 30)?;
         session.set_expect_timeout(Some(Duration::from_secs(10)));
+        // Every PTY scenario explicitly leaves the initial Welcome stage before
+        // exercising its setup-specific behavior.
+        session.expect("Welcome to Drag")?;
+        session.send("\r")?;
+        std::thread::sleep(Duration::from_millis(100));
         Ok(session)
     }
 
@@ -2209,13 +2214,21 @@ mod tests {
         existing_config().save(&path)?;
         let mut session = spawn_setup_pty(&path, "reconfigure")?;
 
-        session.expect("old.atlassian.net")?;
+        session
+            .expect("Jira site")
+            .map_err(|error| format!("waiting for reconfiguration form: {error}"))?;
         session.send("\t\t\r")?;
-        session.expect("Atlassian API token")?;
+        session
+            .expect("Atlassian API token")
+            .map_err(|error| format!("waiting for retained Jira token stage: {error}"))?;
         session.send("\t\r")?;
-        session.expect("Tempo API token")?;
+        session
+            .expect("Tempo API token")
+            .map_err(|error| format!("waiting for retained Tempo token stage: {error}"))?;
         session.send("\t\r")?;
-        session.expect("Save configuration")?;
+        session
+            .expect("Save configuration")
+            .map_err(|error| format!("waiting for reconfiguration review: {error}"))?;
         session.send("\r")?;
         expect_terminal_restoration(&mut session)?;
         session.expect(Eof)?;
@@ -2238,7 +2251,7 @@ mod tests {
         let before = fs::read(&path)?;
         let mut session = spawn_setup_pty(&path, "late-cancel")?;
 
-        session.expect("old.atlassian.net")?;
+        session.expect("Jira site")?;
         session.send("\t\t\r")?;
         session.expect("Atlassian API token")?;
         session.send("\t\r")?;
@@ -2544,6 +2557,11 @@ mod tests {
         );
         let frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
         assert!(frames.first().is_some_and(|frame| {
+            frame.contains("Welcome to Drag")
+                && frame.contains("Start setup")
+                && !frame.contains(ATLASSIAN_TOKEN_URL)
+        }));
+        assert!(frames.iter().any(|frame| {
             frame.contains("Jira site")
                 && frame.contains("Atlassian email")
                 && frame.contains("Continue to API token")
@@ -3012,6 +3030,11 @@ mod tests {
 
         let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
         assert!(captured_frames.first().is_some_and(|frame| {
+            frame.contains("Welcome to Drag")
+                && frame.contains("Start setup")
+                && !frame.contains(ATLASSIAN_TOKEN_URL)
+        }));
+        assert!(captured_frames.iter().any(|frame| {
             frame.contains("old.atlassian.net")
                 && frame.contains("old@example.com")
                 && frame.contains("Esc")

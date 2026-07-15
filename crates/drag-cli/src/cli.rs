@@ -53,11 +53,13 @@ pub enum Command {
     /// Connect Jira and Tempo, verify both connections, then save.
     ///
     /// Interactive setup requires terminal-capable stdin and stderr and opens
-    /// Ratatui for Jira account, Tempo account, and Review & save. Use Tab and
-    /// Shift-Tab to move and Enter to continue. Token settings open in your
-    /// browser. Escape goes back, or cancels from Jira account; Ctrl-C cancels
-    /// from any stage. Use --from-env for unattended setup or --no-open to keep
-    /// token URLs in the terminal without launching a browser. Set
+    /// Ratatui for Jira account details, Atlassian API token, Tempo account,
+    /// and Review & save. Use Tab and Shift-Tab to move and Enter to continue.
+    /// No browser opens on the welcome screen or while entering Jira details;
+    /// each token settings page opens only after you explicitly enter its token
+    /// stage. Escape goes back, or cancels from Jira account details; Ctrl-C
+    /// cancels from any stage. Use --from-env for unattended setup or --no-open
+    /// to keep token URLs in the terminal without launching a browser. Set
     /// DRAG_REDUCED_MOTION=1 for a gentler color-only brand transition.
     Setup(SetupArgs),
     /// Manage issue-key aliases.

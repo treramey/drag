@@ -38,13 +38,14 @@ Run setup in a terminal:
 drag setup
 ```
 
-The Ratatui wizard requires terminal-capable standard input and standard error
-and has three stages: **Jira account**, **Tempo account**, and **Review & save**. Use Tab
-and Shift-Tab to move between fields and actions, Enter to continue, and Escape
-to return to the previous stage. Escape cancels from Jira account details; Ctrl-C
-cancels from any stage, including during a connection check. Cancellation
-never saves configuration. On Review & save, press J to edit Jira or T to edit
-Tempo before saving. For Jira, enter either a bare hostname such as
+The Ratatui wizard requires terminal-capable standard input and standard error.
+It begins with a welcome screen, then proceeds through **Jira account details**,
+**Atlassian API token**, **Tempo account**, and **Review & save**. Use Tab and
+Shift-Tab to move between fields and actions, Enter to continue, and Escape to
+return to the previous stage. Escape cancels from the welcome screen or Jira
+account details; Ctrl-C cancels from any stage, including during a connection
+check. Cancellation never saves configuration. On Review & save, press J to
+edit Jira or T to edit Tempo before saving. For Jira, enter either a bare hostname such as
 `yourcompany.atlassian.net` or any HTTPS URL from that Jira site. Setup
 verifies Jira and Tempo without blocking keyboard input, then shows a
 non-secret review before anything is saved.

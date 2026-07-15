@@ -193,6 +193,16 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         body["data"]["commands"]["setup"]["interactiveTerminalRequired"],
         true
     );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["interactiveStages"],
+        serde_json::json!([
+            "welcome",
+            "jiraAccountDetails",
+            "atlassianApiToken",
+            "tempoAccount",
+            "reviewAndSave"
+        ])
+    );
     assert_eq!(body["data"]["commands"]["setup"]["sideEffects"], true);
     assert_eq!(
         body["data"]["commands"]["setup"]["reducedMotionEnvironment"],
@@ -220,6 +230,14 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         body["data"]["commands"]["setup"]["accountId"]["runtimeCompatibilityEnvironment"],
         "TEMPO_ACCOUNT_ID"
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["browser"]["default"],
+        "openEachTokenPageOnExplicitTokenStageEntry"
+    );
+    assert_eq!(
+        body["data"]["commands"]["setup"]["browser"]["beforeTokenStage"],
+        false
     );
     assert_eq!(
         body["data"]["commands"]["setup"]["browser"]["fromEnv"],
@@ -268,7 +286,10 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
     let stdout = String::from_utf8(output.stdout)?;
     assert!(stdout.contains("opens Ratatui"));
     assert!(stdout.contains("terminal-capable stdin and stderr"));
-    assert!(stdout.contains("Jira account, Tempo account, and Review & save"));
+    assert!(stdout
+        .contains("Jira account details, Atlassian API token, Tempo account, and Review & save"));
+    assert!(stdout.contains("No browser opens on the welcome screen"));
+    assert!(stdout.contains("explicitly enter its token stage"));
     assert!(stdout.contains("Tab and Shift-Tab"));
     assert!(stdout.contains("Escape goes back"));
     assert!(stdout.contains("cancels from Jira account"));
