@@ -52,7 +52,15 @@ non-secret review before anything is saved.
 Resize events preserve entered values and redraw the wizard. Terminals smaller
 than 84 columns by 28 rows show a resize instruction until enough space is
 available. Focus, pending, connected, warning, and error states use text and
-symbols as well as color.
+symbols as well as color. Connection checks use a compact spinner, successful
+checks resolve with a short status reveal, and the review diagram carries a
+brief signal from Jira to Tempo without moving the credential cards.
+Focused input borders carry a subtle color cycle around the field; action
+focus remains immediate and static.
+
+Set `DRAG_REDUCED_MOTION=1` to replace glyph motion with short color-only
+transitions and a static pending indicator. Keyboard focus changes are always
+immediate.
 
 Typed and pasted tokens are masked. Each connection stage opens the relevant
 token settings in your default browser. Use `drag setup --no-open` to keep the

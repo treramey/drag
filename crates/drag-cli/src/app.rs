@@ -1633,6 +1633,7 @@ mod tests {
             "ATLASSIAN_EMAIL",
             "ATLASSIAN_TOKEN",
             "ATLASSIAN_HOST",
+            "DRAG_REDUCED_MOTION",
         ] {
             command.env_remove(variable);
         }

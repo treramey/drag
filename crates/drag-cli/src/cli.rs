@@ -57,7 +57,8 @@ pub enum Command {
     /// Shift-Tab to move and Enter to continue. Token settings open in your
     /// browser. Escape goes back, or cancels from Jira account; Ctrl-C cancels
     /// from any stage. Use --from-env for unattended setup or --no-open to keep
-    /// token URLs in the terminal without launching a browser.
+    /// token URLs in the terminal without launching a browser. Set
+    /// DRAG_REDUCED_MOTION=1 for a gentler color-only brand transition.
     Setup(SetupArgs),
     /// Manage issue-key aliases.
     Alias {
