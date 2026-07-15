@@ -2290,6 +2290,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ratatui_backtracking_without_edits_does_not_repeat_verification(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        existing_config().save(&path)?;
+        let frames = Arc::new(Mutex::new(Vec::new()));
+        let events = vec![
+            // Complete setup once with retained credentials.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            // Navigate back to Jira without editing anything.
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            // Continue through the still-connected stages and save.
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+        ];
+        let app = App::with_onboarding_session(
+            path.clone(),
+            SequenceVerifier {
+                jira_results: Mutex::new(VecDeque::from([Ok("derived-account".to_owned())])),
+                tempo_results: Mutex::new(VecDeque::from([Ok(())])),
+            },
+            RatatuiOnboardingSession::scripted(NoopBrowserLauncher, events, Arc::clone(&frames)),
+        );
+
+        app.setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+        })
+        .await?;
+
+        let saved = Config::load(&path)?;
+        assert_eq!(saved.account_id.as_deref(), Some("derived-account"));
+        assert!(frames
+            .lock()
+            .map_err(|_| "test frame lock poisoned")?
+            .iter()
+            .any(|frame| {
+                frame.contains("✓ Connect Jira")
+                    && frame.contains("✓ Connect Tempo")
+                    && frame.contains("continue")
+            }));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ratatui_reconfiguration_cancellation_leaves_config_byte_for_byte_unchanged(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let directory = TempDir::new()?;

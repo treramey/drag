@@ -546,15 +546,20 @@ impl<'a> OnboardingWorkflow<'a> {
         }
     }
 
-    pub(crate) fn back_to_jira(&mut self) -> Result<(), CliError> {
-        self.require_stage(OnboardingStage::Tempo)?;
+    pub(crate) fn invalidate_jira(&mut self) {
         self.stage = OnboardingStage::Jira;
-        Ok(())
+        self.setup_credentials = None;
+        self.account_id = None;
     }
 
-    pub(crate) fn back_to_tempo(&mut self) -> Result<(), CliError> {
-        self.require_stage(OnboardingStage::Complete)?;
+    pub(crate) fn invalidate_tempo(&mut self) -> Result<(), CliError> {
+        if self.stage == OnboardingStage::Jira {
+            return Err(invalid_onboarding_state());
+        }
         self.stage = OnboardingStage::Tempo;
+        if let Some(setup_credentials) = &mut self.setup_credentials {
+            setup_credentials.tempo_token.clear();
+        }
         Ok(())
     }
 

@@ -463,18 +463,22 @@ where
                 match model.stage {
                     UiStage::Jira => return Err(setup_cancelled()),
                     UiStage::Tempo => {
-                        workflow.back_to_jira()?;
                         model.stage = UiStage::Jira;
                         model.focus = 0;
                     }
                     UiStage::Save => {
-                        workflow.back_to_tempo()?;
                         model.stage = UiStage::Tempo;
                         model.focus = 0;
                     }
                 }
             }
             Action::ConnectJira => {
+                if model.jira_status == ConnectionStatus::Connected {
+                    model.stage = UiStage::Tempo;
+                    model.focus = 0;
+                    continue;
+                }
+
                 model.error = None;
                 model.jira_status = ConnectionStatus::Pending;
                 model.tempo_status = ConnectionStatus::NotConnected;
@@ -487,6 +491,7 @@ where
                 } else {
                     SecretInput::Replace(model.jira_token.clone())
                 };
+                workflow.invalidate_jira();
                 let outcome = {
                     let verification = workflow.connect_jira(hostname, email, token);
                     tokio::pin!(verification);
@@ -531,6 +536,12 @@ where
                 }
             }
             Action::ConnectTempo => {
+                if model.tempo_status == ConnectionStatus::Connected {
+                    model.stage = UiStage::Save;
+                    model.focus = 0;
+                    continue;
+                }
+
                 model.error = None;
                 model.tempo_status = ConnectionStatus::Pending;
                 draw(terminal, &model, &mut observe)?;
@@ -540,6 +551,7 @@ where
                 } else {
                     SecretInput::Replace(model.tempo_token.clone())
                 };
+                workflow.invalidate_tempo()?;
                 let outcome = {
                     let verification = workflow.connect_tempo(token);
                     tokio::pin!(verification);
@@ -562,7 +574,6 @@ where
                 };
 
                 let Some(outcome) = outcome else {
-                    workflow.back_to_jira()?;
                     model.tempo_status = ConnectionStatus::NotConnected;
                     model.stage = UiStage::Jira;
                     model.focus = 0;
@@ -919,6 +930,8 @@ fn render_feedback(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let action = match model.stage {
+        UiStage::Jira if model.jira_status == ConnectionStatus::Connected => "continue",
+        UiStage::Tempo if model.tempo_status == ConnectionStatus::Connected => "continue",
         UiStage::Jira => "connect Jira",
         UiStage::Tempo => "connect Tempo",
         UiStage::Save => "save",
