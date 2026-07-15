@@ -19,6 +19,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use tachyonfx::{fx, CellFilter, Effect, Interpolation};
 
 use crate::config::normalize_jira_site;
 use crate::setup::{
@@ -34,7 +35,8 @@ const MAX_FORM_WIDTH: u16 = 80;
 const SPACE_SM: u16 = 1;
 const SPACE_MD: u16 = 2;
 const REVIEW_LABEL_WIDTH: usize = 11;
-const ENTRANCE_TICK_RATE: Duration = Duration::from_millis(80);
+const ENTRANCE_TICK_RATE: Duration = Duration::from_millis(40);
+const ENTRANCE_DURATION_MS: u32 = 240;
 
 const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
 
@@ -111,26 +113,33 @@ struct ScriptedSession {
 }
 
 struct AnimationTicker {
-    interval: Option<tokio::time::Interval>,
+    state: Option<(tokio::time::Interval, tokio::time::Instant)>,
 }
 
 impl AnimationTicker {
     fn terminal() -> Self {
         let start = tokio::time::Instant::now() + ENTRANCE_TICK_RATE;
         Self {
-            interval: Some(tokio::time::interval_at(start, ENTRANCE_TICK_RATE)),
+            state: Some((
+                tokio::time::interval_at(start, ENTRANCE_TICK_RATE),
+                tokio::time::Instant::now(),
+            )),
         }
     }
 
     #[cfg(test)]
     const fn disabled() -> Self {
-        Self { interval: None }
+        Self { state: None }
     }
 
-    async fn tick(&mut self) {
-        match self.interval.as_mut() {
-            Some(interval) => {
+    async fn tick(&mut self) -> Duration {
+        match self.state.as_mut() {
+            Some((interval, previous_tick)) => {
                 interval.tick().await;
+                let now = tokio::time::Instant::now();
+                let elapsed = now.duration_since(*previous_tick);
+                *previous_tick = now;
+                elapsed
             }
             None => std::future::pending().await,
         }
@@ -327,33 +336,50 @@ enum ConnectionStatus {
     Connected,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EntranceAnimation {
-    FirstLine,
-    Lockup,
-    Complete,
+struct EntranceAnimation {
+    effect: Option<Effect>,
+    elapsed: Duration,
 }
 
 impl EntranceAnimation {
-    const fn is_active(self) -> bool {
-        !matches!(self, Self::Complete)
+    fn new() -> Self {
+        Self {
+            effect: Some(
+                fx::coalesce((ENTRANCE_DURATION_MS, Interpolation::CubicOut))
+                    .with_filter(CellFilter::Text),
+            ),
+            elapsed: Duration::ZERO,
+        }
     }
 
-    fn advance(&mut self) {
-        *self = match self {
-            Self::FirstLine => Self::Lockup,
-            Self::Lockup | Self::Complete => Self::Complete,
-        };
+    const fn is_active(&self) -> bool {
+        self.effect.is_some()
+    }
+
+    fn advance(&mut self, elapsed: Duration) {
+        self.elapsed += elapsed;
     }
 
     fn complete(&mut self) {
-        *self = Self::Complete;
+        self.effect = None;
+        self.elapsed = Duration::ZERO;
+    }
+
+    fn render(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let Some(effect) = self.effect.as_mut() else {
+            return;
+        };
+        effect.process(self.elapsed, frame.buffer_mut(), area);
+        self.elapsed = Duration::ZERO;
+        if effect.done() {
+            self.effect = None;
+        }
     }
 }
 
 enum OnboardingEvent {
     Terminal(Event),
-    Tick,
+    Tick(Duration),
 }
 
 struct OnboardingModel {
@@ -383,7 +409,7 @@ struct OnboardingModel {
 impl OnboardingModel {
     fn new(workflow: &OnboardingWorkflow<'_>) -> Self {
         Self {
-            entrance_animation: EntranceAnimation::FirstLine,
+            entrance_animation: EntranceAnimation::new(),
             stage: UiStage::JiraDetails,
             focus: 0,
             hostname: workflow.hostname_default().unwrap_or_default().to_owned(),
@@ -409,8 +435,8 @@ impl OnboardingModel {
 
     fn handle_onboarding_event(&mut self, event: OnboardingEvent) -> Action {
         match event {
-            OnboardingEvent::Tick => {
-                self.entrance_animation.advance();
+            OnboardingEvent::Tick(elapsed) => {
+                self.entrance_animation.advance(elapsed);
                 Action::None
             }
             OnboardingEvent::Terminal(event) => {
@@ -659,7 +685,7 @@ where
     let mut undersized = terminal_is_undersized(terminal)?;
 
     loop {
-        draw(terminal, &model, &mut observe)?;
+        draw(terminal, &mut model, &mut observe)?;
         let event = next_onboarding_event(
             events,
             animation_ticker,
@@ -729,7 +755,7 @@ where
                 model.error = None;
                 model.jira_status = ConnectionStatus::Pending;
                 model.tempo_status = ConnectionStatus::NotConnected;
-                draw(terminal, &model, &mut observe)?;
+                draw(terminal, &mut model, &mut observe)?;
 
                 let hostname = model.hostname.clone();
                 let email = model.email.clone();
@@ -757,7 +783,7 @@ where
                                 {
                                     return Err(setup_cancelled());
                                 }
-                                draw(terminal, &model, &mut observe)?;
+                                draw(terminal, &mut model, &mut observe)?;
                             }
                         }
                     }
@@ -796,7 +822,7 @@ where
 
                 model.error = None;
                 model.tempo_status = ConnectionStatus::Pending;
-                draw(terminal, &model, &mut observe)?;
+                draw(terminal, &mut model, &mut observe)?;
 
                 let token = if model.tempo_token.is_empty() && model.can_retain_tempo_token {
                     SecretInput::Retain
@@ -823,7 +849,7 @@ where
                                 if OnboardingModel::pending_back(&event) {
                                     break None;
                                 }
-                                draw(terminal, &model, &mut observe)?;
+                                draw(terminal, &mut model, &mut observe)?;
                             }
                         }
                     }
@@ -949,7 +975,7 @@ where
     tokio::select! {
         biased;
         event = events.next() => event_result(event).map(OnboardingEvent::Terminal),
-        () = animation_ticker.tick() => Ok(OnboardingEvent::Tick),
+        elapsed = animation_ticker.tick() => Ok(OnboardingEvent::Tick(elapsed)),
     }
 }
 
@@ -966,7 +992,7 @@ fn event_result(event: Option<io::Result<Event>>) -> Result<Event, CliError> {
 
 fn draw<B, O>(
     terminal: &mut Terminal<B>,
-    model: &OnboardingModel,
+    model: &mut OnboardingModel,
     observe: &mut O,
 ) -> Result<(), CliError>
 where
@@ -975,7 +1001,7 @@ where
     O: FnMut(&Terminal<B>) -> Result<(), CliError>,
 {
     terminal
-        .draw(|frame| render(frame, model))
+        .draw(|frame| render_animated(frame, model))
         .map_err(BackendFailure::into_cli_error)?;
     observe(terminal)
 }
@@ -993,10 +1019,17 @@ const fn size_is_undersized(width: u16, height: u16) -> bool {
     width < MIN_TERMINAL_WIDTH || height < MIN_TERMINAL_HEIGHT
 }
 
-fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
+fn render_animated(frame: &mut Frame<'_>, model: &mut OnboardingModel) {
+    let Some(header) = render(frame, model) else {
+        return;
+    };
+    model.entrance_animation.render(frame, header);
+}
+
+fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<Rect> {
     if frame.area().width < MIN_TERMINAL_WIDTH || frame.area().height < MIN_TERMINAL_HEIGHT {
         render_resize_message(frame, frame.area());
-        return;
+        return None;
     }
 
     let [_top_padding, header, body, footer] = Layout::vertical([
@@ -1024,6 +1057,7 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) {
         UiStage::Save => render_save(frame, body, model),
     }
     render_footer(frame, footer, model);
+    Some(header)
 }
 
 fn constrain_content_width(area: Rect) -> Rect {
@@ -1111,34 +1145,27 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
             ConnectionStatus::NotConnected,
         ),
     ]);
-    let mut title = vec![Line::styled(DRAG_ART[0], Palette::primary().bold())];
-    if matches!(
-        model.entrance_animation,
-        EntranceAnimation::Lockup | EntranceAnimation::Complete
-    ) {
-        title.push(Line::styled(DRAG_ART[1], Palette::primary().bold()));
-    } else {
-        title.push(Line::default());
-    }
+    let mut title = DRAG_ART
+        .iter()
+        .map(|line| Line::styled(*line, Palette::primary().bold()))
+        .collect::<Vec<_>>();
     title.push(Line::default());
     title.push(stages);
     let title = Text::from(title);
     frame.render_widget(Paragraph::new(title), area);
-    if model.entrance_animation == EntranceAnimation::Complete {
-        let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-        let version_width = u16::try_from(version.len())
-            .unwrap_or(area.width)
-            .min(area.width);
-        frame.render_widget(
-            Paragraph::new(version).style(Palette::muted()),
-            Rect::new(
-                area.right().saturating_sub(version_width),
-                area.y,
-                version_width,
-                1,
-            ),
-        );
-    }
+    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
+    let version_width = u16::try_from(version.len())
+        .unwrap_or(area.width)
+        .min(area.width);
+    frame.render_widget(
+        Paragraph::new(version).style(Palette::muted()),
+        Rect::new(
+            area.right().saturating_sub(version_width),
+            area.y,
+            version_width,
+            1,
+        ),
+    );
 }
 
 fn stage_span(
@@ -1670,7 +1697,10 @@ mod tests {
 
     fn model() -> OnboardingModel {
         OnboardingModel {
-            entrance_animation: EntranceAnimation::Complete,
+            entrance_animation: EntranceAnimation {
+                effect: None,
+                elapsed: std::time::Duration::ZERO,
+            },
             stage: UiStage::JiraToken,
             focus: 0,
             hostname: String::new(),
@@ -1697,49 +1727,48 @@ mod tests {
     #[test]
     fn ticks_advance_the_model_owned_entrance_animation() {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::FirstLine;
+        model.entrance_animation = EntranceAnimation::new();
 
         assert!(matches!(
-            model.handle_onboarding_event(OnboardingEvent::Tick),
+            model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(
+                80
+            ))),
             Action::None
         ));
-        assert_eq!(model.entrance_animation, EntranceAnimation::Lockup);
-
-        assert!(matches!(
-            model.handle_onboarding_event(OnboardingEvent::Tick),
-            Action::None
-        ));
-        assert_eq!(model.entrance_animation, EntranceAnimation::Complete);
+        assert_eq!(
+            model.entrance_animation.elapsed,
+            std::time::Duration::from_millis(80)
+        );
+        assert!(model.entrance_animation.is_active());
     }
 
     #[test]
     fn entrance_frames_are_deterministic_without_wall_clock_time(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::FirstLine;
-        let initial = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        model.entrance_animation = EntranceAnimation::new();
+        let initial = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
 
-        model.handle_onboarding_event(OnboardingEvent::Tick);
-        let intermediate = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
+        let intermediate =
+            render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
 
-        model.handle_onboarding_event(OnboardingEvent::Tick);
-        let completed = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
+        let completed = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
 
-        assert!(initial.contains(DRAG_ART[0]));
-        assert!(!initial.contains(DRAG_ART[1]));
-        assert!(!initial.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
-        assert!(intermediate.contains(DRAG_ART[1]));
-        assert!(!intermediate.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+        assert!(initial.contains("Connect Jira"));
+        assert_ne!(initial, intermediate);
+        assert_ne!(intermediate, completed);
         assert!(completed.contains(DRAG_ART[1]));
         assert!(completed.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
-        assert!(completed.contains("Connect Jira"));
+        assert!(!model.entrance_animation.is_active());
         Ok(())
     }
 
     #[test]
     fn key_input_completes_the_animation_and_keeps_its_normal_behavior() {
         let mut model = model();
-        model.entrance_animation = EntranceAnimation::FirstLine;
+        model.entrance_animation = EntranceAnimation::new();
         model.set_stage(UiStage::JiraDetails);
 
         let action = model.handle_onboarding_event(OnboardingEvent::Terminal(Event::Key(
@@ -1747,8 +1776,18 @@ mod tests {
         )));
 
         assert!(matches!(action, Action::None));
-        assert_eq!(model.entrance_animation, EntranceAnimation::Complete);
+        assert!(!model.entrance_animation.is_active());
         assert_eq!(model.hostname, "x");
+    }
+
+    fn render_animation_text(
+        width: u16,
+        height: u16,
+        model: &mut OnboardingModel,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height))?;
+        terminal.draw(|frame| super::render_animated(frame, model))?;
+        Ok(test_backend_text(&terminal))
     }
 
     fn render_text(
@@ -1757,7 +1796,9 @@ mod tests {
         model: &OnboardingModel,
     ) -> Result<String, Box<dyn std::error::Error>> {
         let mut terminal = Terminal::new(TestBackend::new(width, height))?;
-        terminal.draw(|frame| super::render(frame, model))?;
+        terminal.draw(|frame| {
+            let _ = super::render(frame, model);
+        })?;
         Ok(test_backend_text(&terminal))
     }
 
@@ -1767,7 +1808,9 @@ mod tests {
     ) -> Result<Color, Box<dyn std::error::Error>> {
         let mut terminal =
             Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
-        terminal.draw(|frame| super::render(frame, model))?;
+        terminal.draw(|frame| {
+            let _ = super::render(frame, model);
+        })?;
         terminal
             .backend()
             .buffer()
@@ -1804,7 +1847,9 @@ mod tests {
         model.focus = 2;
         let mut terminal =
             Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))?;
-        terminal.draw(|frame| super::render(frame, &model))?;
+        terminal.draw(|frame| {
+            let _ = super::render(frame, &model);
+        })?;
 
         let highlighted = terminal
             .backend()
