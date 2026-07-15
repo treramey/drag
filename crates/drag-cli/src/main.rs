@@ -2,7 +2,8 @@ mod api;
 mod app;
 mod cli;
 mod config;
-mod onboarding;
+mod setup;
+mod setup_tui;
 
 use std::error::Error as StdError;
 use std::ffi::OsString;

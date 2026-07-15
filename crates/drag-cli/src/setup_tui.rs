@@ -1,3 +1,5 @@
+//! Ratatui presentation and Crossterm runtime for interactive setup.
+
 use std::io::{self, IsTerminal};
 
 use crossterm::cursor::Show;
@@ -17,7 +19,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-use super::{
+use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher, TokenPage,
 };

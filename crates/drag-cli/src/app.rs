@@ -25,16 +25,17 @@ use crate::cli::{
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
 #[cfg(test)]
-use crate::onboarding::LineOnboardingSession;
+use crate::setup::LineOnboardingSession;
 #[cfg(test)]
-use crate::onboarding::{
+use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, NoopBrowserLauncher, OnboardingFuture,
     SecretInput, SetupPrompter, TerminalSetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
-use crate::onboarding::{
-    ConnectionVerifier, OnboardingSession, OnboardingWorkflow, RatatuiOnboardingSession,
-    RemoteConnectionVerifier, SetupCredentials,
+use crate::setup::{
+    ConnectionVerifier, OnboardingSession, OnboardingWorkflow, RemoteConnectionVerifier,
+    SetupCredentials,
 };
+use crate::setup_tui::RatatuiOnboardingSession;
 use crate::{CliError, Rendered, EXIT_USAGE};
 
 pub struct App {

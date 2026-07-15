@@ -1,3 +1,5 @@
+//! Setup workflow, verification boundaries, and terminal session contract.
+
 use std::future::Future;
 use std::io;
 #[cfg(test)]
@@ -9,10 +11,6 @@ use url::Url;
 use crate::api::ApiClient;
 use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
 use crate::CliError;
-
-mod tui;
-
-pub(crate) use tui::RatatuiOnboardingSession;
 
 pub(crate) const ATLASSIAN_TOKEN_URL: &str =
     "https://id.atlassian.com/manage-profile/security/api-tokens";
@@ -92,7 +90,7 @@ pub(crate) trait BrowserLauncher: Send + Sync {
     fn open(&self, url: &Url) -> io::Result<()>;
 }
 
-struct SystemBrowserLauncher;
+pub(crate) struct SystemBrowserLauncher;
 
 impl BrowserLauncher for SystemBrowserLauncher {
     fn open(&self, url: &Url) -> io::Result<()> {

@@ -12,6 +12,11 @@ The core crate has no terminal, filesystem, or HTTP dependencies. The CLI owns
 all side effects and translates typed core failures into stable error/exit
 codes.
 
+CLI features use flat sibling modules. The feature module owns its workflow
+and external boundaries; an optional `<feature>_tui.rs` sibling owns terminal
+state, events, and rendering. Directories are reserved for features with
+several peer submodules rather than a single implementation file.
+
 ## Command flow
 
 1. Clap parses arguments without terminating the process.
@@ -29,8 +34,8 @@ codes.
 - `drag::tracker`: persistent timer state machine.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
 - `drag_cli::api`: authentication, pagination, endpoint validation.
-- `drag_cli::onboarding`: setup state and connection verification.
-- `drag_cli::onboarding::tui`: Ratatui rendering, Crossterm events, and the
+- `drag_cli::setup`: setup state and connection verification.
+- `drag_cli::setup_tui`: Ratatui rendering, Crossterm events, and the
   stderr terminal lifecycle for interactive setup.
 - `drag_cli::app`: use-case orchestration and partial tracker upload safety.
 
