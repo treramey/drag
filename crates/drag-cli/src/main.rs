@@ -262,6 +262,7 @@ fn schema() -> Rendered {
                 "interactiveTerminalRequired": true,
                 "interactiveEvents": "asynchronousCrossterm",
                 "interactiveRendering": "stderr",
+                "reducedMotionEnvironment": "DRAG_REDUCED_MOTION",
                 "fromEnv": true,
                 "noOpen": true,
                 "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
@@ -302,7 +303,7 @@ fn schema() -> Rendered {
         },
         "dateSyntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"],
         "durationSyntax": ["15m", "1h", "1h15m", "11-12:30", "23:30-00:30"],
-        "environment": ["DRAG_CONFIG", "TEMPO_TOKEN", "TEMPO_ACCOUNT_ID", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "ATLASSIAN_HOST"],
+        "environment": ["DRAG_CONFIG", "DRAG_REDUCED_MOTION", "TEMPO_TOKEN", "TEMPO_ACCOUNT_ID", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "ATLASSIAN_HOST"],
         "exitCodes": {"0": "success", "1": "runtime failure", "2": "usage or invalid input"}
     });
     Rendered::new(

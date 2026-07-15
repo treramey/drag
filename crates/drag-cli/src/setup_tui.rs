@@ -35,9 +35,10 @@ const MAX_FORM_WIDTH: u16 = 80;
 const SPACE_SM: u16 = 1;
 const SPACE_MD: u16 = 2;
 const REVIEW_LABEL_WIDTH: usize = 11;
+const REDUCED_MOTION_ENV: &str = "DRAG_REDUCED_MOTION";
 const ENTRANCE_TICK_RATE: Duration = Duration::from_millis(40);
 const ENTRANCE_DURATION_MS: u32 = 240;
-const FOCUS_DURATION_MS: u32 = 140;
+const REDUCED_MOTION_DURATION_MS: u32 = 140;
 const PRIMARY_COLOR: Color = Color::Rgb(116, 39, 127);
 const MUTED_COLOR: Color = Color::Rgb(101, 92, 82);
 
@@ -146,6 +147,21 @@ impl AnimationTicker {
     }
 }
 
+fn reduced_motion_requested() -> bool {
+    let value = std::env::var(REDUCED_MOTION_ENV).ok();
+    reduced_motion_value(value.as_deref())
+}
+
+fn reduced_motion_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
+}
+
 impl RatatuiOnboardingSession {
     pub(crate) fn terminal() -> Self {
         Self {
@@ -177,10 +193,12 @@ impl RatatuiOnboardingSession {
         let mut terminal = StderrTerminal::new()?;
         let mut events = EventStream::new();
         let mut animation_ticker = AnimationTicker::terminal();
+        let reduced_motion = reduced_motion_requested();
         let result = run_onboarding(
             terminal.terminal_mut(),
             &mut events,
             &mut animation_ticker,
+            reduced_motion,
             workflow,
             self.browser_launcher.as_ref(),
             |_| Ok(()),
@@ -220,6 +238,7 @@ impl RatatuiOnboardingSession {
             &mut terminal,
             &mut events,
             &mut animation_ticker,
+            false,
             workflow,
             self.browser_launcher.as_ref(),
             move |terminal| {
@@ -336,31 +355,28 @@ enum ConnectionStatus {
     Connected,
 }
 
-struct BufferAnimation {
+struct EntranceAnimation {
     effect: Option<Effect>,
     elapsed: Duration,
 }
 
-impl BufferAnimation {
-    fn entrance() -> Self {
+impl EntranceAnimation {
+    fn new(reduced_motion: bool) -> Self {
+        let effect = if reduced_motion {
+            fx::fade_from_fg(
+                MUTED_COLOR,
+                (REDUCED_MOTION_DURATION_MS, Interpolation::CubicOut),
+            )
+            .with_filter(CellFilter::AnyOf(vec![
+                CellFilter::FgColor(PRIMARY_COLOR),
+                CellFilter::FgColor(MUTED_COLOR),
+            ]))
+        } else {
+            fx::coalesce((ENTRANCE_DURATION_MS, Interpolation::CubicOut))
+                .with_filter(CellFilter::Text)
+        };
         Self {
-            effect: Some(
-                fx::coalesce((ENTRANCE_DURATION_MS, Interpolation::CubicOut))
-                    .with_filter(CellFilter::Text),
-            ),
-            elapsed: Duration::ZERO,
-        }
-    }
-
-    fn focus() -> Self {
-        Self {
-            effect: Some(
-                fx::fade_from_fg(MUTED_COLOR, (FOCUS_DURATION_MS, Interpolation::CubicOut))
-                    .with_filter(CellFilter::AnyOf(vec![
-                        CellFilter::FgColor(PRIMARY_COLOR),
-                        CellFilter::FgColor(Color::Red),
-                    ])),
-            ),
+            effect: Some(effect),
             elapsed: Duration::ZERO,
         }
     }
@@ -398,8 +414,7 @@ enum OnboardingEvent {
 }
 
 struct OnboardingModel {
-    entrance_animation: BufferAnimation,
-    focus_animation: BufferAnimation,
+    entrance_animation: EntranceAnimation,
     stage: UiStage,
     focus: usize,
     hostname: String,
@@ -423,10 +438,9 @@ struct OnboardingModel {
 }
 
 impl OnboardingModel {
-    fn new(workflow: &OnboardingWorkflow<'_>) -> Self {
+    fn new(workflow: &OnboardingWorkflow<'_>, reduced_motion: bool) -> Self {
         Self {
-            entrance_animation: BufferAnimation::entrance(),
-            focus_animation: BufferAnimation::focus(),
+            entrance_animation: EntranceAnimation::new(reduced_motion),
             stage: UiStage::JiraDetails,
             focus: 0,
             hostname: workflow.hostname_default().unwrap_or_default().to_owned(),
@@ -454,7 +468,6 @@ impl OnboardingModel {
         match event {
             OnboardingEvent::Tick(elapsed) => {
                 self.entrance_animation.advance(elapsed);
-                self.focus_animation.advance(elapsed);
                 Action::None
             }
             OnboardingEvent::Terminal(event) => {
@@ -464,10 +477,6 @@ impl OnboardingModel {
                 self.handle_event(event)
             }
         }
-    }
-
-    const fn animations_active(&self) -> bool {
-        self.entrance_animation.is_active() || self.focus_animation.is_active()
     }
 
     fn handle_event(&mut self, event: Event) -> Action {
@@ -485,7 +494,7 @@ impl OnboardingModel {
 
     fn set_stage(&mut self, stage: UiStage) {
         self.stage = stage;
-        self.set_focus(0);
+        self.focus = 0;
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Action {
@@ -551,27 +560,11 @@ impl OnboardingModel {
     }
 
     fn focus_next(&mut self) {
-        self.set_focus((self.focus + 1) % self.focus_count());
+        self.focus = (self.focus + 1) % self.focus_count();
     }
 
     fn focus_previous(&mut self) {
-        self.set_focus((self.focus + self.focus_count() - 1) % self.focus_count());
-    }
-
-    fn set_focus(&mut self, focus: usize) {
-        self.focus = focus;
-        if self.focused_input() {
-            self.focus_animation = BufferAnimation::focus();
-        } else {
-            self.focus_animation.complete();
-        }
-    }
-
-    const fn focused_input(&self) -> bool {
-        matches!(
-            (self.stage, self.focus),
-            (UiStage::JiraDetails, 0 | 1) | (UiStage::JiraToken, 0) | (UiStage::Tempo, 0)
-        )
+        self.focus = (self.focus + self.focus_count() - 1) % self.focus_count();
     }
 
     fn focused_input_mut(&mut self) -> Option<&mut String> {
@@ -619,21 +612,21 @@ impl OnboardingModel {
 
     fn validate_jira_details(&mut self) -> bool {
         if self.hostname.trim().is_empty() {
-            self.set_focus(0);
+            self.focus = 0;
             self.error = Some(
                 "Jira site is required. Enter a bare hostname or an HTTPS Jira URL.".to_owned(),
             );
             return false;
         }
         if let Err(error) = normalize_jira_site(&self.hostname) {
-            self.set_focus(0);
+            self.focus = 0;
             self.error = Some(format!(
                 "Invalid Jira site: {error}. Enter a bare hostname or an HTTPS Jira URL."
             ));
             return false;
         }
         if self.email.trim().is_empty() {
-            self.set_focus(1);
+            self.focus = 1;
             self.error = Some("Atlassian email is required.".to_owned());
             return false;
         }
@@ -642,7 +635,7 @@ impl OnboardingModel {
 
     fn validate_jira_token(&mut self) -> bool {
         if self.jira_token.trim().is_empty() && !self.can_retain_jira_token {
-            self.set_focus(0);
+            self.focus = 0;
             self.error = Some("Atlassian API token is required.".to_owned());
             return false;
         }
@@ -651,7 +644,7 @@ impl OnboardingModel {
 
     fn validate_tempo(&mut self) -> bool {
         if self.tempo_token.trim().is_empty() && !self.can_retain_tempo_token {
-            self.set_focus(0);
+            self.focus = 0;
             self.error = Some("Tempo API token is required.".to_owned());
             return false;
         }
@@ -709,6 +702,7 @@ async fn run_onboarding<'a, B, S, O>(
     terminal: &mut Terminal<B>,
     events: &mut S,
     animation_ticker: &mut AnimationTicker,
+    reduced_motion: bool,
     mut workflow: OnboardingWorkflow<'a>,
     browser_launcher: &dyn BrowserLauncher,
     mut observe: O,
@@ -719,7 +713,7 @@ where
     S: Stream<Item = io::Result<Event>> + Unpin,
     O: FnMut(&Terminal<B>) -> Result<(), CliError>,
 {
-    let mut model = OnboardingModel::new(&workflow);
+    let mut model = OnboardingModel::new(&workflow, reduced_motion);
     let mut undersized = terminal_is_undersized(terminal)?;
 
     loop {
@@ -727,7 +721,7 @@ where
         let event = next_onboarding_event(
             events,
             animation_ticker,
-            model.animations_active() && !undersized,
+            model.entrance_animation.is_active() && !undersized,
         )
         .await?;
         if let OnboardingEvent::Terminal(terminal_event) = &event {
@@ -842,7 +836,7 @@ where
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.jira_status = ConnectionStatus::NotConnected;
                         model.jira_token.clear();
-                        model.set_focus(0);
+                        model.focus = 0;
                         model.error = Some(format!("Could not connect to Jira: {error}"));
                     }
                     Err(error) => return Err(error),
@@ -917,7 +911,7 @@ where
                     | Err(error @ CliError::InvalidInput(_)) => {
                         model.tempo_status = ConnectionStatus::NotConnected;
                         model.tempo_token.clear();
-                        model.set_focus(0);
+                        model.focus = 0;
                         model.error = Some(format!("Could not connect to Tempo: {error}"));
                     }
                     Err(error) => return Err(error),
@@ -1058,21 +1052,14 @@ const fn size_is_undersized(width: u16, height: u16) -> bool {
 }
 
 fn render_animated(frame: &mut Frame<'_>, model: &mut OnboardingModel) {
-    let Some(areas) = render(frame, model) else {
+    let Some(header) = render(frame, model) else {
         return;
     };
-    model.entrance_animation.render(frame, areas.header);
-    if let Some(focused_input) = areas.focused_input {
-        model.focus_animation.render(frame, focused_input);
-    }
+    let brand = Rect::new(header.x, header.y, header.width, 2);
+    model.entrance_animation.render(frame, brand);
 }
 
-struct AnimatedAreas {
-    header: Rect,
-    focused_input: Option<Rect>,
-}
-
-fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<AnimatedAreas> {
+fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<Rect> {
     if frame.area().width < MIN_TERMINAL_WIDTH || frame.area().height < MIN_TERMINAL_HEIGHT {
         render_resize_message(frame, frame.area());
         return None;
@@ -1096,17 +1083,14 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<AnimatedArea
     let footer = constrain_content_width(footer);
 
     render_header(frame, header, model);
-    let focused_input = match model.stage {
+    match model.stage {
         UiStage::JiraDetails => render_jira_details(frame, body, model),
         UiStage::JiraToken => render_jira_token(frame, body, model),
         UiStage::Tempo => render_tempo(frame, body, model),
         UiStage::Save => render_save(frame, body, model),
-    };
+    }
     render_footer(frame, footer, model);
-    Some(AnimatedAreas {
-        header,
-        focused_input,
-    })
+    Some(header)
 }
 
 fn constrain_content_width(area: Rect) -> Rect {
@@ -1237,7 +1221,7 @@ fn stage_span(
     ratatui::text::Span::styled(text, style)
 }
 
-fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
+fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let spacing = form_spacing(area, 20);
     let [intro, _, hostname, host_help, _, email, _, action, feedback, _] = Layout::vertical([
         Constraint::Length(2),
@@ -1299,14 +1283,9 @@ fn render_jira_details(frame: &mut Frame<'_>, area: Rect, model: &OnboardingMode
         ConnectionStatus::NotConnected,
     );
     render_feedback(frame, feedback, model);
-    match model.focus {
-        0 => Some(hostname),
-        1 => Some(email),
-        _ => None,
-    }
 }
 
-fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
+fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let fallback_height = if !model.jira_page_can_open || model.warning.is_some() {
         3
     } else {
@@ -1356,10 +1335,9 @@ fn render_jira_token(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel)
         model.jira_status,
     );
     render_feedback(frame, feedback, model);
-    (model.focus == 0).then_some(token)
 }
 
-fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
+fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let fallback_height = if !model.tempo_page_can_open || model.warning.is_some() {
         3
     } else {
@@ -1409,7 +1387,6 @@ fn render_tempo(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> O
         model.tempo_status,
     );
     render_feedback(frame, feedback, model);
-    (model.focus == 0).then_some(token)
 }
 
 fn render_token_url_fallback(
@@ -1432,7 +1409,7 @@ fn render_token_url_fallback(
     }
 }
 
-fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Option<Rect> {
+fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
     let side_by_side = area.width >= 96;
     let manifest_height = if side_by_side { 6 } else { 13 };
     let [intro, _, manifest, _, action, feedback, _] = Layout::vertical([
@@ -1461,7 +1438,6 @@ fn render_save(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) -> Op
         ConnectionStatus::Connected,
     );
     render_feedback(frame, feedback, model);
-    None
 }
 
 fn render_connection_manifest(
@@ -1747,13 +1723,13 @@ mod tests {
     use ratatui::style::Color;
 
     use super::{
-        event_allowed_while_undersized, test_backend_text, Action, BufferAnimation,
-        ConnectionStatus, OnboardingEvent, OnboardingModel, Terminal, UiStage, DRAG_ART,
-        MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
+        event_allowed_while_undersized, reduced_motion_value, test_backend_text, Action,
+        ConnectionStatus, EntranceAnimation, OnboardingEvent, OnboardingModel, Terminal, UiStage,
+        DRAG_ART, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
     };
 
-    const fn inactive_animation() -> BufferAnimation {
-        BufferAnimation {
+    const fn inactive_animation() -> EntranceAnimation {
+        EntranceAnimation {
             effect: None,
             elapsed: std::time::Duration::ZERO,
         }
@@ -1762,7 +1738,6 @@ mod tests {
     fn model() -> OnboardingModel {
         OnboardingModel {
             entrance_animation: inactive_animation(),
-            focus_animation: inactive_animation(),
             stage: UiStage::JiraToken,
             focus: 0,
             hostname: String::new(),
@@ -1789,7 +1764,7 @@ mod tests {
     #[test]
     fn ticks_advance_the_model_owned_entrance_animation() {
         let mut model = model();
-        model.entrance_animation = BufferAnimation::entrance();
+        model.entrance_animation = EntranceAnimation::new(false);
 
         assert!(matches!(
             model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(
@@ -1808,7 +1783,7 @@ mod tests {
     fn entrance_frames_are_deterministic_without_wall_clock_time(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
-        model.entrance_animation = BufferAnimation::entrance();
+        model.entrance_animation = EntranceAnimation::new(false);
         let initial = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
 
         model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(120)));
@@ -1819,8 +1794,20 @@ mod tests {
         let completed = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
 
         assert!(initial.contains("Connect Jira"));
+        assert!(initial.contains("● Jira account"));
         assert_ne!(initial, intermediate);
         assert_ne!(intermediate, completed);
+        let outside_brand = |frame: &str| {
+            frame
+                .lines()
+                .enumerate()
+                .filter(|(line, _)| !matches!(line, 2 | 3))
+                .map(|(_, text)| text)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(outside_brand(&initial), outside_brand(&intermediate));
+        assert_eq!(outside_brand(&intermediate), outside_brand(&completed));
         assert!(completed.contains(DRAG_ART[1]));
         assert!(completed.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         assert!(!model.entrance_animation.is_active());
@@ -1830,7 +1817,7 @@ mod tests {
     #[test]
     fn key_input_completes_the_animation_and_keeps_its_normal_behavior() {
         let mut model = model();
-        model.entrance_animation = BufferAnimation::entrance();
+        model.entrance_animation = EntranceAnimation::new(false);
         model.set_stage(UiStage::JiraDetails);
 
         let action = model.handle_onboarding_event(OnboardingEvent::Terminal(Event::Key(
@@ -1901,28 +1888,33 @@ mod tests {
     }
 
     #[test]
-    fn moving_focus_animates_only_the_new_input_boundary() -> Result<(), Box<dyn std::error::Error>>
-    {
+    fn reduced_motion_uses_a_short_color_only_brand_transition(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
-        model.set_stage(UiStage::JiraDetails);
-        model.email = "person@example.com".to_owned();
-        model.focus_next();
+        model.entrance_animation = EntranceAnimation::new(true);
 
-        assert!(model.focus_animation.is_active());
         assert_eq!(
-            rendered_animation_color(&mut model, "›")?,
+            rendered_animation_color(&mut model, "█")?,
             Color::Rgb(101, 92, 82)
         );
-        let rendered = render_animation_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &mut model)?;
-        assert!(rendered.contains("person@example.com"));
 
         model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(140)));
         assert_eq!(
-            rendered_animation_color(&mut model, "›")?,
+            rendered_animation_color(&mut model, "█")?,
             Color::Rgb(116, 39, 127)
         );
-        assert!(!model.focus_animation.is_active());
+        assert!(!model.entrance_animation.is_active());
         Ok(())
+    }
+
+    #[test]
+    fn reduced_motion_environment_accepts_only_explicit_truthy_values() {
+        for value in [Some("1"), Some("true"), Some("YES"), Some("on")] {
+            assert!(reduced_motion_value(value));
+        }
+        for value in [None, Some(""), Some("0"), Some("false"), Some("no")] {
+            assert!(!reduced_motion_value(value));
+        }
     }
 
     #[test]

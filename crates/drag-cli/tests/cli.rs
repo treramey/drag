@@ -22,6 +22,7 @@ fn command(config: &std::path::Path) -> Result<Command, Box<dyn std::error::Erro
         "ATLASSIAN_EMAIL",
         "ATLASSIAN_TOKEN",
         "ATLASSIAN_HOST",
+        "DRAG_REDUCED_MOTION",
     ] {
         command.env_remove(variable);
     }
@@ -193,6 +194,10 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         true
     );
     assert_eq!(body["data"]["commands"]["setup"]["sideEffects"], true);
+    assert_eq!(
+        body["data"]["commands"]["setup"]["reducedMotionEnvironment"],
+        "DRAG_REDUCED_MOTION"
+    );
     assert_eq!(body["data"]["commands"]["setup"]["fromEnv"], true);
     assert_eq!(
         body["data"]["commands"]["setup"]["fromEnvInteractive"],
@@ -270,6 +275,7 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
     assert!(stdout.contains("Ctrl-C"));
     assert!(stdout.contains("--from-env"));
     assert!(stdout.contains("--no-open"));
+    assert!(stdout.contains("DRAG_REDUCED_MOTION=1"));
     assert!(stdout.contains("Print token URLs without launching a browser"));
     Ok(())
 }

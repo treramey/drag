@@ -54,6 +54,9 @@ than 84 columns by 28 rows show a resize instruction until enough space is
 available. Focus, pending, connected, warning, and error states use text and
 symbols as well as color.
 
+Set `DRAG_REDUCED_MOTION=1` to replace the brand's glyph reveal with a short,
+color-only transition. Keyboard focus changes are always immediate.
+
 Typed and pasted tokens are masked. Each connection stage opens the relevant
 token settings in your default browser. Use `drag setup --no-open` to keep the
 URLs in the terminal without launching a browser, such as over SSH. A browser
