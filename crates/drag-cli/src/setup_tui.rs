@@ -261,6 +261,8 @@ struct OnboardingModel {
     tempo_instruction: String,
     jira_url: String,
     tempo_url: String,
+    jira_page_loaded: bool,
+    tempo_page_loaded: bool,
     jira_status: ConnectionStatus,
     tempo_status: ConnectionStatus,
     error: Option<String>,
@@ -282,6 +284,8 @@ impl OnboardingModel {
             tempo_instruction: String::new(),
             jira_url: String::new(),
             tempo_url: String::new(),
+            jira_page_loaded: false,
+            tempo_page_loaded: false,
             jira_status: ConnectionStatus::NotConnected,
             tempo_status: ConnectionStatus::NotConnected,
             error: None,
@@ -302,7 +306,7 @@ impl OnboardingModel {
         }
     }
 
-    fn transition_to(&mut self, stage: UiStage) {
+    fn set_stage(&mut self, stage: UiStage) {
         self.stage = stage;
         self.focus = 0;
     }
@@ -583,6 +587,7 @@ where
                         model.can_retain_jira_token = true;
                         model.hostname = workflow.hostname_default().unwrap_or_default().to_owned();
                         model.email = workflow.email_default().unwrap_or_default().to_owned();
+                        model.tempo_page_loaded = false;
                         model.warning = None;
                         transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
                     }
@@ -677,7 +682,7 @@ fn transition_to(
     browser_launcher: &dyn BrowserLauncher,
     stage: UiStage,
 ) -> Result<(), CliError> {
-    model.transition_to(stage);
+    model.set_stage(stage);
     enter_stage(model, workflow, browser_launcher, stage)
 }
 
@@ -688,16 +693,18 @@ fn enter_stage(
     stage: UiStage,
 ) -> Result<(), CliError> {
     let page = match stage {
-        UiStage::Jira if model.jira_instruction.is_empty() => {
+        UiStage::Jira if !model.jira_page_loaded => {
             let page = workflow.jira_token_page()?;
             model.jira_instruction = page.instruction.to_owned();
             model.jira_url = page.url.to_string();
+            model.jira_page_loaded = true;
             Some(page)
         }
-        UiStage::Tempo if model.tempo_instruction.is_empty() => {
+        UiStage::Tempo if !model.tempo_page_loaded => {
             let page = workflow.tempo_token_page()?;
             model.tempo_instruction = page.instruction.to_owned();
             model.tempo_url = page.url.to_string();
+            model.tempo_page_loaded = true;
             Some(page)
         }
         UiStage::Jira | UiStage::Tempo | UiStage::Save => None,
@@ -1150,6 +1157,8 @@ mod tests {
             tempo_instruction: String::new(),
             jira_url: "https://id.atlassian.com/manage-profile/security/api-tokens".to_owned(),
             tempo_url: String::new(),
+            jira_page_loaded: true,
+            tempo_page_loaded: false,
             jira_status: ConnectionStatus::NotConnected,
             tempo_status: ConnectionStatus::NotConnected,
             error: None,
