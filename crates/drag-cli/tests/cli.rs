@@ -279,6 +279,23 @@ fn log_reports_missing_and_malformed_configuration_without_networking(
 }
 
 #[test]
+fn log_json_debug_runtime_failure_stays_on_stderr() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("malformed.json");
+    fs::write(&path, "{not valid json")?;
+
+    let output = command(&path)?
+        .args(["log", "ABC-1", "30m", "--debug"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "config_error");
+    Ok(())
+}
+
+#[test]
 fn invalid_list_date_is_a_structured_usage_error_before_networking(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;

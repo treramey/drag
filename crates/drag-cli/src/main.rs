@@ -456,7 +456,9 @@ mod tests {
     use super::{request_debug_enabled, ResolvedOutputMode};
 
     #[test]
-    fn json_output_suppresses_plain_text_request_diagnostics() {
+    fn request_diagnostics_are_enabled_only_for_human_output() {
+        assert!(request_debug_enabled(true, ResolvedOutputMode::Human));
         assert!(!request_debug_enabled(true, ResolvedOutputMode::Json));
+        assert!(!request_debug_enabled(false, ResolvedOutputMode::Human));
     }
 }

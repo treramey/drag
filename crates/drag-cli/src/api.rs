@@ -349,10 +349,14 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use reqwest::{Method, StatusCode};
+    use std::time::Duration;
+
+    use reqwest::{Client, Method, StatusCode};
     use url::Url;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use drag::models::AddWorklogRequest;
 
     use super::{api_error, safe_segment, ApiClient};
     use crate::{config::Credentials, CliError};
@@ -375,6 +379,124 @@ mod tests {
 
     fn mock_tempo_base(server: &MockServer) -> Result<Url, url::ParseError> {
         Url::parse(&format!("{}/4/", server.uri()))
+    }
+
+    fn add_worklog_request() -> AddWorklogRequest {
+        AddWorklogRequest {
+            issue_id: "10001".to_owned(),
+            time_spent_seconds: 4_500,
+            start_date: "2026-07-14".to_owned(),
+            start_time: "09:15:00".to_owned(),
+            description: Some("review".to_owned()),
+            remaining_estimate_seconds: Some(7_200),
+            author_account_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn add_worklog_posts_one_authenticated_request_with_the_configured_author(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let mut expected = add_worklog_request();
+        expected.author_account_id = Some("account-1".to_owned());
+        Mock::given(method("POST"))
+            .and(path("/4/worklogs"))
+            .and(header("authorization", "Bearer tempo-secret"))
+            .and(body_json(expected))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(worklog("751393"), "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let created = api.add_worklog(add_worklog_request()).await?;
+
+        assert_eq!(created.tempo_worklog_id, "751393");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_worklog_server_failure_is_redacted_and_classified_as_runtime_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/4/worklogs"))
+            .respond_with(ResponseTemplate::new(500).set_body_raw(
+                r#"{"errors":[{"message":"rejected tempo-secret and jira-secret"}]}"#,
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let error = api
+            .add_worklog(add_worklog_request())
+            .await
+            .err()
+            .ok_or("server failure unexpectedly succeeded")?;
+
+        assert!(matches!(&error, CliError::Api(_)));
+        assert_eq!(error.exit_code(), 1);
+        assert!(!error.to_string().contains("tempo-secret"));
+        assert!(!error.to_string().contains("jira-secret"));
+        assert!(error.to_string().contains("[REDACTED]"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_worklog_malformed_success_response_is_a_runtime_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/4/worklogs"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("{not json", "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let error = api
+            .add_worklog(add_worklog_request())
+            .await
+            .err()
+            .ok_or("malformed response unexpectedly succeeded")?;
+
+        assert!(matches!(&error, CliError::Api(_)));
+        assert_eq!(error.exit_code(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_worklog_network_timeout_is_a_runtime_failure(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/4/worklogs"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(1))
+                    .set_body_raw(worklog("751393"), "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+        api.client = Client::builder()
+            .timeout(Duration::from_millis(50))
+            .build()?;
+
+        let error = api
+            .add_worklog(add_worklog_request())
+            .await
+            .err()
+            .ok_or("network timeout unexpectedly succeeded")?;
+
+        assert!(matches!(&error, CliError::Http(source) if source.is_timeout()));
+        assert_eq!(error.exit_code(), 1);
+        Ok(())
     }
 
     #[tokio::test]
