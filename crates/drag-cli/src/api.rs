@@ -350,7 +350,7 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener};
+    use std::net::{Shutdown, TcpListener, TcpStream};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -378,6 +378,47 @@ mod tests {
         )
     }
 
+    fn accept_mock_connection(listener: &TcpListener) -> Result<TcpStream, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .map_err(|error| format!("failed to set request timeout: {error}"))?;
+                    return Ok(stream);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if Instant::now() >= deadline {
+                        return Err("timed out waiting for a Tempo request".to_owned());
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(format!("failed to accept Tempo request: {error}")),
+            }
+        }
+    }
+
+    fn read_request_headers(stream: &mut TcpStream) -> Result<bool, String> {
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let bytes_read = stream
+                .read(&mut chunk)
+                .map_err(|error| format!("failed to read Tempo request: {error}"))?;
+            if bytes_read == 0 {
+                return Ok(false);
+            }
+            request.extend_from_slice(&chunk[..bytes_read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                return Ok(true);
+            }
+            if request.len() > 64 * 1024 {
+                return Err("Tempo request headers exceeded 64 KiB".to_owned());
+            }
+        }
+    }
+
     fn mock_tempo(bodies: Vec<String>) -> Result<(Url, MockServer), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         listener.set_nonblocking(true)?;
@@ -385,54 +426,37 @@ mod tests {
         let base = Url::parse(&format!("http://{address}/4/"))?;
         let base_text = base.as_str().to_owned();
         let handle = thread::spawn(move || {
+            let mut stream = None;
             for body in bodies {
-                let deadline = Instant::now() + Duration::from_secs(2);
-                let mut stream = loop {
-                    match listener.accept() {
-                        Ok((stream, _)) => break stream,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            if Instant::now() >= deadline {
-                                return Err("timed out waiting for a Tempo request".to_owned());
-                            }
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                        Err(error) => {
-                            return Err(format!("failed to accept Tempo request: {error}"))
-                        }
-                    }
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(2)))
-                    .map_err(|error| format!("failed to set request timeout: {error}"))?;
-                let mut request = Vec::new();
-                let mut chunk = [0_u8; 1024];
                 loop {
-                    let bytes_read = stream
-                        .read(&mut chunk)
-                        .map_err(|error| format!("failed to read Tempo request: {error}"))?;
-                    if bytes_read == 0 {
-                        return Err("Tempo request ended before its headers".to_owned());
+                    if stream.is_none() {
+                        stream = Some(accept_mock_connection(&listener)?);
                     }
-                    request.extend_from_slice(&chunk[..bytes_read]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let connection = stream
+                        .as_mut()
+                        .ok_or_else(|| "mock Tempo connection was unavailable".to_owned())?;
+                    if read_request_headers(connection)? {
                         break;
                     }
-                    if request.len() > 64 * 1024 {
-                        return Err("Tempo request headers exceeded 64 KiB".to_owned());
-                    }
+                    stream = None;
                 }
                 let body = body.replace("{MOCK_TEMPO_BASE}", &base_text);
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
                     body.len()
                 );
-                stream
+                let connection = stream
+                    .as_mut()
+                    .ok_or_else(|| "mock Tempo connection was unavailable".to_owned())?;
+                connection
                     .write_all(response.as_bytes())
                     .map_err(|error| format!("failed to write Tempo response: {error}"))?;
-                stream
+                connection
                     .flush()
                     .map_err(|error| format!("failed to flush Tempo response: {error}"))?;
-                if let Err(error) = stream.shutdown(Shutdown::Write) {
+            }
+            if let Some(connection) = stream {
+                if let Err(error) = connection.shutdown(Shutdown::Write) {
                     if error.kind() != std::io::ErrorKind::NotConnected {
                         return Err(format!("failed to finish Tempo response: {error}"));
                     }
