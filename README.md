@@ -120,11 +120,41 @@ changes the configuration.
 
 ## Usage
 
+### Log work
+
+Pass an issue key or configured alias followed by either a duration or a clock
+interval:
+
+```bash
+drag log ABC-123 1h15m
+drag l ABC-123 11:35-14:20 yesterday -d "review"
+drag log ABC-123 11.35-14.20 2026-07-14
+drag log lunch 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h
+drag log lunch 30m --start 12:00 --dry-run
+```
+
+Durations accept minutes, hours, or both, such as `15m`, `1h`, and `1h15m`.
+Intervals accept whole hours and either colon or dot clock notation, including
+`11-14`, `11-14:30`, `11:35-14:20`, and `11.35-14.20`. An interval supplies
+its own start time. If its end is at or before its start, Drag treats the end
+as the following local day.
+
+`WHEN` defaults to today in Drag's configured local time zone. It accepts
+`YYYY-MM-DD`, `y`, `yesterday`, `t±N`, and `today±N`. For duration input,
+`--start`/`-s` sets the start in `HH:mm` form. Without it, today's worklog uses
+the current local time; a selected date uses the start of that day.
+`--description`/`-d` adds worklog text, and `--remaining-estimate`/`-r` accepts
+a duration such as `2h`.
+
+Live logging reads Jira once to resolve the issue ID, then creates one Tempo
+worklog. Drag does not retry the create request automatically. Use `--dry-run`
+to validate the command and print the normalized request without contacting
+Jira or Tempo.
+
+### Other commands
+
 ```bash
 # Worklogs
-drag log ABC-123 1h15m
-drag l ABC-123 11-12:30 yesterday -d "review"
-drag log lunch 30m --start 12:00 --dry-run
 drag list
 drag ls 2026-07-14 --verbose
 drag delete 123456 123457
@@ -143,13 +173,11 @@ drag stop ABC-123 --dry-run
 drag stop ABC-123
 ```
 
-Accepted date selectors are `YYYY-MM-DD`, `y`, `yesterday`, `t±N`, and
-`today±N`. `list` and its `ls` alias are read-only. With no date they select
-today in Drag's configured local time zone; `--verbose` adds descriptions and
-Jira URLs to human output without changing the JSON data shape. The command
-loads the selected calendar month's worklogs and schedule, including both
-month boundaries, to calculate its daily and monthly totals. Intervals that
-end before their start cross midnight.
+`list` and its `ls` alias are read-only. With no date they select today in
+Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
+to human output without changing the JSON data shape. The command loads the
+selected calendar month's worklogs and schedule, including both month
+boundaries, to calculate its daily and monthly totals.
 
 ### JSON and raw input
 
@@ -163,8 +191,15 @@ printf '%s' '{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}' \
   | drag --output json log --json - --dry-run
 ```
 
+Raw log input uses camel-case fields: `issueKeyOrAlias`,
+`durationOrInterval`, `when`, `description`, `start`, and
+`remainingEstimate`. Unknown fields are rejected. `--json` cannot be combined
+with positional log arguments or their corresponding flags.
+
 Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `{"ok":false,"error":{"code":"...","message":"..."}}`.
+`--debug` writes redacted request diagnostics only in human output mode; JSON
+output stays machine-readable.
 
 | Exit | Meaning |
 |---:|---|

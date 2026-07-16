@@ -116,10 +116,11 @@ fn log_dry_run_parses_without_network_access() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn log_and_alias_accept_positional_dot_interval_without_network_access(
+fn log_and_alias_produce_equivalent_positional_dot_interval_previews(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = configured_file(&directory)?;
+    let mut previews = Vec::new();
     for command_name in ["log", "l"] {
         let output = command(&path)?
             .args([
@@ -134,10 +135,13 @@ fn log_and_alias_accept_positional_dot_interval_without_network_access(
             .output()?;
 
         assert!(output.status.success(), "{command_name} failed");
+        assert!(output.stderr.is_empty(), "{command_name} wrote to stderr");
         let body: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(body["data"]["request"]["startTime"], "11:35:00");
         assert_eq!(body["data"]["request"]["timeSpentSeconds"], 9_900);
+        previews.push(body["data"].clone());
     }
+    assert_eq!(previews[0], previews[1]);
     Ok(())
 }
 
@@ -172,9 +176,13 @@ fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn
     assert!(positional.status.success());
     assert!(inline.status.success());
     assert!(stdin.status.success());
+    assert!(positional.stderr.is_empty());
+    assert!(inline.stderr.is_empty());
+    assert!(stdin.stderr.is_empty());
     let positional: Value = serde_json::from_slice(&positional.stdout)?;
     let inline: Value = serde_json::from_slice(&inline.stdout)?;
     let stdin: Value = serde_json::from_slice(&stdin.stdout)?;
+    assert_eq!(stdin["ok"], true);
     assert_eq!(inline["data"], positional["data"]);
     assert_eq!(stdin["data"], positional["data"]);
     Ok(())
@@ -196,6 +204,7 @@ fn log_rejects_raw_json_combined_with_positional_input() -> Result<(), Box<dyn s
         .output()?;
 
     assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
     let body: Value = serde_json::from_slice(&output.stderr)?;
     assert_eq!(body["error"]["code"], "usage");
     Ok(())
@@ -215,6 +224,7 @@ fn log_rejects_unknown_raw_json_fields() -> Result<(), Box<dyn std::error::Error
         .output()?;
 
     assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
     let body: Value = serde_json::from_slice(&output.stderr)?;
     assert_eq!(body["error"]["code"], "invalid_json");
     Ok(())
@@ -355,7 +365,63 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     let output = command(&path)?.arg("schema").output()?;
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(body["data"]["commands"]["log"]["dryRun"], true);
+    assert_eq!(
+        body["data"]["commands"]["log"],
+        serde_json::json!({
+            "aliases": ["l"],
+            "sideEffects": true,
+            "networkAccess": {"jira": "read", "tempo": "write"},
+            "mutation": "createTempoWorklog",
+            "arguments": [
+                {"name": "issueKeyOrAlias", "requiredUnless": "json"},
+                {"name": "durationOrInterval", "requiredUnless": "json"},
+                {
+                    "name": "when",
+                    "required": false,
+                    "default": "todayInConfiguredLocalTimeZone"
+                }
+            ],
+            "durationOrInterval": {
+                "durationSyntax": ["15m", "1h", "1h15m"],
+                "intervalSyntax": ["11-14", "11-14:30", "11:35-14:20", "11.35-14.20"],
+                "overnight": "endAtOrBeforeStartUsesNextLocalDay"
+            },
+            "date": {
+                "required": false,
+                "default": "todayInConfiguredLocalTimeZone",
+                "syntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"]
+            },
+            "flags": {
+                "description": {"short": "d", "value": "string"},
+                "start": {"short": "s", "value": "HH:mm", "appliesTo": "duration"},
+                "remainingEstimate": {
+                    "short": "r",
+                    "value": "duration",
+                    "syntax": ["15m", "1h", "1h15m"]
+                },
+                "debug": {
+                    "global": true,
+                    "output": "humanStderr",
+                    "credentials": "redacted"
+                }
+            },
+            "rawJson": true,
+            "rawJsonInput": {
+                "stdinValue": "-",
+                "denyUnknownFields": true,
+                "fields": [
+                    "issueKeyOrAlias",
+                    "durationOrInterval",
+                    "when",
+                    "description",
+                    "start",
+                    "remainingEstimate"
+                ]
+            },
+            "dryRun": true,
+            "dryRunBehavior": {"sideEffects": false, "networkAccess": false}
+        })
+    );
     assert_eq!(
         body["data"]["commands"]["list"]["aliases"],
         serde_json::json!(["ls"])
@@ -463,6 +529,34 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         1
     );
     assert_eq!(body["data"]["schemaVersion"], 1);
+    Ok(())
+}
+
+#[test]
+fn log_help_documents_inputs_safety_and_examples() -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::cargo_bin("drag")?
+        .args(["log", "--help"])
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    for expected in [
+        "[ISSUE_KEY_OR_ALIAS] [DURATION_OR_INTERVAL] [WHEN]",
+        "defaults to today in the configured local time zone",
+        "Aliases:",
+        "drag l",
+        "11:35-14:20",
+        "11.35-14.20",
+        "2026-07-14",
+        "--description",
+        "--start",
+        "--remaining-estimate",
+        "--json",
+        "--dry-run",
+        "--debug",
+    ] {
+        assert!(stdout.contains(expected), "help omitted {expected}");
+    }
     Ok(())
 }
 

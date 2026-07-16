@@ -30,6 +30,10 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Fixed
 
+- Lock down the mutating `log`/`l` contract: duration, interval, date, start,
+  description, and remaining-estimate inputs; DST-aware overnight intervals;
+  network-free dry runs; ordered Jira-to-Tempo creation; structured failures;
+  redacted diagnostics; and complete help and schema metadata.
 - Lock down the read-only `list`/`ls` contract: local-time date defaults and
   relative selectors, inclusive calendar-month totals, structured failures,
   stable JSON output, and safe multi-page Tempo worklog retrieval.
