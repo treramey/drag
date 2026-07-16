@@ -106,11 +106,13 @@ impl ApiClient {
                     "Tempo pagination exceeded the 100-page safety limit".to_owned(),
                 ));
             }
-            let url = Url::parse(&next_url).map_err(CliError::Url)?;
+            let url = Url::parse(&next_url).map_err(|_| {
+                CliError::Api("Tempo returned a malformed pagination URL".to_owned())
+            })?;
             if url.origin().ascii_serialization() != self.tempo_origin {
-                return Err(CliError::Api(format!(
-                    "Tempo returned an unsafe pagination URL: {url}"
-                )));
+                return Err(CliError::Api(
+                    "Tempo returned an unsafe pagination URL".to_owned(),
+                ));
             }
             let mut page: Page<WorklogEntity> = self.json(self.tempo(Method::GET, url)).await?;
             results.append(&mut page.results);
@@ -245,7 +247,8 @@ impl ApiClient {
         if !status.is_success() {
             return Err(api_error(status, &bytes, &self.redaction_secrets()));
         }
-        serde_json::from_slice(&bytes).map_err(CliError::Json)
+        serde_json::from_slice(&bytes)
+            .map_err(|error| CliError::Api(format!("server returned malformed JSON: {error}")))
     }
 
     async fn empty(&self, builder: RequestBuilder) -> Result<(), CliError> {
@@ -349,12 +352,15 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use reqwest::{Method, StatusCode};
     use url::Url;
 
     use super::{api_error, safe_segment, ApiClient};
     use crate::{config::Credentials, CliError};
+
+    type MockServer = thread::JoinHandle<Result<(), String>>;
 
     fn credentials() -> Credentials {
         Credentials {
@@ -372,17 +378,28 @@ mod tests {
         )
     }
 
-    fn mock_tempo(
-        bodies: Vec<String>,
-    ) -> Result<(Url, thread::JoinHandle<()>), Box<dyn std::error::Error>> {
+    fn mock_tempo(bodies: Vec<String>) -> Result<(Url, MockServer), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
         let address = listener.local_addr()?;
         let base = Url::parse(&format!("http://{address}/4/"))?;
         let base_text = base.as_str().to_owned();
         let handle = thread::spawn(move || {
             for body in bodies {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    return;
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return Err("timed out waiting for a Tempo request".to_owned());
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => {
+                            return Err(format!("failed to accept Tempo request: {error}"))
+                        }
+                    }
                 };
                 let mut request = [0_u8; 4096];
                 let _ = stream.read(&mut request);
@@ -393,8 +410,17 @@ mod tests {
                 );
                 let _ = stream.write_all(response.as_bytes());
             }
+            Ok(())
         });
         Ok((base, handle))
+    }
+
+    fn finish_mock(server: MockServer) -> Result<(), Box<dyn std::error::Error>> {
+        let result = server
+            .join()
+            .map_err(|_| std::io::Error::other("mock Tempo server panicked"))?;
+        result.map_err(std::io::Error::other)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -419,7 +445,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["1", "2"]
         );
-        server.join().map_err(|_| "mock Tempo server panicked")?;
+        finish_mock(server)?;
         Ok(())
     }
 
@@ -427,7 +453,7 @@ mod tests {
     async fn worklog_pagination_rejects_cross_origin_continuations(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let body = format!(
-            r#"{{"results":[{}],"metadata":{{"next":"https://attacker.example/worklogs"}}}}"#,
+            r#"{{"results":[{}],"metadata":{{"next":"https://attacker.example/worklogs?token=tempo-secret"}}}}"#,
             worklog("1")
         );
         let (base, server) = mock_tempo(vec![body])?;
@@ -440,7 +466,49 @@ mod tests {
             .ok_or("unsafe continuation unexpectedly succeeded")?;
 
         assert!(error.to_string().contains("unsafe pagination URL"));
-        server.join().map_err(|_| "mock Tempo server panicked")?;
+        assert!(!error.to_string().contains("tempo-secret"));
+        finish_mock(server)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worklog_pagination_treats_malformed_continuations_as_redacted_runtime_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = format!(
+            r#"{{"results":[{}],"metadata":{{"next":"https://[tempo-secret"}}}}"#,
+            worklog("1")
+        );
+        let (base, server) = mock_tempo(vec![body])?;
+        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+
+        let error = api
+            .get_worklogs("2026-07-01", "2026-07-31")
+            .await
+            .err()
+            .ok_or("malformed continuation unexpectedly succeeded")?;
+
+        assert!(matches!(&error, CliError::Api(_)));
+        assert_eq!(error.exit_code(), 1);
+        assert!(!error.to_string().contains("tempo-secret"));
+        finish_mock(server)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn successful_responses_with_malformed_json_are_runtime_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (base, server) = mock_tempo(vec!["{not json".to_owned()])?;
+        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+
+        let error = api
+            .get_worklogs("2026-07-01", "2026-07-31")
+            .await
+            .err()
+            .ok_or("malformed response unexpectedly succeeded")?;
+
+        assert!(matches!(&error, CliError::Api(_)));
+        assert_eq!(error.exit_code(), 1);
+        finish_mock(server)?;
         Ok(())
     }
 
@@ -459,7 +527,7 @@ mod tests {
             .ok_or("unbounded pagination unexpectedly succeeded")?;
 
         assert!(error.to_string().contains("100-page safety limit"));
-        server.join().map_err(|_| "mock Tempo server panicked")?;
+        finish_mock(server)?;
         Ok(())
     }
 
