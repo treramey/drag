@@ -62,6 +62,7 @@ pub struct Author {
 pub struct Issue {
     #[serde(rename = "self")]
     pub self_url: String,
+    #[serde(deserialize_with = "deserialize_string_or_u64")]
     pub id: String,
 }
 
@@ -100,14 +101,14 @@ pub struct ClockInterval {
 mod tests {
     use super::WorklogEntity;
 
-    fn worklog_json(id: &str) -> String {
+    fn worklog_json(worklog_id: &str, issue_id: &str) -> String {
         format!(
             r#"{{
-                "tempoWorklogId": {id},
+                "tempoWorklogId": {worklog_id},
                 "startDate": "2026-07-14",
                 "startTime": "09:00:00",
                 "author": {{"accountId": "me"}},
-                "issue": {{"self": "https://example.atlassian.net/issue/1", "id": "1"}},
+                "issue": {{"self": "https://example.atlassian.net/issue/1", "id": {issue_id}}},
                 "timeSpentSeconds": 3600
             }}"#
         )
@@ -115,7 +116,7 @@ mod tests {
 
     #[test]
     fn worklog_entity_accepts_numeric_tempo_id() -> Result<(), serde_json::Error> {
-        let entity: WorklogEntity = serde_json::from_str(&worklog_json("751393"))?;
+        let entity: WorklogEntity = serde_json::from_str(&worklog_json("751393", r#""1""#))?;
 
         assert_eq!(entity.tempo_worklog_id, "751393");
         Ok(())
@@ -123,9 +124,17 @@ mod tests {
 
     #[test]
     fn worklog_entity_preserves_string_tempo_id() -> Result<(), serde_json::Error> {
-        let entity: WorklogEntity = serde_json::from_str(&worklog_json(r#""751393""#))?;
+        let entity: WorklogEntity = serde_json::from_str(&worklog_json(r#""751393""#, r#""1""#))?;
 
         assert_eq!(entity.tempo_worklog_id, "751393");
+        Ok(())
+    }
+
+    #[test]
+    fn worklog_entity_accepts_numeric_issue_id() -> Result<(), serde_json::Error> {
+        let entity: WorklogEntity = serde_json::from_str(&worklog_json("751393", "275038"))?;
+
+        assert_eq!(entity.issue.id, "275038");
         Ok(())
     }
 }

@@ -102,7 +102,9 @@ impl ApiClient {
         from: &str,
         to: &str,
     ) -> Result<Vec<ScheduleEntity>, CliError> {
-        let url = Url::parse(&format!("{TEMPO_BASE}user-schedule")).map_err(CliError::Url)?;
+        let account = safe_segment(&self.credentials.account_id)?;
+        let url =
+            Url::parse(&format!("{TEMPO_BASE}user-schedule/{account}")).map_err(CliError::Url)?;
         let page: Page<ScheduleEntity> = self
             .json(
                 self.tempo(Method::GET, url)
