@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod cli;
 mod config;
+mod list;
 mod setup;
 mod setup_tui;
 

@@ -1,16 +1,13 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::io::{self, Read};
 use std::path::PathBuf;
 
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
-use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
-use drag::schedule::{create_schedule_details, ScheduleDetails};
 use drag::time::{
-    clock_interval, format_duration, month_bounds, parse_clock, parse_duration_or_interval,
-    select_date,
+    clock_interval, format_duration, parse_clock, parse_duration_or_interval, select_date,
 };
 use drag::tracker::{Tracker, TrackerInterval};
 use serde_json::json;
@@ -24,6 +21,7 @@ use crate::cli::{
 #[cfg(test)]
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
+use crate::list::{self, ApiListDataSource};
 #[cfg(test)]
 use crate::setup::LineOnboardingSession;
 #[cfg(test)]
@@ -434,55 +432,10 @@ impl App {
     }
 
     pub async fn list(&self, args: ListArgs) -> Result<Rendered, CliError> {
-        let config = Config::load(&self.path)?;
-        let credentials = config.credentials()?;
-        let now = self.now();
-        let selected = select_date(now, args.when.as_deref())?;
-        let (month_start, month_end) = month_bounds(selected.date);
-        let month_start = month_start.to_string();
-        let month_end = month_end.to_string();
-        let api = ApiClient::new(credentials.clone(), self.debug)?;
-        let (entities, schedule) = tokio::try_join!(
-            api.get_worklogs(&month_start, &month_end),
-            api.get_schedule(&month_start, &month_end)
-        )?;
-        let details = create_schedule_details(
-            &entities,
-            &schedule,
-            selected.date,
-            now.date_naive(),
-            &credentials.account_id,
-        );
-        let issue_ids: BTreeSet<_> = entities
-            .iter()
-            .map(|entity| entity.issue.id.clone())
-            .collect();
-        let mut issue_keys = BTreeMap::new();
-        for issue_id in issue_ids {
-            issue_keys.insert(issue_id.clone(), api.get_issue_key(&issue_id).await?);
-        }
-        let mut worklogs = Vec::new();
-        for entity in entities.iter().filter(|entity| {
-            entity.author.account_id == credentials.account_id
-                && entity.start_date == selected.date.to_string()
-        }) {
-            let issue_key = issue_keys
-                .get(&entity.issue.id)
-                .cloned()
-                .ok_or_else(|| CliError::Api("Atlassian did not return an issue key".to_owned()))?;
-            worklogs.push(self.to_worklog(entity.clone(), issue_key)?);
-        }
-        let human = worklogs_table(
-            selected.date,
-            &worklogs,
-            &details,
-            args.verbose,
-            &config.aliases,
-        );
-        Ok(Rendered::new(
-            json!({"date": selected.date, "worklogs": worklogs, "schedule": details}),
-            human,
-        ))
+        list::run(&self.path, self.now(), args, |credentials| {
+            Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?))
+        })
+        .await
     }
 
     pub async fn delete(&self, args: DeleteArgs) -> Result<Rendered, CliError> {
@@ -908,55 +861,6 @@ fn required_setup_environment(
             "{name} must be set and non-empty for `drag setup --from-env`"
         ))),
     }
-}
-
-fn worklogs_table(
-    date: chrono::NaiveDate,
-    worklogs: &[Worklog],
-    details: &ScheduleDetails,
-    verbose: bool,
-    aliases: &BTreeMap<String, String>,
-) -> String {
-    let mut table = Table::new();
-    table
-        .load_preset(UTF8_FULL)
-        .set_content_arrangement(ContentArrangement::Dynamic);
-    let mut header = vec!["id", "from-to", "issue", "duration"];
-    if verbose {
-        header.extend(["description", "issue url"]);
-    }
-    table.set_header(header);
-    for worklog in worklogs {
-        let interval = worklog.interval.as_ref().map_or_else(
-            || "unknown".to_owned(),
-            |value| format!("{}-{}", value.start_time, value.end_time),
-        );
-        let mut row = vec![
-            worklog.id.clone(),
-            interval,
-            issue_with_aliases(&worklog.issue_key, aliases, true),
-            worklog.duration.clone(),
-        ];
-        if verbose {
-            row.extend([worklog.description.clone(), worklog.link.clone()]);
-        }
-        table.add_row(row);
-    }
-    format!(
-        "{}: {}/{} ({})\n{}\n{}\nRequired {}, logged: {}",
-        date.format("%B"),
-        details.month_logged_duration,
-        details.month_required_duration,
-        details.month_current_period_duration,
-        date.format("%A, %Y-%m-%d"),
-        if worklogs.is_empty() {
-            "No worklogs".to_owned()
-        } else {
-            table.to_string()
-        },
-        details.day_required_duration,
-        details.day_logged_duration
-    )
 }
 
 fn trackers_table(
