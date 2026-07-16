@@ -154,6 +154,40 @@ fn invalid_duration_is_a_structured_usage_error() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn invalid_list_date_is_a_structured_usage_error_before_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let output = command(&path)?.args(["list", "not-a-date"]).output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "invalid_date");
+    Ok(())
+}
+
+#[test]
+fn list_reports_missing_and_malformed_configuration_without_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+    let missing_output = command(&missing)?.arg("list").output()?;
+    assert_eq!(missing_output.status.code(), Some(2));
+    let missing_body: Value = serde_json::from_slice(&missing_output.stderr)?;
+    assert_eq!(missing_body["error"]["code"], "not_configured");
+
+    let malformed = directory.path().join("malformed.json");
+    fs::write(&malformed, "{not valid json")?;
+    let malformed_output = command(&malformed)?.arg("ls").output()?;
+    assert_eq!(malformed_output.status.code(), Some(1));
+    let malformed_body: Value = serde_json::from_slice(&malformed_output.stderr)?;
+    assert_eq!(malformed_body["error"]["code"], "config_error");
+    Ok(())
+}
+
+#[test]
 fn tracker_stop_dry_run_does_not_mutate_the_tracker() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = configured_file(&directory)?;
@@ -180,6 +214,21 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(body["data"]["commands"]["log"]["dryRun"], true);
+    assert_eq!(
+        body["data"]["commands"]["list"]["aliases"],
+        serde_json::json!(["ls"])
+    );
+    assert_eq!(body["data"]["commands"]["list"]["sideEffects"], false);
+    assert_eq!(
+        body["data"]["commands"]["list"]["networkAccess"],
+        "read-only"
+    );
+    assert_eq!(body["data"]["commands"]["list"]["date"]["required"], false);
+    assert_eq!(
+        body["data"]["commands"]["list"]["date"]["default"],
+        "todayInConfiguredLocalTimeZone"
+    );
+    assert_eq!(body["data"]["commands"]["list"]["verbose"], true);
     assert_eq!(body["data"]["commands"]["setup"]["interactive"], true);
     assert_eq!(
         body["data"]["commands"]["setup"]["interactiveInterface"],
@@ -297,6 +346,23 @@ fn setup_help_documents_guided_and_unattended_modes() -> Result<(), Box<dyn std:
     assert!(stdout.contains("--no-open"));
     assert!(stdout.contains("DRAG_REDUCED_MOTION=1"));
     assert!(stdout.contains("Print token URLs without launching a browser"));
+    Ok(())
+}
+
+#[test]
+fn list_help_documents_read_only_date_and_verbose_behavior(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::cargo_bin("drag")?
+        .args(["list", "--help"])
+        .output()?;
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout)?;
+    assert!(stdout.contains("without changing Jira or Tempo"));
+    assert!(stdout.contains("defaults to today"));
+    assert!(stdout.contains("[DATE]"));
+    assert!(stdout.contains("--verbose"));
+    assert!(stdout.contains("descriptions and Jira URLs"));
     Ok(())
 }
 

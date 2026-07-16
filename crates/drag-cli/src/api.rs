@@ -8,13 +8,14 @@ use url::Url;
 
 use crate::{config::Credentials, CliError};
 
-const TEMPO_ORIGIN: &str = "https://api.tempo.io";
 const TEMPO_BASE: &str = "https://api.tempo.io/4/";
 
 pub struct ApiClient {
     client: Client,
     credentials: Credentials,
     debug: bool,
+    tempo_base: Url,
+    tempo_origin: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,16 +32,31 @@ struct Metadata {
 
 impl ApiClient {
     pub fn new(credentials: Credentials, debug: bool) -> Result<Self, CliError> {
+        Self::with_tempo_base(
+            credentials,
+            debug,
+            Url::parse(TEMPO_BASE).map_err(CliError::Url)?,
+        )
+    }
+
+    fn with_tempo_base(
+        credentials: Credentials,
+        debug: bool,
+        tempo_base: Url,
+    ) -> Result<Self, CliError> {
         let client = Client::builder()
             .user_agent(concat!("drag/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(CliError::Http)?;
+        let tempo_origin = tempo_base.origin().ascii_serialization();
         Ok(Self {
             client,
             credentials,
             debug,
+            tempo_base,
+            tempo_origin,
         })
     }
 
@@ -49,27 +65,33 @@ impl ApiClient {
         mut request: AddWorklogRequest,
     ) -> Result<WorklogEntity, CliError> {
         request.author_account_id = Some(self.credentials.account_id.clone());
-        let url = Url::parse(TEMPO_BASE)
-            .and_then(|base| base.join("worklogs"))
-            .map_err(CliError::Url)?;
+        let url = self.tempo_base.join("worklogs").map_err(CliError::Url)?;
         self.json(self.tempo(Method::POST, url).json(&request))
             .await
     }
 
     pub async fn get_worklog(&self, id: u64) -> Result<WorklogEntity, CliError> {
-        let url = Url::parse(&format!("{TEMPO_BASE}worklogs/{id}")).map_err(CliError::Url)?;
+        let url = self
+            .tempo_base
+            .join(&format!("worklogs/{id}"))
+            .map_err(CliError::Url)?;
         self.json(self.tempo(Method::GET, url)).await
     }
 
     pub async fn delete_worklog(&self, id: u64) -> Result<(), CliError> {
-        let url = Url::parse(&format!("{TEMPO_BASE}worklogs/{id}")).map_err(CliError::Url)?;
+        let url = self
+            .tempo_base
+            .join(&format!("worklogs/{id}"))
+            .map_err(CliError::Url)?;
         self.empty(self.tempo(Method::DELETE, url)).await
     }
 
     pub async fn get_worklogs(&self, from: &str, to: &str) -> Result<Vec<WorklogEntity>, CliError> {
         let account = safe_segment(&self.credentials.account_id)?;
-        let url =
-            Url::parse(&format!("{TEMPO_BASE}worklogs/user/{account}")).map_err(CliError::Url)?;
+        let url = self
+            .tempo_base
+            .join(&format!("worklogs/user/{account}"))
+            .map_err(CliError::Url)?;
         let first =
             self.tempo(Method::GET, url)
                 .query(&[("from", from), ("to", to), ("limit", "1000")]);
@@ -85,7 +107,7 @@ impl ApiClient {
                 ));
             }
             let url = Url::parse(&next_url).map_err(CliError::Url)?;
-            if url.origin().ascii_serialization() != TEMPO_ORIGIN {
+            if url.origin().ascii_serialization() != self.tempo_origin {
                 return Err(CliError::Api(format!(
                     "Tempo returned an unsafe pagination URL: {url}"
                 )));
@@ -103,8 +125,10 @@ impl ApiClient {
         to: &str,
     ) -> Result<Vec<ScheduleEntity>, CliError> {
         let account = safe_segment(&self.credentials.account_id)?;
-        let url =
-            Url::parse(&format!("{TEMPO_BASE}user-schedule/{account}")).map_err(CliError::Url)?;
+        let url = self
+            .tempo_base
+            .join(&format!("user-schedule/{account}"))
+            .map_err(CliError::Url)?;
         let page: Page<ScheduleEntity> = self
             .json(
                 self.tempo(Method::GET, url)
@@ -195,8 +219,10 @@ impl ApiClient {
 
     fn tempo_verification_request(&self) -> Result<RequestBuilder, CliError> {
         let account = safe_segment(&self.credentials.account_id)?;
-        let url =
-            Url::parse(&format!("{TEMPO_BASE}worklogs/user/{account}")).map_err(CliError::Url)?;
+        let url = self
+            .tempo_base
+            .join(&format!("worklogs/user/{account}"))
+            .map_err(CliError::Url)?;
         let today = Utc::now().date_naive().to_string();
         Ok(self.tempo(Method::GET, url).query(&[
             ("from", today.as_str()),
@@ -320,10 +346,122 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
     use reqwest::{Method, StatusCode};
+    use url::Url;
 
     use super::{api_error, safe_segment, ApiClient};
     use crate::{config::Credentials, CliError};
+
+    fn credentials() -> Credentials {
+        Credentials {
+            tempo_token: "tempo-secret".to_owned(),
+            account_id: "account-1".to_owned(),
+            atlassian_user_email: "person@example.com".to_owned(),
+            atlassian_token: "jira-secret".to_owned(),
+            hostname: "example.atlassian.net".to_owned(),
+        }
+    }
+
+    fn worklog(id: &str) -> String {
+        format!(
+            r#"{{"tempoWorklogId":"{id}","startDate":"2026-07-14","startTime":"09:00:00","author":{{"accountId":"account-1"}},"issue":{{"self":"https://example.atlassian.net/issue/1","id":"1"}},"timeSpentSeconds":3600}}"#
+        )
+    }
+
+    fn mock_tempo(
+        bodies: Vec<String>,
+    ) -> Result<(Url, thread::JoinHandle<()>), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let base = Url::parse(&format!("http://{address}/4/"))?;
+        let base_text = base.as_str().to_owned();
+        let handle = thread::spawn(move || {
+            for body in bodies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request);
+                let body = body.replace("{MOCK_TEMPO_BASE}", &base_text);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        Ok((base, handle))
+    }
+
+    #[tokio::test]
+    async fn worklog_pagination_aggregates_pages_and_stops_at_terminal_page(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let bodies = vec![
+            format!(
+                r#"{{"results":[{}],"metadata":{{"next":"{{MOCK_TEMPO_BASE}}worklogs?page=2"}}}}"#,
+                worklog("1")
+            ),
+            format!(r#"{{"results":[{}],"metadata":{{}}}}"#, worklog("2")),
+        ];
+        let (base, server) = mock_tempo(bodies)?;
+        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+
+        let results = api.get_worklogs("2026-07-01", "2026-07-31").await?;
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|worklog| worklog.tempo_worklog_id.as_str())
+                .collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+        server.join().map_err(|_| "mock Tempo server panicked")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worklog_pagination_rejects_cross_origin_continuations(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = format!(
+            r#"{{"results":[{}],"metadata":{{"next":"https://attacker.example/worklogs"}}}}"#,
+            worklog("1")
+        );
+        let (base, server) = mock_tempo(vec![body])?;
+        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+
+        let error = api
+            .get_worklogs("2026-07-01", "2026-07-31")
+            .await
+            .err()
+            .ok_or("unsafe continuation unexpectedly succeeded")?;
+
+        assert!(error.to_string().contains("unsafe pagination URL"));
+        server.join().map_err(|_| "mock Tempo server panicked")?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worklog_pagination_retains_the_hundred_page_safety_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let body = r#"{"results":[],"metadata":{"next":"{MOCK_TEMPO_BASE}worklogs?page=next"}}"#
+            .to_owned();
+        let (base, server) = mock_tempo(vec![body; 100])?;
+        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+
+        let error = api
+            .get_worklogs("2026-07-01", "2026-07-31")
+            .await
+            .err()
+            .ok_or("unbounded pagination unexpectedly succeeded")?;
+
+        assert!(error.to_string().contains("100-page safety limit"));
+        server.join().map_err(|_| "mock Tempo server panicked")?;
+        Ok(())
+    }
 
     #[test]
     fn rejects_identifiers_that_can_change_a_url() {

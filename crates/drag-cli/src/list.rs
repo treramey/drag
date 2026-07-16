@@ -417,6 +417,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn date_selectors_use_local_today_and_inclusive_calendar_month_bounds(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = chrono_tz::Europe::Warsaw
+            .with_ymd_and_hms(2024, 3, 1, 0, 30, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+        let cases = [
+            (None, "2024-03-01", "2024-03-01", "2024-03-31"),
+            (Some("2024-02-29"), "2024-02-29", "2024-02-01", "2024-02-29"),
+            (Some("yesterday"), "2024-02-29", "2024-02-01", "2024-02-29"),
+            (Some("today+1"), "2024-03-02", "2024-03-01", "2024-03-31"),
+        ];
+
+        for (selector, selected, month_start, month_end) in cases {
+            let requests = Arc::new(Mutex::new(Requests::default()));
+            let fake = FakeListDataSource {
+                worklogs: Vec::new(),
+                schedule: Vec::new(),
+                requests: Arc::clone(&requests),
+                failing_issues: Vec::new(),
+            };
+            let rendered = run(
+                &path,
+                now,
+                ListArgs {
+                    when: selector.map(str::to_owned),
+                    verbose: false,
+                },
+                |_| Ok(Box::new(fake)),
+            )
+            .await?;
+
+            assert_eq!(rendered.data["date"], selected);
+            let requests = requests
+                .lock()
+                .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
+            assert_eq!(
+                requests.worklogs,
+                [(month_start.to_owned(), month_end.to_owned())]
+            );
+            assert_eq!(requests.schedules, requests.worklogs);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn populated_day_filters_before_enrichment_and_preserves_output_contracts(
     ) -> Result<(), CliError> {
         let directory = TempDir::new()?;
