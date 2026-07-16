@@ -158,7 +158,11 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
     })
 }
 
-fn to_worklog(entity: WorklogEntity, issue_key: String, timezone: Tz) -> Result<Worklog, CliError> {
+pub(crate) fn to_worklog(
+    entity: WorklogEntity,
+    issue_key: String,
+    timezone: Tz,
+) -> Result<Worklog, CliError> {
     let date = NaiveDate::parse_from_str(&entity.start_date, "%Y-%m-%d")
         .map_err(|_| CliError::Api("Tempo returned an invalid start date".to_owned()))?;
     let hostname = Url::parse(&entity.issue.self_url)

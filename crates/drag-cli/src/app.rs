@@ -5,10 +5,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
-use drag::time::{clock_interval, format_duration};
 use drag::tracker::{Tracker, TrackerInterval};
 use serde_json::json;
-use url::Url;
 
 use crate::api::ApiClient;
 use crate::cli::{
@@ -683,26 +681,7 @@ impl App {
     }
 
     fn to_worklog(&self, entity: WorklogEntity, issue_key: String) -> Result<Worklog, CliError> {
-        let date = chrono::NaiveDate::parse_from_str(&entity.start_date, "%Y-%m-%d")
-            .map_err(|_| CliError::Api("Tempo returned an invalid start date".to_owned()))?;
-        let hostname = Url::parse(&entity.issue.self_url)
-            .ok()
-            .and_then(|url| url.host_str().map(str::to_owned))
-            .ok_or_else(|| CliError::Api("Tempo returned an invalid issue URL".to_owned()))?;
-        Ok(Worklog {
-            id: entity.tempo_worklog_id,
-            interval: clock_interval(
-                entity.time_spent_seconds,
-                &entity.start_time,
-                date,
-                self.timezone,
-            ),
-            issue_id: entity.issue.id,
-            duration: format_duration(entity.time_spent_seconds, false),
-            description: entity.description,
-            link: format!("https://{hostname}/browse/{issue_key}"),
-            issue_key,
-        })
+        log::to_worklog(entity, issue_key, self.timezone)
     }
 
     fn now(&self) -> DateTime<Tz> {
