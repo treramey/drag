@@ -116,18 +116,81 @@ fn log_dry_run_parses_without_network_access() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn log_accepts_raw_json_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
+fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let raw = r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m","when":"2020-02-28","description":"review with team","start":"9:30","remainingEstimate":"2h"}"#;
+    let positional = command(&path)?
+        .args([
+            "log",
+            "ABC-1",
+            "30m",
+            "2020-02-28",
+            "--description",
+            "review with team",
+            "--start",
+            "9:30",
+            "--remaining-estimate",
+            "2h",
+            "--dry-run",
+        ])
+        .output()?;
+    let inline = command(&path)?
+        .args(["log", "--json", raw, "--dry-run"])
+        .output()?;
+    let stdin = command(&path)?
+        .args(["log", "--json", "-", "--dry-run"])
+        .write_stdin(raw)
+        .output()?;
+    assert!(positional.status.success());
+    assert!(inline.status.success());
+    assert!(stdin.status.success());
+    let positional: Value = serde_json::from_slice(&positional.stdout)?;
+    let inline: Value = serde_json::from_slice(&inline.stdout)?;
+    let stdin: Value = serde_json::from_slice(&stdin.stdout)?;
+    assert_eq!(inline["data"], positional["data"]);
+    assert_eq!(stdin["data"], positional["data"]);
+    Ok(())
+}
+
+#[test]
+fn log_rejects_raw_json_combined_with_positional_input() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = configured_file(&directory)?;
     let output = command(&path)?
-        .args(["log", "--json", "-", "--dry-run"])
-        .write_stdin(
-            r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m","when":"2020-02-28"}"#,
-        )
+        .args([
+            "log",
+            "ABC-1",
+            "30m",
+            "--json",
+            r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}"#,
+            "--dry-run",
+        ])
         .output()?;
-    assert!(output.status.success());
-    let body: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(body["data"]["request"]["timeSpentSeconds"], 1_800);
+
+    assert_eq!(output.status.code(), Some(2));
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "usage");
+    Ok(())
+}
+
+#[test]
+fn log_rejects_unknown_raw_json_fields() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("missing.json");
+    let output = command(&path)?
+        .args([
+            "log",
+            "--json",
+            r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m","descripton":"typo"}"#,
+            "--dry-run",
+        ])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_json");
     Ok(())
 }
 
@@ -150,6 +213,42 @@ fn invalid_duration_is_a_structured_usage_error() -> Result<(), Box<dyn std::err
     assert_eq!(output.status.code(), Some(2));
     let body: Value = serde_json::from_slice(&output.stderr)?;
     assert_eq!(body["error"]["code"], "invalid_duration");
+    Ok(())
+}
+
+#[test]
+fn zero_duration_is_a_structured_usage_error() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let output = command(&path)?
+        .args(["log", "ABC-1", "0m", "--dry-run"])
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "non_positive_duration");
+    Ok(())
+}
+
+#[test]
+fn log_reports_missing_and_malformed_configuration_without_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+    let missing_output = command(&missing)?
+        .args(["log", "ABC-1", "30m", "--dry-run"])
+        .output()?;
+    assert_eq!(missing_output.status.code(), Some(2));
+    let missing_body: Value = serde_json::from_slice(&missing_output.stderr)?;
+    assert_eq!(missing_body["error"]["code"], "not_configured");
+
+    let malformed = directory.path().join("malformed.json");
+    fs::write(&malformed, "{not valid json")?;
+    let malformed_output = command(&malformed)?
+        .args(["log", "ABC-1", "30m", "--dry-run"])
+        .output()?;
+    assert_eq!(malformed_output.status.code(), Some(1));
+    let malformed_body: Value = serde_json::from_slice(&malformed_output.stderr)?;
+    assert_eq!(malformed_body["error"]["code"], "config_error");
     Ok(())
 }
 
