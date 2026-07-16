@@ -228,6 +228,7 @@ mod tests {
         worklogs: Vec<WorklogEntity>,
         schedule: Vec<ScheduleEntity>,
         requests: Arc<Mutex<Requests>>,
+        failing_issues: Vec<String>,
     }
 
     impl ListDataSource for FakeListDataSource {
@@ -262,7 +263,16 @@ mod tests {
                 .lock()
                 .map(|mut requests| requests.issues.push(issue_id.to_owned()))
                 .ok();
-            Box::pin(async move { Ok(format!("KEY-{issue_id}")) })
+            let should_fail = self.failing_issues.iter().any(|id| id == issue_id);
+            Box::pin(async move {
+                if should_fail {
+                    Err(CliError::Api(format!(
+                        "Jira issue {issue_id} is inaccessible"
+                    )))
+                } else {
+                    Ok(format!("KEY-{issue_id}"))
+                }
+            })
         }
     }
 
@@ -274,6 +284,10 @@ mod tests {
             atlassian_user_email: Some("me@example.com".to_owned()),
             atlassian_token: Some("jira-secret".to_owned()),
             hostname: Some("example.atlassian.net".to_owned()),
+            aliases: BTreeMap::from([
+                ("first alias".to_owned(), "key-10".to_owned()),
+                ("second alias".to_owned(), "KEY-10".to_owned()),
+            ]),
             ..Config::default()
         }
         .save(&path)?;
@@ -297,6 +311,23 @@ mod tests {
         }
     }
 
+    fn worklog(id: &str, date: &str, author: &str, issue_id: &str) -> WorklogEntity {
+        WorklogEntity {
+            tempo_worklog_id: id.to_owned(),
+            start_date: date.to_owned(),
+            start_time: "09:15:00".to_owned(),
+            author: Author {
+                account_id: author.to_owned(),
+            },
+            issue: Issue {
+                self_url: format!("https://example.atlassian.net/rest/api/3/issue/{issue_id}"),
+                id: issue_id.to_owned(),
+            },
+            description: format!("description {id}"),
+            time_spent_seconds: 3_600,
+        }
+    }
+
     #[tokio::test]
     async fn empty_selected_day_uses_month_data_without_jira_requests() -> Result<(), CliError> {
         let directory = TempDir::new()?;
@@ -310,6 +341,7 @@ mod tests {
                 kind: "WORKING_DAY".to_owned(),
             }],
             requests: Arc::clone(&requests),
+            failing_issues: vec!["10".to_owned()],
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -357,6 +389,7 @@ mod tests {
             worklogs: Vec::new(),
             schedule: Vec::new(),
             requests: Arc::clone(&requests),
+            failing_issues: Vec::new(),
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -380,6 +413,160 @@ mod tests {
             .lock()
             .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
         assert!(requests.issues.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn populated_day_filters_before_enrichment_and_preserves_output_contracts(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let requests = Arc::new(Mutex::new(Requests::default()));
+        let fake = FakeListDataSource {
+            worklogs: vec![
+                worklog("visible-1", "2026-07-14", "me", "10"),
+                worklog("other-day", "2026-07-13", "me", "blocked"),
+                worklog("visible-2", "2026-07-14", "me", "20"),
+                worklog("other-author", "2026-07-14", "someone-else", "blocked"),
+                worklog("visible-3", "2026-07-14", "me", "10"),
+            ],
+            schedule: vec![ScheduleEntity {
+                date: "2026-07-14".to_owned(),
+                required_seconds: 28_800,
+                kind: "WORKING_DAY".to_owned(),
+            }],
+            requests: Arc::clone(&requests),
+            failing_issues: vec!["blocked".to_owned()],
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let rendered = run(
+            &path,
+            now,
+            ListArgs {
+                when: None,
+                verbose: false,
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await?;
+
+        assert_eq!(rendered.data["date"], "2026-07-14");
+        assert_eq!(
+            rendered.data["worklogs"]
+                .as_array()
+                .ok_or_else(|| CliError::Api("expected worklog array".to_owned()))?
+                .iter()
+                .map(|worklog| worklog["id"].as_str())
+                .collect::<Vec<_>>(),
+            [Some("visible-1"), Some("visible-2"), Some("visible-3")]
+        );
+        assert_eq!(rendered.data["schedule"]["monthLoggedDuration"], "4h");
+        assert_eq!(rendered.data["schedule"]["dayLoggedDuration"], "3h");
+        assert_eq!(
+            rendered.data["worklogs"][0]["interval"]["startTime"],
+            "09:15"
+        );
+        assert_eq!(rendered.data["worklogs"][0]["interval"]["endTime"], "10:15");
+        assert_eq!(rendered.data["worklogs"][0]["issueId"], "10");
+        assert_eq!(rendered.data["worklogs"][0]["issueKey"], "KEY-10");
+        assert_eq!(rendered.data["worklogs"][0]["duration"], "1h");
+        assert_eq!(
+            rendered.data["worklogs"][0]["description"],
+            "description visible-1"
+        );
+        assert_eq!(
+            rendered.data["worklogs"][0]["link"],
+            "https://example.atlassian.net/browse/KEY-10"
+        );
+        assert!(rendered.human.contains("July: 4h/8h"));
+        assert!(rendered.human.contains("Tuesday, 2026-07-14"));
+        assert!(rendered.human.contains("(first alias, +1) KEY-10"));
+        assert!(rendered.human.contains("Required 8h, logged: 3h"));
+        assert!(!rendered.human.contains("description visible-1"));
+        assert!(!rendered.human.contains("issue url"));
+
+        let requests = requests
+            .lock()
+            .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
+        assert_eq!(requests.issues, ["10", "20"]);
+        Ok(())
+    }
+
+    #[test]
+    fn verbose_table_adds_terminal_columns_without_changing_worklogs() -> Result<(), CliError> {
+        let entity = worklog("visible", "2026-07-14", "me", "10");
+        let worklog = to_worklog(entity, "KEY-10".to_owned(), chrono_tz::UTC)?;
+        let details = ScheduleDetails {
+            month_required_duration: "8h".to_owned(),
+            month_logged_duration: "1h".to_owned(),
+            month_current_period_duration: "-7h".to_owned(),
+            day_required_duration: "8h".to_owned(),
+            day_logged_duration: "1h".to_owned(),
+        };
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14)
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let output = worklogs_table(date, &[worklog], &details, true, &BTreeMap::new());
+
+        assert!(output.contains("description"));
+        assert!(output.contains("description visible"));
+        assert!(output.contains("issue url"));
+        assert!(output.contains("https://example.atlassian.net/browse/KEY-10"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_issue_lookup_failure_fails_the_command() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let fake = FakeListDataSource {
+            worklogs: vec![worklog("visible", "2026-07-14", "me", "10")],
+            schedule: Vec::new(),
+            requests: Arc::new(Mutex::new(Requests::default())),
+            failing_issues: vec!["10".to_owned()],
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let error = run(
+            &path,
+            now,
+            ListArgs {
+                when: None,
+                verbose: false,
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await
+        .err()
+        .ok_or_else(|| CliError::Api("selected Jira failure unexpectedly succeeded".to_owned()))?;
+
+        assert!(error.to_string().contains("Jira issue 10 is inaccessible"));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_selected_worklog_fields_are_runtime_errors() -> Result<(), CliError> {
+        let mut invalid_date = worklog("date", "not-a-date", "me", "10");
+        let date_error = to_worklog(invalid_date.clone(), "KEY-10".to_owned(), chrono_tz::UTC)
+            .err()
+            .ok_or_else(|| CliError::Api("malformed date unexpectedly succeeded".to_owned()))?;
+        assert!(date_error.to_string().contains("invalid start date"));
+
+        invalid_date.start_date = "2026-07-14".to_owned();
+        invalid_date.issue.self_url = "not a Jira URL".to_owned();
+        let url_error = to_worklog(invalid_date, "KEY-10".to_owned(), chrono_tz::UTC)
+            .err()
+            .ok_or_else(|| {
+                CliError::Api("malformed issue URL unexpectedly succeeded".to_owned())
+            })?;
+        assert!(url_error.to_string().contains("invalid issue URL"));
         Ok(())
     }
 }
