@@ -349,18 +349,13 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
-    use std::thread;
-    use std::time::{Duration, Instant};
-
     use reqwest::{Method, StatusCode};
     use url::Url;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::{api_error, safe_segment, ApiClient};
     use crate::{config::Credentials, CliError};
-
-    type MockServer = thread::JoinHandle<Result<(), String>>;
 
     fn credentials() -> Credentials {
         Credentials {
@@ -378,115 +373,37 @@ mod tests {
         )
     }
 
-    fn accept_mock_connection(listener: &TcpListener) -> Result<TcpStream, String> {
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
-                        .map_err(|error| format!("failed to set request timeout: {error}"))?;
-                    return Ok(stream);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    if Instant::now() >= deadline {
-                        return Err("timed out waiting for a Tempo request".to_owned());
-                    }
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => return Err(format!("failed to accept Tempo request: {error}")),
-            }
-        }
-    }
-
-    fn read_request_headers(stream: &mut TcpStream) -> Result<bool, String> {
-        let mut request = Vec::new();
-        let mut chunk = [0_u8; 1024];
-        loop {
-            let bytes_read = stream
-                .read(&mut chunk)
-                .map_err(|error| format!("failed to read Tempo request: {error}"))?;
-            if bytes_read == 0 {
-                return Ok(false);
-            }
-            request.extend_from_slice(&chunk[..bytes_read]);
-            if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                return Ok(true);
-            }
-            if request.len() > 64 * 1024 {
-                return Err("Tempo request headers exceeded 64 KiB".to_owned());
-            }
-        }
-    }
-
-    fn mock_tempo(bodies: Vec<String>) -> Result<(Url, MockServer), Box<dyn std::error::Error>> {
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let address = listener.local_addr()?;
-        let base = Url::parse(&format!("http://{address}/4/"))?;
-        let base_text = base.as_str().to_owned();
-        let handle = thread::spawn(move || {
-            let mut stream = None;
-            for body in bodies {
-                loop {
-                    if stream.is_none() {
-                        stream = Some(accept_mock_connection(&listener)?);
-                    }
-                    let connection = stream
-                        .as_mut()
-                        .ok_or_else(|| "mock Tempo connection was unavailable".to_owned())?;
-                    if read_request_headers(connection)? {
-                        break;
-                    }
-                    stream = None;
-                }
-                let body = body.replace("{MOCK_TEMPO_BASE}", &base_text);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
-                    body.len()
-                );
-                let connection = stream
-                    .as_mut()
-                    .ok_or_else(|| "mock Tempo connection was unavailable".to_owned())?;
-                connection
-                    .write_all(response.as_bytes())
-                    .map_err(|error| format!("failed to write Tempo response: {error}"))?;
-                connection
-                    .flush()
-                    .map_err(|error| format!("failed to flush Tempo response: {error}"))?;
-            }
-            if let Some(connection) = stream {
-                if let Err(error) = connection.shutdown(Shutdown::Write) {
-                    if error.kind() != std::io::ErrorKind::NotConnected {
-                        return Err(format!("failed to finish Tempo response: {error}"));
-                    }
-                }
-            }
-            Ok(())
-        });
-        Ok((base, handle))
-    }
-
-    fn finish_mock(server: MockServer) -> Result<(), Box<dyn std::error::Error>> {
-        let result = server
-            .join()
-            .map_err(|_| std::io::Error::other("mock Tempo server panicked"))?;
-        result.map_err(std::io::Error::other)?;
-        Ok(())
+    fn mock_tempo_base(server: &MockServer) -> Result<Url, url::ParseError> {
+        Url::parse(&format!("{}/4/", server.uri()))
     }
 
     #[tokio::test]
     async fn worklog_pagination_aggregates_pages_and_stops_at_terminal_page(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let bodies = vec![
-            format!(
-                r#"{{"results":[{}],"metadata":{{"next":"{{MOCK_TEMPO_BASE}}worklogs?page=2"}}}}"#,
-                worklog("1")
-            ),
-            format!(r#"{{"results":[{}],"metadata":{{}}}}"#, worklog("2")),
-        ];
-        let (base, server) = mock_tempo(bodies)?;
-        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+        let server = MockServer::start().await;
+        let next = format!("{}/4/worklogs?page=2", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"results":[{}],"metadata":{{"next":"{next}"}}}}"#,
+                    worklog("1")
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(r#"{{"results":[{}],"metadata":{{}}}}"#, worklog("2")),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
 
         let results = api.get_worklogs("2026-07-01", "2026-07-31").await?;
 
@@ -497,7 +414,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["1", "2"]
         );
-        finish_mock(server)?;
         Ok(())
     }
 
@@ -508,8 +424,14 @@ mod tests {
             r#"{{"results":[{}],"metadata":{{"next":"https://attacker.example/worklogs?token=tempo-secret"}}}}"#,
             worklog("1")
         );
-        let (base, server) = mock_tempo(vec![body])?;
-        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
 
         let error = api
             .get_worklogs("2026-07-01", "2026-07-31")
@@ -519,7 +441,6 @@ mod tests {
 
         assert!(error.to_string().contains("unsafe pagination URL"));
         assert!(!error.to_string().contains("tempo-secret"));
-        finish_mock(server)?;
         Ok(())
     }
 
@@ -530,8 +451,14 @@ mod tests {
             r#"{{"results":[{}],"metadata":{{"next":"https://[tempo-secret"}}}}"#,
             worklog("1")
         );
-        let (base, server) = mock_tempo(vec![body])?;
-        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
 
         let error = api
             .get_worklogs("2026-07-01", "2026-07-31")
@@ -542,15 +469,20 @@ mod tests {
         assert!(matches!(&error, CliError::Api(_)));
         assert_eq!(error.exit_code(), 1);
         assert!(!error.to_string().contains("tempo-secret"));
-        finish_mock(server)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn successful_responses_with_malformed_json_are_runtime_failures(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (base, server) = mock_tempo(vec!["{not json".to_owned()])?;
-        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("{not json", "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
 
         let error = api
             .get_worklogs("2026-07-01", "2026-07-31")
@@ -560,17 +492,28 @@ mod tests {
 
         assert!(matches!(&error, CliError::Api(_)));
         assert_eq!(error.exit_code(), 1);
-        finish_mock(server)?;
         Ok(())
     }
 
     #[tokio::test]
     async fn worklog_pagination_retains_the_hundred_page_safety_limit(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let body = r#"{"results":[],"metadata":{"next":"{MOCK_TEMPO_BASE}worklogs?page=next"}}"#
-            .to_owned();
-        let (base, server) = mock_tempo(vec![body; 100])?;
-        let api = ApiClient::with_tempo_base(credentials(), false, base)?;
+        let server = MockServer::start().await;
+        let next = format!("{}/4/worklogs?page=next", server.uri());
+        let body = format!(r#"{{"results":[],"metadata":{{"next":"{next}"}}}}"#);
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body.clone(), "application/json"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .expect(99)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
 
         let error = api
             .get_worklogs("2026-07-01", "2026-07-31")
@@ -579,7 +522,6 @@ mod tests {
             .ok_or("unbounded pagination unexpectedly succeeded")?;
 
         assert!(error.to_string().contains("100-page safety limit"));
-        finish_mock(server)?;
         Ok(())
     }
 
