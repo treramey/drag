@@ -54,6 +54,7 @@ where
     let input = log_input(args)?;
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
+    validate_log_remaining_estimate(&input.value, now)?;
     let mut request = build_add_request(&config, &credentials, &input.value, now)?;
     let issue_key = config
         .resolve_issue(&input.value.issue_key_or_alias)
@@ -79,6 +80,17 @@ where
             worklog.duration, worklog.issue_key, worklog.id
         ),
     ))
+}
+
+fn validate_log_remaining_estimate(input: &LogInput, now: DateTime<Tz>) -> Result<(), CliError> {
+    let Some(remaining) = input.remaining_estimate.as_deref() else {
+        return Ok(());
+    };
+    let parsed = parse_duration_or_interval(remaining, now.date_naive(), now.timezone())?;
+    if parsed.start_time.is_some() {
+        return Err(drag::Error::InvalidDuration(remaining.to_owned()).into());
+    }
+    Ok(())
 }
 
 pub(crate) fn build_add_request(
@@ -188,6 +200,7 @@ pub(crate) fn to_worklog(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
     use chrono::TimeZone;
@@ -205,6 +218,8 @@ mod tests {
     struct FakeLogGateway {
         operations: Arc<Mutex<Vec<Operation>>>,
     }
+
+    struct UnusedLogGateway;
 
     impl LogGateway for FakeLogGateway {
         async fn resolve_issue_id(&self, issue_key: &str) -> Result<String, CliError> {
@@ -240,7 +255,31 @@ mod tests {
         }
     }
 
-    fn configured_file(directory: &TempDir) -> Result<std::path::PathBuf, CliError> {
+    impl LogGateway for UnusedLogGateway {
+        async fn resolve_issue_id(&self, _issue_key: &str) -> Result<String, CliError> {
+            Err(CliError::Api(
+                "unused test gateway resolved an issue".to_owned(),
+            ))
+        }
+
+        async fn create_worklog(
+            &self,
+            _request: AddWorklogRequest,
+        ) -> Result<WorklogEntity, CliError> {
+            Err(CliError::Api(
+                "unused test gateway created a worklog".to_owned(),
+            ))
+        }
+    }
+
+    fn configured_file(directory: &TempDir) -> Result<PathBuf, CliError> {
+        configured_file_with_aliases(directory, BTreeMap::new())
+    }
+
+    fn configured_file_with_aliases(
+        directory: &TempDir,
+        aliases: BTreeMap<String, String>,
+    ) -> Result<PathBuf, CliError> {
         let path = directory.path().join("config.json");
         Config {
             tempo_token: Some("tempo-secret".to_owned()),
@@ -248,11 +287,55 @@ mod tests {
             atlassian_user_email: Some("person@example.com".to_owned()),
             atlassian_token: Some("atlassian-secret".to_owned()),
             hostname: Some("example.atlassian.net".to_owned()),
-            aliases: BTreeMap::new(),
+            aliases,
             ..Config::default()
         }
         .save(&path)?;
         Ok(path)
+    }
+
+    fn fixed_now() -> Result<DateTime<Tz>, CliError> {
+        chrono_tz::Europe::Warsaw
+            .with_ymd_and_hms(2026, 7, 14, 12, 30, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))
+    }
+
+    fn log_args(duration: &str) -> LogArgs {
+        LogArgs {
+            issue_key_or_alias: Some("abc-1".to_owned()),
+            duration_or_interval: Some(duration.to_owned()),
+            when: None,
+            description: None,
+            start: None,
+            remaining_estimate: None,
+            json: None,
+            dry_run: false,
+        }
+    }
+
+    fn reject_gateway_creation(_credentials: Credentials) -> Result<UnusedLogGateway, CliError> {
+        Err(CliError::Api(
+            "log gateway was unexpectedly created".to_owned(),
+        ))
+    }
+
+    fn require_error(
+        result: Result<Rendered, CliError>,
+        expected: &str,
+    ) -> Result<CliError, CliError> {
+        result
+            .err()
+            .ok_or_else(|| CliError::Api(format!("expected {expected}")))
+    }
+
+    async fn preview(
+        path: &Path,
+        now: DateTime<Tz>,
+        mut args: LogArgs,
+    ) -> Result<Rendered, CliError> {
+        args.dry_run = true;
+        run(path, now, args, reject_gateway_creation).await
     }
 
     #[tokio::test]
@@ -260,10 +343,7 @@ mod tests {
     ) -> Result<(), CliError> {
         let directory = TempDir::new()?;
         let path = configured_file(&directory)?;
-        let now = chrono_tz::Europe::Warsaw
-            .with_ymd_and_hms(2026, 7, 14, 12, 30, 0)
-            .single()
-            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+        let now = fixed_now()?;
         let operations = Arc::new(Mutex::new(Vec::new()));
         let fake = FakeLogGateway {
             operations: Arc::clone(&operations),
@@ -320,6 +400,298 @@ mod tests {
             rendered.human,
             "Successfully logged 1h15m to ABC-1, type `drag d 751393` to undo."
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duration_forms_are_normalized_to_elapsed_seconds() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = fixed_now()?;
+
+        for (duration, expected) in [("15m", 900), ("1h", 3_600), ("1h15m", 4_500)] {
+            let rendered = preview(&path, now, log_args(duration)).await?;
+            assert_eq!(
+                rendered.data["request"]["timeSpentSeconds"], expected,
+                "unexpected elapsed seconds for {duration}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn zero_duration_fails_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+
+        let error = require_error(
+            run(&path, fixed_now()?, log_args("0m"), reject_gateway_creation).await,
+            "zero duration to fail",
+        )?;
+
+        assert!(matches!(
+            error,
+            CliError::Core(drag::Error::NonPositiveDuration)
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_duration_fails_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+
+        let error = require_error(
+            run(
+                &path,
+                fixed_now()?,
+                log_args("nonsense"),
+                reject_gateway_creation,
+            )
+            .await,
+            "malformed duration to fail",
+        )?;
+
+        assert!(matches!(
+            error,
+            CliError::Core(drag::Error::InvalidDuration(value)) if value == "nonsense"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_alias_is_resolved_before_issue_key_normalization() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file_with_aliases(
+            &directory,
+            BTreeMap::from([("focus".to_owned(), "team-7".to_owned())]),
+        )?;
+        let mut args = log_args("30m");
+        args.issue_key_or_alias = Some("focus".to_owned());
+
+        let rendered = preview(&path, fixed_now()?, args).await?;
+
+        assert_eq!(rendered.data["issueKey"], "TEAM-7");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unmatched_alias_input_is_normalized_as_an_issue_key() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+
+        let rendered = preview(&path, fixed_now()?, log_args("30m")).await?;
+
+        assert_eq!(rendered.data["issueKey"], "ABC-1");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn omitted_date_uses_today_and_current_local_time() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+
+        let rendered = preview(&path, fixed_now()?, log_args("30m")).await?;
+
+        assert_eq!(
+            rendered.data["request"],
+            json!({
+                "issueId": "<resolved from ABC-1>",
+                "timeSpentSeconds": 1_800,
+                "startDate": "2026-07-14",
+                "startTime": "12:30:00",
+                "authorAccountId": "account-1"
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_and_relative_dates_select_expected_local_days() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = fixed_now()?;
+
+        for (selector, expected) in [
+            ("2026-07-01", "2026-07-01"),
+            ("y", "2026-07-13"),
+            ("yesterday", "2026-07-13"),
+            ("t-2", "2026-07-12"),
+            ("today+1", "2026-07-15"),
+        ] {
+            let mut args = log_args("30m");
+            args.when = Some(selector.to_owned());
+            let rendered = preview(&path, now, args).await?;
+            assert_eq!(
+                rendered.data["request"]["startDate"], expected,
+                "unexpected date for {selector}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_date_without_start_uses_midnight() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("30m");
+        args.when = Some("2026-07-01".to_owned());
+
+        let rendered = preview(&path, fixed_now()?, args).await?;
+
+        assert_eq!(rendered.data["request"]["startTime"], "00:00:00");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_start_is_normalized_for_duration_input() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("30m");
+        args.start = Some("9:05".to_owned());
+
+        let rendered = preview(&path, fixed_now()?, args).await?;
+
+        assert_eq!(rendered.data["request"]["startTime"], "09:05:00");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_start_fails_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("30m");
+        args.start = Some("25:00".to_owned());
+
+        let error = require_error(
+            run(&path, fixed_now()?, args, reject_gateway_creation).await,
+            "invalid start to fail",
+        )?;
+
+        assert!(matches!(
+            error,
+            CliError::Core(drag::Error::InvalidTime(value)) if value == "25:00"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_and_overflowing_dates_fail_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = fixed_now()?;
+
+        for selector in ["not-a-date", "t+9223372036854775807"] {
+            let mut args = log_args("30m");
+            args.when = Some(selector.to_owned());
+            let error = require_error(
+                run(&path, now, args, reject_gateway_creation).await,
+                "invalid date to fail",
+            )?;
+            assert!(
+                matches!(error, CliError::Core(drag::Error::InvalidDate(ref value)) if value == selector),
+                "unexpected error for {selector}: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn description_and_remaining_estimate_are_preserved() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("30m");
+        args.description = Some("review with the team".to_owned());
+        args.remaining_estimate = Some("2h15m".to_owned());
+
+        let rendered = preview(&path, fixed_now()?, args).await?;
+
+        assert_eq!(
+            rendered.data["request"],
+            json!({
+                "issueId": "<resolved from ABC-1>",
+                "timeSpentSeconds": 1_800,
+                "startDate": "2026-07-14",
+                "startTime": "12:30:00",
+                "description": "review with the team",
+                "remainingEstimateSeconds": 8_100,
+                "authorAccountId": "account-1"
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interval_remaining_estimate_fails_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("30m");
+        args.remaining_estimate = Some("11-12".to_owned());
+
+        let error = require_error(
+            run(&path, fixed_now()?, args, reject_gateway_creation).await,
+            "interval remaining estimate to fail",
+        )?;
+
+        assert!(matches!(
+            error,
+            CliError::Core(drag::Error::InvalidDuration(value)) if value == "11-12"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_remaining_estimate_fails_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("30m");
+        args.remaining_estimate = Some("soon".to_owned());
+
+        let error = require_error(
+            run(&path, fixed_now()?, args, reject_gateway_creation).await,
+            "malformed remaining estimate to fail",
+        )?;
+
+        assert!(matches!(
+            error,
+            CliError::Core(drag::Error::InvalidDuration(value)) if value == "soon"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dry_run_returns_normalized_preview_without_creating_gateway() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file_with_aliases(
+            &directory,
+            BTreeMap::from([("focus".to_owned(), "team-7".to_owned())]),
+        )?;
+        let mut args = log_args("30m");
+        args.issue_key_or_alias = Some("focus".to_owned());
+        args.when = Some("2026-07-01".to_owned());
+        args.start = Some("9:05".to_owned());
+        args.description = Some("review".to_owned());
+        args.remaining_estimate = Some("2h".to_owned());
+
+        let rendered = preview(&path, fixed_now()?, args).await?;
+
+        assert_eq!(
+            rendered.data,
+            json!({
+                "dryRun": true,
+                "issueKey": "TEAM-7",
+                "request": {
+                    "issueId": "<resolved from TEAM-7>",
+                    "timeSpentSeconds": 1_800,
+                    "startDate": "2026-07-01",
+                    "startTime": "09:05:00",
+                    "description": "review",
+                    "remainingEstimateSeconds": 7_200,
+                    "authorAccountId": "account-1"
+                }
+            })
+        );
+        assert_eq!(rendered.human, "Would log 30m to focus.");
         Ok(())
     }
 }
