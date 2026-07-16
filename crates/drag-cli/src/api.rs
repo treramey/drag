@@ -401,8 +401,26 @@ mod tests {
                         }
                     }
                 };
-                let mut request = [0_u8; 4096];
-                let _ = stream.read(&mut request);
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .map_err(|error| format!("failed to set request timeout: {error}"))?;
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let bytes_read = stream
+                        .read(&mut chunk)
+                        .map_err(|error| format!("failed to read Tempo request: {error}"))?;
+                    if bytes_read == 0 {
+                        return Err("Tempo request ended before its headers".to_owned());
+                    }
+                    request.extend_from_slice(&chunk[..bytes_read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                    if request.len() > 64 * 1024 {
+                        return Err("Tempo request headers exceeded 64 KiB".to_owned());
+                    }
+                }
                 let body = body.replace("{MOCK_TEMPO_BASE}", &base_text);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
