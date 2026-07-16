@@ -249,6 +249,13 @@ mod tests {
 
     struct FakeLogGateway {
         operations: Arc<Mutex<Vec<Operation>>>,
+        failure: Option<FailurePoint>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FailurePoint {
+        ResolveIssue,
+        CreateWorklog,
     }
 
     struct UnusedLogGateway;
@@ -259,6 +266,9 @@ mod tests {
                 .lock()
                 .map_err(|_| CliError::Api("test operation lock was poisoned".to_owned()))?
                 .push(Operation::ResolveIssue(issue_key.to_owned()));
+            if self.failure == Some(FailurePoint::ResolveIssue) {
+                return Err(CliError::Api("Jira issue resolution failed".to_owned()));
+            }
             Ok("10001".to_owned())
         }
 
@@ -270,6 +280,9 @@ mod tests {
                 .lock()
                 .map_err(|_| CliError::Api("test operation lock was poisoned".to_owned()))?
                 .push(Operation::CreateWorklog(request.clone()));
+            if self.failure == Some(FailurePoint::CreateWorklog) {
+                return Err(CliError::Api("Tempo worklog creation failed".to_owned()));
+            }
             Ok(WorklogEntity {
                 tempo_worklog_id: "751393".to_owned(),
                 start_date: request.start_date,
@@ -352,6 +365,16 @@ mod tests {
         ))
     }
 
+    fn fake_gateway(
+        operations: &Arc<Mutex<Vec<Operation>>>,
+        failure: Option<FailurePoint>,
+    ) -> FakeLogGateway {
+        FakeLogGateway {
+            operations: Arc::clone(operations),
+            failure,
+        }
+    }
+
     fn require_error(
         result: Result<Rendered, CliError>,
         expected: &str,
@@ -377,9 +400,7 @@ mod tests {
         let path = configured_file(&directory)?;
         let now = fixed_now()?;
         let operations = Arc::new(Mutex::new(Vec::new()));
-        let fake = FakeLogGateway {
-            operations: Arc::clone(&operations),
-        };
+        let fake = fake_gateway(&operations, None);
 
         let rendered = run(
             &path,
@@ -390,7 +411,7 @@ mod tests {
                 when: None,
                 description: Some("review".to_owned()),
                 start: None,
-                remaining_estimate: None,
+                remaining_estimate: Some("2h".to_owned()),
                 json: None,
                 dry_run: false,
             },
@@ -411,7 +432,7 @@ mod tests {
                     start_date: "2026-07-14".to_owned(),
                     start_time: "12:30:00".to_owned(),
                     description: Some("review".to_owned()),
-                    remaining_estimate_seconds: None,
+                    remaining_estimate_seconds: Some(7_200),
                     author_account_id: Some("account-1".to_owned()),
                 }),
             ]
@@ -432,6 +453,56 @@ mod tests {
             rendered.human,
             "Successfully logged 1h15m to ABC-1, type `drag d 751393` to undo."
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn jira_resolution_failure_prevents_tempo_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let fake = fake_gateway(&operations, Some(FailurePoint::ResolveIssue));
+
+        let error = require_error(
+            run(&path, fixed_now()?, log_args("30m"), |_| Ok(fake)).await,
+            "Jira resolution failure",
+        )?;
+
+        assert!(
+            matches!(&error, CliError::Api(message) if message == "Jira issue resolution failed")
+        );
+        assert_eq!(error.exit_code(), 1);
+        let operations = operations
+            .lock()
+            .map_err(|_| CliError::Api("test operation lock was poisoned".to_owned()))?;
+        assert_eq!(*operations, [Operation::ResolveIssue("ABC-1".to_owned())]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tempo_creation_failure_is_not_rendered_as_success() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let fake = fake_gateway(&operations, Some(FailurePoint::CreateWorklog));
+
+        let error = require_error(
+            run(&path, fixed_now()?, log_args("30m"), |_| Ok(fake)).await,
+            "Tempo creation failure",
+        )?;
+
+        assert!(
+            matches!(&error, CliError::Api(message) if message == "Tempo worklog creation failed")
+        );
+        assert_eq!(error.exit_code(), 1);
+        let operations = operations
+            .lock()
+            .map_err(|_| CliError::Api("test operation lock was poisoned".to_owned()))?;
+        assert!(matches!(
+            operations.as_slice(),
+            [Operation::ResolveIssue(issue_key), Operation::CreateWorklog(_)]
+                if issue_key == "ABC-1"
+        ));
         Ok(())
     }
 
