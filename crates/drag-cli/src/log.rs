@@ -452,6 +452,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interval_forms_are_normalized_for_tempo() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = fixed_now()?;
+
+        for (interval, expected_start, expected_seconds) in [
+            ("11-14", "11:00:00", 10_800),
+            ("11-14:30", "11:00:00", 12_600),
+            ("11:35-14:20", "11:35:00", 9_900),
+            ("11.35-14.20", "11:35:00", 9_900),
+            ("23:50-00:10", "23:50:00", 1_200),
+            ("12-12", "12:00:00", 86_400),
+        ] {
+            let rendered = preview(&path, now, log_args(interval)).await?;
+            assert_eq!(
+                rendered.data["request"]["startTime"], expected_start,
+                "unexpected start for {interval}"
+            );
+            assert_eq!(
+                rendered.data["request"]["timeSpentSeconds"], expected_seconds,
+                "unexpected elapsed seconds for {interval}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interval_elapsed_time_uses_configured_timezone_across_dst() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+
+        for (now, expected_seconds) in [
+            (
+                chrono_tz::Europe::Warsaw
+                    .with_ymd_and_hms(2020, 3, 28, 12, 0, 0)
+                    .single(),
+                10_800,
+            ),
+            (
+                chrono_tz::Europe::Warsaw
+                    .with_ymd_and_hms(2020, 10, 24, 12, 0, 0)
+                    .single(),
+                18_000,
+            ),
+        ] {
+            let now = now.ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+            let rendered = preview(&path, now, log_args("23-3")).await?;
+            assert_eq!(
+                rendered.data["request"]["timeSpentSeconds"],
+                expected_seconds,
+                "unexpected elapsed seconds for {}",
+                now.date_naive()
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn interval_start_takes_precedence_over_start_flag() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let mut args = log_args("11:35-14:20");
+        args.start = Some("6:15".to_owned());
+
+        let rendered = preview(&path, fixed_now()?, args).await?;
+
+        assert_eq!(rendered.data["request"]["startTime"], "11:35:00");
+        assert_eq!(rendered.data["request"]["timeSpentSeconds"], 9_900);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn malformed_intervals_fail_before_gateway_creation() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = fixed_now()?;
+
+        for interval in ["1100-1300", "11:60-12", "11-25:00", "11-12-13"] {
+            let error = require_error(
+                run(&path, now, log_args(interval), reject_gateway_creation).await,
+                "malformed interval to fail",
+            )?;
+            assert!(
+                matches!(error, CliError::Core(drag::Error::InvalidDuration(ref value)) if value == interval),
+                "unexpected error for {interval}: {error}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn zero_duration_fails_before_gateway_creation() -> Result<(), CliError> {
         let directory = TempDir::new()?;
         let path = configured_file(&directory)?;

@@ -116,6 +116,32 @@ fn log_dry_run_parses_without_network_access() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
+fn log_and_alias_accept_positional_dot_interval_without_network_access(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    for command_name in ["log", "l"] {
+        let output = command(&path)?
+            .args([
+                command_name,
+                "ABC-1",
+                "11.35-14.20",
+                "2020-02-28",
+                "--start",
+                "6:15",
+                "--dry-run",
+            ])
+            .output()?;
+
+        assert!(output.status.success(), "{command_name} failed");
+        let body: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(body["data"]["request"]["startTime"], "11:35:00");
+        assert_eq!(body["data"]["request"]["timeSpentSeconds"], 9_900);
+    }
+    Ok(())
+}
+
+#[test]
 fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn std::error::Error>>
 {
     let directory = TempDir::new()?;
