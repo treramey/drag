@@ -1,14 +1,11 @@
 use std::collections::BTreeMap;
 use std::env;
-use std::io::{self, Read};
 use std::path::PathBuf;
 
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
-use drag::time::{
-    clock_interval, format_duration, parse_clock, parse_duration_or_interval, select_date,
-};
+use drag::time::{clock_interval, format_duration};
 use drag::tracker::{Tracker, TrackerInterval};
 use serde_json::json;
 use url::Url;
@@ -22,6 +19,7 @@ use crate::cli::{
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
 use crate::list::{self, ApiListDataSource};
+use crate::log::{self, ApiLogGateway};
 #[cfg(test)]
 use crate::setup::LineOnboardingSession;
 #[cfg(test)]
@@ -401,34 +399,10 @@ impl App {
     }
 
     pub async fn log(&self, args: LogArgs) -> Result<Rendered, CliError> {
-        let input = log_input(args)?;
-        let config = Config::load(&self.path)?;
-        let credentials = config.credentials()?;
-        let mut request = self.build_add_request(&config, &credentials, &input)?;
-        let issue_key = config
-            .resolve_issue(&input.value.issue_key_or_alias)
-            .to_uppercase();
-        if input.dry_run {
-            return Ok(Rendered::new(
-                json!({"dryRun": true, "issueKey": issue_key, "request": request}),
-                format!(
-                    "Would log {} to {}.",
-                    format_duration(request.time_spent_seconds, false),
-                    input.value.issue_key_or_alias
-                ),
-            ));
-        }
-        let api = ApiClient::new(credentials, self.debug)?;
-        request.issue_id = api.get_issue_id(&issue_key).await?;
-        let entity = api.add_worklog(request).await?;
-        let worklog = self.to_worklog(entity, issue_key)?;
-        Ok(Rendered::new(
-            serde_json::to_value(&worklog)?,
-            format!(
-                "Successfully logged {} to {}, type `drag d {}` to undo.",
-                worklog.duration, worklog.issue_key, worklog.id
-            ),
-        ))
+        log::run(&self.path, self.now(), args, |credentials| {
+            ApiLogGateway::new(credentials, self.debug)
+        })
+        .await
     }
 
     pub async fn list(&self, args: ListArgs) -> Result<Rendered, CliError> {
@@ -673,52 +647,6 @@ impl App {
         ))
     }
 
-    fn build_add_request(
-        &self,
-        config: &Config,
-        credentials: &Credentials,
-        input: &ResolvedLogInput,
-    ) -> Result<AddWorklogRequest, CliError> {
-        let selected = select_date(self.now(), input.value.when.as_deref())?;
-        let parsed = parse_duration_or_interval(
-            &input.value.duration_or_interval,
-            selected.date,
-            self.timezone,
-        )?;
-        if parsed.seconds <= 0 {
-            return Err(drag::Error::NonPositiveDuration.into());
-        }
-        let start = if let Some(start) = parsed.start_time {
-            start
-        } else if let Some(start) = &input.value.start {
-            parse_clock(start).ok_or_else(|| drag::Error::InvalidTime(start.clone()))?
-        } else {
-            selected.default_start_time
-        };
-        let remaining_estimate_seconds = input
-            .value
-            .remaining_estimate
-            .as_deref()
-            .map(|remaining| {
-                parse_duration_or_interval(remaining, selected.date, self.timezone)
-                    .map(|parsed| parsed.seconds)
-            })
-            .transpose()?;
-        let issue_key = config
-            .resolve_issue(&input.value.issue_key_or_alias)
-            .to_uppercase();
-        // The issue ID is filled by the async caller; this marker is replaced before upload.
-        Ok(AddWorklogRequest {
-            issue_id: format!("<resolved from {issue_key}>"),
-            time_spent_seconds: parsed.seconds,
-            start_date: selected.date.to_string(),
-            start_time: start.format("%H:%M:%S").to_string(),
-            description: input.value.description.clone(),
-            remaining_estimate_seconds,
-            author_account_id: Some(credentials.account_id.clone()),
-        })
-    }
-
     fn tracker_requests(
         &self,
         config: &Config,
@@ -738,20 +666,17 @@ impl App {
                         CliError::InvalidInput("tracker has an invalid timestamp".to_owned())
                     })?;
                 let minutes = (interval.end - interval.start) / 60_000;
-                let input = ResolvedLogInput {
-                    value: LogInput {
-                        issue_key_or_alias: tracker.issue_key.clone(),
-                        duration_or_interval: format!("{minutes}m"),
-                        when: Some(start.date_naive().to_string()),
-                        description: tracker.description.clone(),
-                        start: Some(start.format("%H:%M").to_string()),
-                        remaining_estimate: remaining.map(str::to_owned),
-                    },
-                    dry_run: false,
+                let input = LogInput {
+                    issue_key_or_alias: tracker.issue_key.clone(),
+                    duration_or_interval: format!("{minutes}m"),
+                    when: Some(start.date_naive().to_string()),
+                    description: tracker.description.clone(),
+                    start: Some(start.format("%H:%M").to_string()),
+                    remaining_estimate: remaining.map(str::to_owned),
                 };
                 Ok((
                     *interval,
-                    self.build_add_request(config, &credentials, &input)?,
+                    log::build_add_request(config, &credentials, &input, start)?,
                 ))
             })
             .collect()
@@ -807,41 +732,6 @@ fn configured_fields(
         "atlassianEmail": config.atlassian_user_email.is_some() || connection_environment.is_set("ATLASSIAN_EMAIL"),
         "atlassianToken": config.atlassian_token.is_some() || connection_environment.is_set("ATLASSIAN_TOKEN"),
         "atlassianHost": config.hostname.is_some() || connection_environment.is_set("ATLASSIAN_HOST"),
-    })
-}
-
-struct ResolvedLogInput {
-    value: LogInput,
-    dry_run: bool,
-}
-
-fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
-    let value = if let Some(raw) = args.json {
-        let raw = if raw == "-" {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            input
-        } else {
-            raw
-        };
-        serde_json::from_str(&raw)?
-    } else {
-        LogInput {
-            issue_key_or_alias: args
-                .issue_key_or_alias
-                .ok_or_else(|| CliError::InvalidInput("missing issue key or alias".to_owned()))?,
-            duration_or_interval: args
-                .duration_or_interval
-                .ok_or_else(|| CliError::InvalidInput("missing duration or interval".to_owned()))?,
-            when: args.when,
-            description: args.description,
-            start: args.start,
-            remaining_estimate: args.remaining_estimate,
-        }
-    };
-    Ok(ResolvedLogInput {
-        value,
-        dry_run: args.dry_run,
     })
 }
 
