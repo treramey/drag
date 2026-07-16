@@ -3,7 +3,6 @@
 pub mod models;
 pub mod schedule;
 pub mod time;
-pub mod tracker;
 
 use thiserror::Error;
 
@@ -22,9 +21,6 @@ pub enum Error {
     /// A parsed duration is not valid for a worklog.
     #[error("worklog duration must be greater than zero")]
     NonPositiveDuration,
-    /// An operation cannot be performed in the tracker's current state.
-    #[error("{0}")]
-    Tracker(String),
 }
 
 impl Error {
@@ -36,7 +32,6 @@ impl Error {
             Self::InvalidDate(_) => "invalid_date",
             Self::InvalidTime(_) => "invalid_time",
             Self::NonPositiveDuration => "non_positive_duration",
-            Self::Tracker(_) => "tracker_error",
         }
     }
 }

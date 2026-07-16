@@ -1,6 +1,6 @@
 # Drag
 
-A fast, scriptable CLI for logging and tracking time in
+A fast, scriptable CLI for logging time in
 [Tempo Cloud](https://tempo.io), with practical command shortcuts, structured
 output, dry runs, safer HTTP behavior, and cross-platform binaries.
 
@@ -13,8 +13,7 @@ output, dry runs, safer HTTP behavior, and cross-platform binaries.
 - List daily worklogs with monthly required/logged totals.
 - Delete one or several worklogs.
 - Store aliases such as `lunch => ABC-123`.
-- Start, pause, resume, inspect, and stop persistent local trackers.
-- Read the legacy TypeScript CLI's config and tracker format.
+- Read the legacy TypeScript CLI's config format.
 - Return readable terminal output or consistent JSON for scripts and agents.
 - Preview mutations with `--dry-run`.
 
@@ -105,8 +104,8 @@ returned by Jira. Headless setup never prompts or opens a browser. Use
 Setup reads the current configuration before asking for credentials and writes
 once, after both read-only connection checks succeed. Cancellation and failed
 validation or verification leave the existing file unchanged. A successful
-reconfiguration replaces only connection credentials, preserving aliases and
-trackers. Config files use user-only permissions on Unix. Tokens are never
+reconfiguration replaces only connection credentials, preserving aliases.
+Config files use user-only permissions on Unix. Tokens are never
 printed or included in human output, JSON, debug diagnostics, or errors.
 
 ### Check connections
@@ -164,13 +163,6 @@ drag alias set lunch ABC-123
 drag alias list
 drag alias:set lunch ABC-123
 
-# Trackers
-drag tracker start ABC-123 -d "implementation"
-drag pause ABC-123
-drag resume ABC-123
-drag tracker list
-drag stop ABC-123 --dry-run
-drag stop ABC-123
 ```
 
 `list` and its `ls` alias are read-only. With no date they select today in
@@ -209,9 +201,8 @@ output stays machine-readable.
 
 ## Backward compatibility
 
-The binary is `drag`; shortcuts `l`, `ls`, `d`, `start`, `pause`,
-`resume`, and `stop` remain available. Original command names such as
-`alias:set`, `alias:list`, `tracker:start`, and `tracker:list` are accepted.
+The binary is `drag`; shortcuts `l`, `ls`, and `d` remain available. Original
+alias command names such as `alias:set` and `alias:list` are accepted.
 The config reader supports the TypeScript `Map` JSON representation and writes
 the same representation so rollback remains possible.
 

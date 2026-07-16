@@ -21,9 +21,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 - Opt-in `doctor --remote` checks for read-only Jira and Tempo connectivity,
   with stable per-service human and JSON results.
 - Verified headless setup using a reduced set of four environment variables.
-- Worklog, alias, schedule, and tracker behavior.
+- Worklog, alias, and schedule behavior.
 - Tempo API v4 and Atlassian API v3 clients using Rustls.
-- Compatibility with the original map and tracker format.
+- Compatibility with the original map format.
 - Human/JSON output, structured errors, schema discovery, and diagnostics.
 - Raw JSON input, environment-based headless setup, and mutation dry runs.
 - Cross-platform CI, dependency policy, audits, and release artifacts.
@@ -37,6 +37,11 @@ This project follows [Semantic Versioning](https://semver.org/) and
 - Lock down the read-only `list`/`ls` contract: local-time date defaults and
   relative selectors, inclusive calendar-month totals, structured failures,
   stable JSON output, and safe multi-page Tempo worklog retrieval.
+
+### Removed
+
+- Local tracker commands, compatibility aliases, persisted tracker state, and
+  tracker upload behavior.
 
 ### Security
 

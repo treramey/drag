@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
-use cli::{AliasCommand, Cli, Command, OutputMode, TrackerCommand};
+use cli::{AliasCommand, Cli, Command, OutputMode};
 use serde::Serialize;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -215,23 +215,9 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<Rendered, CliError> {
             AliasCommand::List => app.alias_list(),
             AliasCommand::Delete(args) => app.alias_delete(args),
         },
-        Command::Tracker { command } => match command {
-            TrackerCommand::Start(args) => app.tracker_start(args).await,
-            TrackerCommand::Pause(args) => app.tracker_pause(args),
-            TrackerCommand::Resume(args) => app.tracker_resume(args),
-            TrackerCommand::Stop(args) => app.tracker_stop(args).await,
-            TrackerCommand::Delete(args) => app.tracker_delete(args),
-            TrackerCommand::List => app.tracker_list(),
-        },
-        Command::Start(args) => app.tracker_start(args).await,
-        Command::Pause(args) => app.tracker_pause(args),
-        Command::Resume(args) => app.tracker_resume(args),
-        Command::Stop(args) => app.tracker_stop(args).await,
         Command::LegacyAliasSet(args) => app.alias_set(args),
         Command::LegacyAliasList => app.alias_list(),
         Command::LegacyAliasDelete(args) => app.alias_delete(args),
-        Command::LegacyTrackerList => app.tracker_list(),
-        Command::LegacyTrackerDelete(args) => app.tracker_delete(args),
         Command::Completions { shell } => {
             let shell = shell.unwrap_or_else(detect_shell);
             let mut bytes = Vec::new();
@@ -284,7 +270,7 @@ fn schema() -> Rendered {
                 },
                 "derivesAccountId": true,
                 "writesConfiguration": "onceAfterVerification",
-                "preservesConfiguration": ["aliases", "trackers"]
+                "preservesConfiguration": ["aliases"]
             },
             "log": {
                 "aliases": ["l"],
@@ -353,7 +339,6 @@ fn schema() -> Rendered {
             },
             "delete": {"aliases": ["d"], "dryRun": true},
             "alias": {"subcommands": ["set", "list", "delete"]},
-            "tracker": {"subcommands": ["start", "pause", "resume", "stop", "delete", "list"], "stopDryRun": true},
             "completions": {},
             "doctor": {
                 "remote": true,

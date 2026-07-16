@@ -288,7 +288,6 @@ mod tests {
                 ("first alias".to_owned(), "key-10".to_owned()),
                 ("second alias".to_owned(), "KEY-10".to_owned()),
             ]),
-            ..Config::default()
         }
         .save(&path)?;
         Ok(path)

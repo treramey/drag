@@ -81,48 +81,11 @@ where
     ))
 }
 
-#[derive(Clone, Copy)]
-enum RemainingEstimateSyntax {
-    DurationOnly,
-    DurationOrInterval,
-}
-
 fn build_log_request(
     config: &Config,
     credentials: &Credentials,
     input: &LogInput,
     now: DateTime<Tz>,
-) -> Result<AddWorklogRequest, CliError> {
-    build_add_request_with_syntax(
-        config,
-        credentials,
-        input,
-        now,
-        RemainingEstimateSyntax::DurationOnly,
-    )
-}
-
-pub(crate) fn build_add_request(
-    config: &Config,
-    credentials: &Credentials,
-    input: &LogInput,
-    now: DateTime<Tz>,
-) -> Result<AddWorklogRequest, CliError> {
-    build_add_request_with_syntax(
-        config,
-        credentials,
-        input,
-        now,
-        RemainingEstimateSyntax::DurationOrInterval,
-    )
-}
-
-fn build_add_request_with_syntax(
-    config: &Config,
-    credentials: &Credentials,
-    input: &LogInput,
-    now: DateTime<Tz>,
-    remaining_estimate_syntax: RemainingEstimateSyntax,
 ) -> Result<AddWorklogRequest, CliError> {
     let selected = select_date(now, input.when.as_deref())?;
     let parsed =
@@ -142,11 +105,7 @@ fn build_add_request_with_syntax(
         .as_deref()
         .map(|remaining| {
             let parsed = parse_duration_or_interval(remaining, selected.date, now.timezone())?;
-            if matches!(
-                remaining_estimate_syntax,
-                RemainingEstimateSyntax::DurationOnly
-            ) && parsed.start_time.is_some()
-            {
+            if parsed.start_time.is_some() {
                 return Err(drag::Error::InvalidDuration(remaining.to_owned()));
             }
             Ok(parsed.seconds)
@@ -333,7 +292,6 @@ mod tests {
             atlassian_token: Some("atlassian-secret".to_owned()),
             hostname: Some("example.atlassian.net".to_owned()),
             aliases,
-            ..Config::default()
         }
         .save(&path)?;
         Ok(path)

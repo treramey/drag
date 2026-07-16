@@ -1,17 +1,14 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
-use drag::tracker::{Tracker, TrackerInterval};
+use drag::models::{Worklog, WorklogEntity};
 use serde_json::json;
 
 use crate::api::ApiClient;
 use crate::cli::{
-    AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, LogInput, SetupArgs,
-    TrackerIssueArgs, TrackerStartArgs, TrackerStopArgs,
+    AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, SetupArgs,
 };
 #[cfg(test)]
 use crate::config::{normalize_jira_site, JiraCredentials};
@@ -254,7 +251,6 @@ impl App {
             "configPath": self.path,
             "configured": configured,
             "aliases": config.aliases.len(),
-            "trackers": config.trackers.len(),
             "timezone": self.timezone.name(),
             "target": {
                 "architecture": std::env::consts::ARCH,
@@ -262,12 +258,11 @@ impl App {
             }
         });
         let mut human = format!(
-            "drag {}\nconfig: {}\ntimezone: {}\naliases: {}\ntrackers: {}\nJira: {}\nTempo: {}",
+            "drag {}\nconfig: {}\ntimezone: {}\naliases: {}\nJira: {}\nTempo: {}",
             env!("CARGO_PKG_VERSION"),
             self.path.display(),
             self.timezone.name(),
             config.aliases.len(),
-            config.trackers.len(),
             configured_label(jira_configured),
             configured_label(tempo_configured),
         );
@@ -488,208 +483,12 @@ impl App {
         Ok(Rendered::new(json!({"aliases": config.aliases}), human))
     }
 
-    pub async fn tracker_start(&self, args: TrackerStartArgs) -> Result<Rendered, CliError> {
-        let mut config = Config::load(&self.path)?;
-        let issue_key = config.resolve_issue(&args.issue_key_or_alias);
-        if config.trackers.contains_key(&issue_key) && args.stop_previous {
-            drop(config);
-            self.tracker_stop(TrackerStopArgs {
-                issue_key_or_alias: args.issue_key_or_alias.clone(),
-                description: None,
-                remaining_estimate: None,
-                dry_run: false,
-            })
-            .await?;
-            config = Config::load(&self.path)?;
-        }
-        if config.trackers.contains_key(&issue_key) {
-            return Err(CliError::InvalidInput(format!(
-                "tracker for {} already exists",
-                args.issue_key_or_alias
-            )));
-        }
-        let tracker = Tracker::new(issue_key.clone(), args.description, self.now_millis());
-        config.trackers.insert(issue_key.clone(), tracker.clone());
-        config.save(&self.path)?;
-        Ok(Rendered::new(
-            serde_json::to_value(&tracker)?,
-            format!("Started tracker for {issue_key}."),
-        ))
-    }
-
-    pub fn tracker_pause(&self, args: TrackerIssueArgs) -> Result<Rendered, CliError> {
-        self.update_tracker(args, |tracker, now| tracker.pause(now), "Paused")
-    }
-
-    pub fn tracker_resume(&self, args: TrackerIssueArgs) -> Result<Rendered, CliError> {
-        self.update_tracker(args, |tracker, now| tracker.resume(now), "Resumed")
-    }
-
-    pub fn tracker_delete(&self, args: TrackerIssueArgs) -> Result<Rendered, CliError> {
-        let mut config = Config::load(&self.path)?;
-        let issue_key = config.resolve_issue(&args.issue_key_or_alias);
-        let tracker = config.trackers.remove(&issue_key).ok_or_else(|| {
-            CliError::InvalidInput(format!(
-                "tracker for {} does not exist",
-                args.issue_key_or_alias
-            ))
-        })?;
-        config.save(&self.path)?;
-        Ok(Rendered::new(
-            serde_json::to_value(&tracker)?,
-            format!("Deleted tracker for {issue_key}."),
-        ))
-    }
-
-    pub fn tracker_list(&self) -> Result<Rendered, CliError> {
-        let config = Config::load(&self.path)?;
-        let now = self.now_millis();
-        let human = trackers_table(&config.trackers, &config.aliases, now, self.timezone);
-        Ok(Rendered::new(
-            json!({"trackers": config.trackers.values().map(|tracker| json!({
-                "tracker": tracker,
-                "totalMinutes": tracker.total_minutes(now)
-            })).collect::<Vec<_>>() }),
-            human,
-        ))
-    }
-
-    pub async fn tracker_stop(&self, args: TrackerStopArgs) -> Result<Rendered, CliError> {
-        let mut config = Config::load(&self.path)?;
-        let issue_key = config.resolve_issue(&args.issue_key_or_alias);
-        let now = self.now_millis();
-        let mut tracker = config.trackers.get(&issue_key).cloned().ok_or_else(|| {
-            CliError::InvalidInput(format!(
-                "tracker for {} does not exist",
-                args.issue_key_or_alias
-            ))
-        })?;
-        tracker.stop(now, args.description);
-        let requests =
-            self.tracker_requests(&config, &tracker, args.remaining_estimate.as_deref())?;
-        if args.dry_run {
-            return Ok(Rendered::new(
-                json!({"dryRun": true, "requests": requests}),
-                format!(
-                    "Would upload {} interval(s) for {issue_key}.",
-                    requests.len()
-                ),
-            ));
-        }
-        // Persist the stopped tracker before the first network request. If the
-        // process or API fails, every not-yet-uploaded interval remains local.
-        config.trackers.insert(issue_key.clone(), tracker.clone());
-        config.save(&self.path)?;
-        if requests.is_empty() {
-            config.trackers.remove(&issue_key);
-            config.save(&self.path)?;
-            return Ok(Rendered::new(
-                json!({"issueKey": issue_key, "worklogs": []}),
-                "Tracker had no intervals of at least one minute; it was removed.".to_owned(),
-            ));
-        }
-
-        let credentials = config.credentials()?;
-        let api = ApiClient::new(credentials, self.debug)?;
-        let issue_id = api.get_issue_id(&tracker.issue_key.to_uppercase()).await?;
-        let mut uploaded = Vec::new();
-        let mut failures = Vec::new();
-        for (interval, mut request) in requests {
-            request.issue_id.clone_from(&issue_id);
-            match api.add_worklog(request).await {
-                Ok(entity) => {
-                    uploaded.push(entity.tempo_worklog_id);
-                    tracker.intervals.retain(|candidate| candidate != &interval);
-                    config.trackers.insert(issue_key.clone(), tracker.clone());
-                    config.save(&self.path)?;
-                }
-                Err(error) => failures.push(error.to_string()),
-            }
-        }
-        if failures.is_empty() {
-            config.trackers.remove(&issue_key);
-            config.save(&self.path)?;
-            Ok(Rendered::new(
-                json!({"issueKey": issue_key, "uploadedWorklogIds": uploaded}),
-                format!("Logged all tracker intervals for {issue_key}."),
-            ))
-        } else {
-            Err(CliError::Api(format!(
-                "failed to upload {} interval(s); successful intervals were removed from the tracker: {}",
-                failures.len(),
-                failures.join("; ")
-            )))
-        }
-    }
-
-    fn update_tracker(
-        &self,
-        args: TrackerIssueArgs,
-        action: impl FnOnce(&mut Tracker, i64),
-        verb: &str,
-    ) -> Result<Rendered, CliError> {
-        let mut config = Config::load(&self.path)?;
-        let issue_key = config.resolve_issue(&args.issue_key_or_alias);
-        let tracker = config.trackers.get_mut(&issue_key).ok_or_else(|| {
-            CliError::InvalidInput(format!(
-                "tracker for {} does not exist",
-                args.issue_key_or_alias
-            ))
-        })?;
-        action(tracker, self.now_millis());
-        let value = serde_json::to_value(&*tracker)?;
-        config.save(&self.path)?;
-        Ok(Rendered::new(
-            value,
-            format!("{verb} tracker for {issue_key}."),
-        ))
-    }
-
-    fn tracker_requests(
-        &self,
-        config: &Config,
-        tracker: &Tracker,
-        remaining: Option<&str>,
-    ) -> Result<Vec<(TrackerInterval, AddWorklogRequest)>, CliError> {
-        let credentials = config.credentials()?;
-        tracker
-            .intervals
-            .iter()
-            .map(|interval| {
-                let start = self
-                    .timezone
-                    .timestamp_millis_opt(interval.start)
-                    .single()
-                    .ok_or_else(|| {
-                        CliError::InvalidInput("tracker has an invalid timestamp".to_owned())
-                    })?;
-                let minutes = (interval.end - interval.start) / 60_000;
-                let input = LogInput {
-                    issue_key_or_alias: tracker.issue_key.clone(),
-                    duration_or_interval: format!("{minutes}m"),
-                    when: Some(start.date_naive().to_string()),
-                    description: tracker.description.clone(),
-                    start: Some(start.format("%H:%M").to_string()),
-                    remaining_estimate: remaining.map(str::to_owned),
-                };
-                Ok((
-                    *interval,
-                    log::build_add_request(config, &credentials, &input, start)?,
-                ))
-            })
-            .collect()
-    }
-
     fn to_worklog(&self, entity: WorklogEntity, issue_key: String) -> Result<Worklog, CliError> {
         log::to_worklog(entity, issue_key, self.timezone)
     }
 
     fn now(&self) -> DateTime<Tz> {
         Utc::now().with_timezone(&self.timezone)
-    }
-
-    fn now_millis(&self) -> i64 {
-        Utc::now().timestamp_millis()
     }
 }
 
@@ -732,97 +531,6 @@ fn required_setup_environment(
     }
 }
 
-fn trackers_table(
-    trackers: &BTreeMap<String, Tracker>,
-    aliases: &BTreeMap<String, String>,
-    now: i64,
-    timezone: Tz,
-) -> String {
-    if trackers.is_empty() {
-        return "No trackers.".to_owned();
-    }
-    trackers
-        .values()
-        .map(|tracker| {
-            let state = if tracker.is_active {
-                "Active"
-            } else {
-                "INACTIVE"
-            };
-            let resumed = timezone
-                .timestamp_millis_opt(tracker.active_timestamp)
-                .single()
-                .map_or_else(
-                    || "invalid timestamp".to_owned(),
-                    |value| value.format("%Y-%m-%d %H:%M").to_string(),
-                );
-            let intervals = if tracker.intervals.is_empty() {
-                "No completed intervals".to_owned()
-            } else {
-                tracker
-                    .intervals
-                    .iter()
-                    .map(|interval| {
-                        let start = timezone.timestamp_millis_opt(interval.start).single();
-                        let end = timezone.timestamp_millis_opt(interval.end).single();
-                        match (start, end) {
-                            (Some(start), Some(end)) => format!(
-                                "{} - {} ({}m)",
-                                start.format("%Y-%m-%d %H:%M:%S"),
-                                end.format("%Y-%m-%d %H:%M:%S"),
-                                (interval.end - interval.start) / 60_000
-                            ),
-                            _ => "invalid interval".to_owned(),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            };
-            format!(
-                "Tracker for {}, {state}\nLast resume time: {resumed}\n{intervals}\nTotal duration: {}m{}",
-                issue_with_aliases(&tracker.issue_key, aliases, false),
-                tracker.total_minutes(now),
-                tracker
-                    .description
-                    .as_ref()
-                    .map_or_else(String::new, |value| format!("\n{value}"))
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
-fn issue_with_aliases(
-    issue_key: &str,
-    aliases: &BTreeMap<String, String>,
-    aliases_first: bool,
-) -> String {
-    let names: Vec<_> = aliases
-        .iter()
-        .filter(|(_, issue)| issue.eq_ignore_ascii_case(issue_key))
-        .map(|(alias, _)| alias.as_str())
-        .collect();
-    let Some(first) = names.first() else {
-        return issue_key.to_owned();
-    };
-    let truncated = if first.chars().count() > 17 {
-        format!("{}…", first.chars().take(16).collect::<String>())
-    } else {
-        (*first).to_owned()
-    };
-    let suffix = if names.len() > 1 {
-        format!(", +{}", names.len() - 1)
-    } else {
-        String::new()
-    };
-    let label = format!("({truncated}{suffix})");
-    if aliases_first {
-        format!("{label} {issue_key}")
-    } else {
-        format!("{issue_key} {label}")
-    }
-}
-
 pub fn default_timezone(explicit: Option<&str>) -> Result<Tz, CliError> {
     let name = explicit
         .map(str::to_owned)
@@ -846,7 +554,6 @@ mod tests {
     use std::time::Duration;
 
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-    use drag::tracker::Tracker;
     #[cfg(unix)]
     use expectrl::session::OsSession;
     #[cfg(unix)]
@@ -1637,10 +1344,6 @@ mod tests {
             atlassian_token: Some("old-jira-token".to_owned()),
             hostname: Some("old.atlassian.net".to_owned()),
             aliases: BTreeMap::from([("lunch".to_owned(), "ABC-1".to_owned())]),
-            trackers: BTreeMap::from([(
-                "ABC-2".to_owned(),
-                Tracker::new("ABC-2".to_owned(), Some("work".to_owned()), 123),
-            )]),
         }
     }
 
@@ -1997,7 +1700,6 @@ mod tests {
         assert_eq!(saved.atlassian_token.as_deref(), Some("old-jira-token"));
         assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
         assert!(saved.aliases.contains_key("lunch"));
-        assert!(saved.trackers.contains_key("ABC-2"));
         Ok(())
     }
 
@@ -2104,10 +1806,6 @@ mod tests {
         concurrent
             .aliases
             .insert("meeting".to_owned(), "ABC-3".to_owned());
-        concurrent.trackers.insert(
-            "ABC-4".to_owned(),
-            Tracker::new("ABC-4".to_owned(), Some("concurrent".to_owned()), 456),
-        );
         let events = Arc::new(Mutex::new(Vec::new()));
         let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
         let app = App::with_onboarding_session(
@@ -2163,8 +1861,6 @@ mod tests {
                 .as_slice(),
             ["jira-browser:false", "tempo-browser:false", "save"]
         );
-        assert!(saved.trackers.contains_key("ABC-2"));
-        assert!(saved.trackers.contains_key("ABC-4"));
         Ok(())
     }
 
@@ -2781,7 +2477,6 @@ mod tests {
             )
         );
         assert!(saved.aliases.contains_key("lunch"));
-        assert!(saved.trackers.contains_key("ABC-2"));
 
         let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
         assert!(captured_frames.first().is_some_and(|frame| {
@@ -3387,7 +3082,6 @@ mod tests {
         assert_eq!(saved.atlassian_token.as_deref(), Some("old-jira-token"));
         assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
         assert!(saved.aliases.contains_key("lunch"));
-        assert!(saved.trackers.contains_key("ABC-2"));
         let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
         assert_eq!(
             state.text_prompts,
@@ -3709,7 +3403,6 @@ mod tests {
             saved.aliases.get("lunch").map(String::as_str),
             Some("ABC-1")
         );
-        assert!(saved.trackers.contains_key("ABC-2"));
         let accounts = tempo_accounts
             .lock()
             .map_err(|_| "test verifier lock was poisoned")?;

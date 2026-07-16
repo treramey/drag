@@ -5,7 +5,6 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use drag::tracker::Tracker;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
@@ -30,12 +29,6 @@ pub struct Config {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub aliases: BTreeMap<String, String>,
-    #[serde(
-        default,
-        with = "trackers_compat",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
-    pub trackers: BTreeMap<String, Tracker>,
 }
 
 #[derive(Clone, Serialize)]
@@ -327,24 +320,6 @@ mod aliases_compat {
     }
 }
 
-mod trackers_compat {
-    use super::*;
-
-    pub fn serialize<S>(map: &BTreeMap<String, Tracker>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serialize_map(map, serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<String, Tracker>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserialize_map(deserializer)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -355,8 +330,7 @@ mod tests {
     fn reads_and_writes_typescript_map_format() -> Result<(), Box<dyn std::error::Error>> {
         let input = r#"{
           "tempoToken":"secret",
-          "aliases":{"dataType":"Map","value":[["lunch","ABC-1"]]},
-          "trackers":{"dataType":"Map","value":[]}
+          "aliases":{"dataType":"Map","value":[["lunch","ABC-1"]]}
         }"#;
         let config: Config = serde_json::from_str(input)?;
         assert_eq!(

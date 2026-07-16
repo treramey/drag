@@ -16,8 +16,8 @@ against another person's Tempo account.
 
 Changes to date/time syntax should add table-driven tests in
 `crates/drag/src/time.rs`. Config changes must retain fixtures for the
-TypeScript `Map` format. API changes should preserve redaction, URL validation,
-and tracker partial-failure recovery. Public changes require updates to
+TypeScript `Map` format. API changes should preserve redaction and URL
+validation. Public changes require updates to
 `drag schema`, README examples, and `CHANGELOG.md`.
 
 Do not commit tokens, account IDs, private Jira hostnames, API response dumps,

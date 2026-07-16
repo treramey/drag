@@ -4,7 +4,7 @@
 
 ```text
 crates/
-├── drag/       # I/O-independent parsing, models, schedules, tracker state
+├── drag/       # I/O-independent parsing, models, and schedules
 └── drag-cli/   # Clap, config persistence, HTTP, rendering, process errors
 ```
 
@@ -23,7 +23,7 @@ several peer submodules rather than a single implementation file.
 2. `auto` output resolves from stdout's TTY state.
 3. Config is loaded from `--config`, `DRAG_CONFIG`, or `~/.drag`.
 4. Environment credentials override stored credentials.
-5. Core functions validate dates, times, durations, and tracker transitions.
+5. Core functions validate dates, times, and durations.
 6. The API adapter calls Atlassian API v3 and Tempo API v4.
 7. Results become human text or a stable JSON envelope.
 
@@ -31,13 +31,12 @@ several peer submodules rather than a single implementation file.
 
 - `drag::time`: duration/interval syntax, date selectors, DST behavior.
 - `drag::schedule`: month/day required and logged totals.
-- `drag::tracker`: persistent timer state machine.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
 - `drag_cli::api`: authentication, pagination, endpoint validation.
 - `drag_cli::setup`: setup state and connection verification.
 - `drag_cli::setup_tui`: Ratatui rendering, Crossterm events, and the
   stderr terminal lifecycle for interactive setup.
-- `drag_cli::app`: use-case orchestration and partial tracker upload safety.
+- `drag_cli::app`: use-case orchestration.
 
 ## Safety invariants
 
@@ -49,9 +48,7 @@ several peer submodules rather than a single implementation file.
 - Authenticated pagination stays on `https://api.tempo.io`.
 - URL path identifiers reject separators, query fragments, percent escapes,
   and control characters.
-- Mutating worklog and tracker-stop operations support `--dry-run`.
-- Successfully uploaded tracker intervals are removed immediately; failed
-  intervals remain locally recoverable.
+- Mutating worklog operations support `--dry-run`.
 
 ## Adding behavior
 

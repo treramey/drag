@@ -8,7 +8,7 @@ use serde::Deserialize;
 #[command(
     name = "drag",
     version,
-    about = "Log and track time in Tempo Cloud from the command line",
+    about = "Log time in Tempo Cloud from the command line",
     propagate_version = true
 )]
 pub struct Cli {
@@ -78,23 +78,6 @@ pub enum Command {
         #[command(subcommand)]
         command: AliasCommand,
     },
-    /// Manage local issue timers.
-    Tracker {
-        #[command(subcommand)]
-        command: TrackerCommand,
-    },
-    /// Start a tracker (compatibility alias for `tracker start`).
-    #[command(alias = "tracker:start")]
-    Start(TrackerStartArgs),
-    /// Pause a tracker (compatibility alias for `tracker pause`).
-    #[command(alias = "tracker:pause")]
-    Pause(TrackerIssueArgs),
-    /// Resume a tracker (compatibility alias for `tracker resume`).
-    #[command(alias = "tracker:resume")]
-    Resume(TrackerIssueArgs),
-    /// Stop a tracker and upload its completed intervals.
-    #[command(alias = "tracker:stop")]
-    Stop(TrackerStopArgs),
     /// Generate shell completions.
     #[command(visible_alias = "autocomplete")]
     Completions {
@@ -116,12 +99,6 @@ pub enum Command {
     /// Compatibility form for `alias delete`.
     #[command(name = "alias:delete", hide = true)]
     LegacyAliasDelete(AliasDeleteArgs),
-    /// Compatibility form for `tracker list`.
-    #[command(name = "tracker:list", hide = true)]
-    LegacyTrackerList,
-    /// Compatibility form for `tracker delete`.
-    #[command(name = "tracker:delete", hide = true)]
-    LegacyTrackerDelete(TrackerIssueArgs),
 }
 
 #[derive(Debug, Args)]
@@ -225,51 +202,9 @@ pub struct AliasDeleteArgs {
     pub alias_name: String,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum TrackerCommand {
-    /// Start a new tracker.
-    Start(TrackerStartArgs),
-    /// Pause an active tracker.
-    Pause(TrackerIssueArgs),
-    /// Resume a paused tracker.
-    Resume(TrackerIssueArgs),
-    /// Stop a tracker and upload all completed intervals.
-    Stop(TrackerStopArgs),
-    /// Delete a tracker without uploading it.
-    Delete(TrackerIssueArgs),
-    /// List all trackers.
-    List,
-}
-
-#[derive(Debug, Args)]
-pub struct TrackerStartArgs {
-    pub issue_key_or_alias: String,
-    #[arg(short, long)]
-    pub description: Option<String>,
-    /// Stop and upload an existing tracker for the same issue first.
-    #[arg(long)]
-    pub stop_previous: bool,
-}
-
-#[derive(Debug, Args)]
-pub struct TrackerIssueArgs {
-    pub issue_key_or_alias: String,
-}
-
-#[derive(Debug, Args)]
-pub struct TrackerStopArgs {
-    pub issue_key_or_alias: String,
-    #[arg(short, long)]
-    pub description: Option<String>,
-    #[arg(short = 'r', long)]
-    pub remaining_estimate: Option<String>,
-    /// Build worklog requests but do not upload or remove the tracker.
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
 #[cfg(test)]
 mod tests {
+    use clap::error::ErrorKind;
     use clap::Parser;
 
     use super::{Cli, Command};
@@ -285,6 +220,38 @@ mod tests {
             };
             assert_eq!(args.when.as_deref(), Some("yesterday"));
             assert!(args.verbose);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn tracker_commands_are_not_available() -> Result<(), String> {
+        for arguments in [
+            &["tracker", "start", "ABC-1"][..],
+            &["tracker", "pause", "ABC-1"],
+            &["tracker", "resume", "ABC-1"],
+            &["tracker", "stop", "ABC-1"],
+            &["tracker", "delete", "ABC-1"],
+            &["tracker", "list"],
+            &["start", "ABC-1"],
+            &["pause", "ABC-1"],
+            &["resume", "ABC-1"],
+            &["stop", "ABC-1"],
+            &["tracker:start", "ABC-1"],
+            &["tracker:pause", "ABC-1"],
+            &["tracker:resume", "ABC-1"],
+            &["tracker:stop", "ABC-1"],
+            &["tracker:list"],
+            &["tracker:delete", "ABC-1"],
+        ] {
+            let Err(error) =
+                Cli::try_parse_from(std::iter::once("drag").chain(arguments.iter().copied()))
+            else {
+                return Err(format!(
+                    "tracker command unexpectedly parsed: {arguments:?}"
+                ));
+            };
+            assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "{arguments:?}");
         }
         Ok(())
     }

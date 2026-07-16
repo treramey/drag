@@ -39,8 +39,7 @@ fn configured_file(directory: &TempDir) -> Result<std::path::PathBuf, std::io::E
           "atlassianUserEmail":"person@example.com",
           "atlassianToken":"atlassian-secret",
           "hostname":"example.atlassian.net",
-          "aliases":{"dataType":"Map","value":[]},
-          "trackers":{"dataType":"Map","value":[]}
+          "aliases":{"dataType":"Map","value":[]}
         }"#,
     )?;
     Ok(path)
@@ -71,23 +70,6 @@ fn alias_commands_preserve_colon_compatibility() -> Result<(), Box<dyn std::erro
 
     let persisted = fs::read_to_string(path)?;
     assert!(persisted.contains("\"dataType\": \"Map\""));
-    Ok(())
-}
-
-#[test]
-fn tracker_commands_persist_state() -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
-    let path = directory.path().join("config.json");
-
-    command(&path)?
-        .args(["tracker:start", "ABC-1", "--description", "review"])
-        .assert()
-        .success();
-    let output = command(&path)?.args(["tracker:list"]).output()?;
-    assert!(output.status.success());
-    let body: Value = serde_json::from_slice(&output.stdout)?;
-    assert_eq!(body["data"]["trackers"][0]["tracker"]["issueKey"], "ABC-1");
-    assert_eq!(body["data"]["trackers"][0]["tracker"]["isActive"], true);
     Ok(())
 }
 
@@ -340,25 +322,6 @@ fn list_reports_missing_and_malformed_configuration_without_networking(
 }
 
 #[test]
-fn tracker_stop_dry_run_does_not_mutate_the_tracker() -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
-    let path = configured_file(&directory)?;
-    command(&path)?
-        .args(["tracker:start", "ABC-1"])
-        .assert()
-        .success();
-    let before = fs::read_to_string(&path)?;
-
-    command(&path)?
-        .args(["tracker", "stop", "ABC-1", "--dry-run"])
-        .assert()
-        .success();
-    let after = fs::read_to_string(&path)?;
-    assert_eq!(after, before);
-    Ok(())
-}
-
-#[test]
 fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = directory.path().join("config.json");
@@ -509,7 +472,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     );
     assert_eq!(
         body["data"]["commands"]["setup"]["preservesConfiguration"],
-        serde_json::json!(["aliases", "trackers"])
+        serde_json::json!(["aliases"])
     );
     assert_eq!(
         body["data"]["commands"]["doctor"]["defaultNetworkAccess"],
