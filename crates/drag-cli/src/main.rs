@@ -286,7 +286,60 @@ fn schema() -> Rendered {
                 "writesConfiguration": "onceAfterVerification",
                 "preservesConfiguration": ["aliases", "trackers"]
             },
-            "log": {"aliases": ["l"], "rawJson": true, "dryRun": true},
+            "log": {
+                "aliases": ["l"],
+                "sideEffects": true,
+                "networkAccess": {"jira": "read", "tempo": "write"},
+                "mutation": "createTempoWorklog",
+                "arguments": [
+                    {"name": "issueKeyOrAlias", "requiredUnless": "json"},
+                    {"name": "durationOrInterval", "requiredUnless": "json"},
+                    {
+                        "name": "when",
+                        "required": false,
+                        "default": "todayInConfiguredLocalTimeZone"
+                    }
+                ],
+                "durationOrInterval": {
+                    "durationSyntax": ["15m", "1h", "1h15m"],
+                    "intervalSyntax": ["11-14", "11-14:30", "11:35-14:20", "11.35-14.20"],
+                    "overnight": "endAtOrBeforeStartUsesNextLocalDay"
+                },
+                "date": {
+                    "required": false,
+                    "default": "todayInConfiguredLocalTimeZone",
+                    "syntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"]
+                },
+                "flags": {
+                    "description": {"short": "d", "value": "string"},
+                    "start": {"short": "s", "value": "HH:mm", "appliesTo": "duration"},
+                    "remainingEstimate": {
+                        "short": "r",
+                        "value": "duration",
+                        "syntax": ["15m", "1h", "1h15m"]
+                    },
+                    "debug": {
+                        "global": true,
+                        "output": "humanStderr",
+                        "credentials": "redacted"
+                    }
+                },
+                "rawJson": true,
+                "rawJsonInput": {
+                    "stdinValue": "-",
+                    "denyUnknownFields": true,
+                    "fields": [
+                        "issueKeyOrAlias",
+                        "durationOrInterval",
+                        "when",
+                        "description",
+                        "start",
+                        "remainingEstimate"
+                    ]
+                },
+                "dryRun": true,
+                "dryRunBehavior": {"sideEffects": false, "networkAccess": false}
+            },
             "list": {
                 "aliases": ["ls"],
                 "sideEffects": false,
@@ -316,7 +369,7 @@ fn schema() -> Rendered {
             "schema": {}
         },
         "dateSyntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"],
-        "durationSyntax": ["15m", "1h", "1h15m", "11-12:30", "23:30-00:30"],
+        "durationSyntax": ["15m", "1h", "1h15m", "11-12:30", "11.35-14.20", "23:30-00:30"],
         "environment": ["DRAG_CONFIG", "DRAG_REDUCED_MOTION", "TEMPO_TOKEN", "TEMPO_ACCOUNT_ID", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "ATLASSIAN_HOST"],
         "exitCodes": {"0": "success", "1": "runtime failure", "2": "usage or invalid input"}
     });

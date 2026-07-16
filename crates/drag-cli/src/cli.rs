@@ -42,7 +42,14 @@ pub enum OutputMode {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Add a worklog using a duration or interval.
-    #[command(visible_alias = "l")]
+    ///
+    /// WHEN defaults to today in the configured local time zone and accepts
+    /// YYYY-MM-DD, y, yesterday, t±N, or today±N. Durations use --start when
+    /// supplied; intervals include their own start time.
+    #[command(
+        visible_alias = "l",
+        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log --json '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' --dry-run\n  printf '%s' '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
+    )]
     Log(LogArgs),
     /// List worklogs for a date without changing Jira or Tempo.
     ///
@@ -122,7 +129,7 @@ pub struct LogArgs {
     /// Jira issue key or configured alias.
     #[arg(required_unless_present = "json")]
     pub issue_key_or_alias: Option<String>,
-    /// Duration (`1h15m`) or interval (`11-12:30`).
+    /// Duration (`1h15m`) or interval (`11-12:30` or `11.35-14.20`).
     #[arg(required_unless_present = "json")]
     pub duration_or_interval: Option<String>,
     /// Date: YYYY-MM-DD, y, yesterday, t±N, or today±N.
@@ -130,10 +137,10 @@ pub struct LogArgs {
     /// Worklog description.
     #[arg(short, long)]
     pub description: Option<String>,
-    /// Start time for duration input.
+    /// Start time for duration input (HH:mm).
     #[arg(short, long)]
     pub start: Option<String>,
-    /// Remaining estimate such as 2h.
+    /// Remaining estimate as a duration, such as 2h.
     #[arg(short = 'r', long)]
     pub remaining_estimate: Option<String>,
     /// Raw input JSON, or '-' to read it from stdin.
