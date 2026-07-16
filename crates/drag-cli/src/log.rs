@@ -54,8 +54,7 @@ where
     let input = log_input(args)?;
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
-    validate_log_remaining_estimate(&input.value, now)?;
-    let mut request = build_add_request(&config, &credentials, &input.value, now)?;
+    let mut request = build_log_request(&config, &credentials, &input.value, now)?;
     let issue_key = config
         .resolve_issue(&input.value.issue_key_or_alias)
         .to_uppercase();
@@ -82,15 +81,25 @@ where
     ))
 }
 
-fn validate_log_remaining_estimate(input: &LogInput, now: DateTime<Tz>) -> Result<(), CliError> {
-    let Some(remaining) = input.remaining_estimate.as_deref() else {
-        return Ok(());
-    };
-    let parsed = parse_duration_or_interval(remaining, now.date_naive(), now.timezone())?;
-    if parsed.start_time.is_some() {
-        return Err(drag::Error::InvalidDuration(remaining.to_owned()).into());
-    }
-    Ok(())
+#[derive(Clone, Copy)]
+enum RemainingEstimateSyntax {
+    DurationOnly,
+    DurationOrInterval,
+}
+
+fn build_log_request(
+    config: &Config,
+    credentials: &Credentials,
+    input: &LogInput,
+    now: DateTime<Tz>,
+) -> Result<AddWorklogRequest, CliError> {
+    build_add_request_with_syntax(
+        config,
+        credentials,
+        input,
+        now,
+        RemainingEstimateSyntax::DurationOnly,
+    )
 }
 
 pub(crate) fn build_add_request(
@@ -98,6 +107,22 @@ pub(crate) fn build_add_request(
     credentials: &Credentials,
     input: &LogInput,
     now: DateTime<Tz>,
+) -> Result<AddWorklogRequest, CliError> {
+    build_add_request_with_syntax(
+        config,
+        credentials,
+        input,
+        now,
+        RemainingEstimateSyntax::DurationOrInterval,
+    )
+}
+
+fn build_add_request_with_syntax(
+    config: &Config,
+    credentials: &Credentials,
+    input: &LogInput,
+    now: DateTime<Tz>,
+    remaining_estimate_syntax: RemainingEstimateSyntax,
 ) -> Result<AddWorklogRequest, CliError> {
     let selected = select_date(now, input.when.as_deref())?;
     let parsed =
@@ -116,8 +141,15 @@ pub(crate) fn build_add_request(
         .remaining_estimate
         .as_deref()
         .map(|remaining| {
-            parse_duration_or_interval(remaining, selected.date, now.timezone())
-                .map(|parsed| parsed.seconds)
+            let parsed = parse_duration_or_interval(remaining, selected.date, now.timezone())?;
+            if matches!(
+                remaining_estimate_syntax,
+                RemainingEstimateSyntax::DurationOnly
+            ) && parsed.start_time.is_some()
+            {
+                return Err(drag::Error::InvalidDuration(remaining.to_owned()));
+            }
+            Ok(parsed.seconds)
         })
         .transpose()?;
     let issue_key = config
