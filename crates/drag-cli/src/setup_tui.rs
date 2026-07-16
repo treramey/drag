@@ -2534,6 +2534,12 @@ mod tests {
         let connected = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
         assert!(connected.contains("✓ Connect Jira connected"));
         assert_eq!(rendered_color(&model, "✓")?, Color::Rgb(0, 121, 133));
+
+        model.jira_status = ConnectionStatus::NotConnected;
+        model.error = Some("Could not connect to Jira".to_owned());
+        let failed = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
+        assert!(failed.contains("✕ Error: Could not connect to Jira"));
+        assert_eq!(rendered_color(&model, "✕")?, Color::Red);
         Ok(())
     }
 
@@ -2740,11 +2746,19 @@ mod tests {
     fn resize_event_preserves_entered_state_until_terminal_is_large_enough(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let mut model = model();
-        model.set_stage(UiStage::JiraDetails);
+        model.set_stage(UiStage::JiraToken);
+        model.entrance_animation = BufferAnimation::entrance(false);
+        model.hostname = "example.atlassian.net".to_owned();
+        model.email = "person@example.com".to_owned();
+        model.jira_instruction = "Create or manage your Atlassian API token".to_owned();
+        model.jira_url = "https://id.atlassian.com/manage-profile/security/api-tokens".to_owned();
         assert!(matches!(
-            model.handle_event(Event::Paste("example.atlassian.net".to_owned())),
+            model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(
+                80
+            ),)),
             Action::None
         ));
+        let animation_elapsed = model.entrance_animation.elapsed;
         assert!(matches!(
             model.handle_event(Event::Resize(
                 MIN_TERMINAL_WIDTH - 1,
@@ -2752,11 +2766,17 @@ mod tests {
             )),
             Action::None
         ));
+        assert!(model.stage == UiStage::JiraToken);
+        assert_eq!(model.hostname, "example.atlassian.net");
+        assert_eq!(model.email, "person@example.com");
+        assert_eq!(model.entrance_animation.elapsed, animation_elapsed);
+        assert!(model.entrance_animation.is_active());
         let small = render_text(MIN_TERMINAL_WIDTH - 1, MIN_TERMINAL_HEIGHT - 1, &model)?;
         let restored = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
 
         assert!(small.contains("Your entered setup values are preserved"));
-        assert!(restored.contains("example.atlassian.net"));
+        assert!(restored.contains("Atlassian API token"));
+        assert!(restored.contains("Connect Jira"));
         Ok(())
     }
 

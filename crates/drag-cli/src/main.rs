@@ -262,13 +262,15 @@ fn schema() -> Rendered {
                 "interactiveTerminalRequired": true,
                 "interactiveEvents": "asynchronousCrossterm",
                 "interactiveRendering": "stderr",
+                "interactiveStages": ["jiraAccountDetails", "atlassianApiToken", "tempoAccount", "reviewAndSave"],
                 "reducedMotionEnvironment": "DRAG_REDUCED_MOTION",
                 "fromEnv": true,
                 "noOpen": true,
                 "fromEnvRequired": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
                 "fromEnvInteractive": false,
                 "browser": {
-                    "default": "openTokenPages",
+                    "default": "openEachTokenPageOnExplicitTokenStageEntry",
+                    "beforeTokenStage": false,
                     "failure": "warning",
                     "noOpen": "printLinksWithoutOpening",
                     "fromEnv": false
