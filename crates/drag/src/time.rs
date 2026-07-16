@@ -46,13 +46,16 @@ pub fn parse_duration_or_interval(
     let start = start.ok_or_else(|| Error::InvalidDuration(input.to_owned()))?;
     let end = end.ok_or_else(|| Error::InvalidDuration(input.to_owned()))?;
     let start_at = resolve_local(reference_date, start, timezone);
-    let end_at = resolve_local(reference_date, end, timezone);
-    let difference = end_at.timestamp() - start_at.timestamp();
-    let seconds = if end_at > start_at {
-        difference
+    let same_day_end = resolve_local(reference_date, end, timezone);
+    let end_at = if same_day_end > start_at {
+        same_day_end
     } else {
-        86_400 + difference
+        let end_date = reference_date
+            .checked_add_signed(Duration::days(1))
+            .ok_or_else(|| Error::InvalidDuration(input.to_owned()))?;
+        resolve_local(end_date, end, timezone)
     };
+    let seconds = end_at.timestamp() - start_at.timestamp();
 
     Ok(ParsedDuration {
         seconds,
@@ -262,6 +265,27 @@ mod tests {
     }
 
     #[test]
+    fn parses_supported_interval_clock_forms() {
+        let date = chrono::NaiveDate::from_ymd_opt(2020, 1, 1);
+        let Some(date) = date else { return };
+        for (input, expected_start, expected_seconds) in [
+            ("11-14", "11:00:00", 10_800),
+            ("11-14:30", "11:00:00", 12_600),
+            ("11:35-14:20", "11:35:00", 9_900),
+            ("11.35-14.20", "11:35:00", 9_900),
+        ] {
+            let parsed = parse_duration_or_interval(input, date, Warsaw);
+            assert_eq!(
+                parsed.map(|value| {
+                    (value.start_time.map(|time| time.to_string()), value.seconds)
+                }),
+                Ok((Some(expected_start.to_owned()), expected_seconds)),
+                "{input}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_original_invalid_forms() {
         let date = chrono::NaiveDate::from_ymd_opt(2020, 1, 1);
         let Some(date) = date else { return };
@@ -287,6 +311,34 @@ mod tests {
         assert_eq!(
             parse_duration_or_interval("00:00-5", autumn, Warsaw).map(|value| value.seconds),
             Ok(21_600)
+        );
+    }
+
+    #[test]
+    fn preserves_overnight_dst_elapsed_time_behavior() {
+        let spring_eve = chrono::NaiveDate::from_ymd_opt(2020, 3, 28);
+        let autumn_eve = chrono::NaiveDate::from_ymd_opt(2020, 10, 24);
+        let (Some(spring_eve), Some(autumn_eve)) = (spring_eve, autumn_eve) else {
+            return;
+        };
+        assert_eq!(
+            parse_duration_or_interval("23-3", spring_eve, Warsaw).map(|value| value.seconds),
+            Ok(10_800)
+        );
+        assert_eq!(
+            parse_duration_or_interval("23-3", autumn_eve, Warsaw).map(|value| value.seconds),
+            Ok(18_000)
+        );
+    }
+
+    #[test]
+    fn dst_gap_normalization_preserves_overnight_interpretation() {
+        let spring = chrono::NaiveDate::from_ymd_opt(2020, 3, 29);
+        let Some(spring) = spring else { return };
+
+        assert_eq!(
+            parse_duration_or_interval("2:30-3", spring, Warsaw).map(|value| value.seconds),
+            Ok(84_600)
         );
     }
 
