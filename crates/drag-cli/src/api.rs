@@ -432,9 +432,11 @@ mod tests {
                 stream
                     .flush()
                     .map_err(|error| format!("failed to flush Tempo response: {error}"))?;
-                stream
-                    .shutdown(Shutdown::Write)
-                    .map_err(|error| format!("failed to finish Tempo response: {error}"))?;
+                if let Err(error) = stream.shutdown(Shutdown::Write) {
+                    if error.kind() != std::io::ErrorKind::NotConnected {
+                        return Err(format!("failed to finish Tempo response: {error}"));
+                    }
+                }
             }
             Ok(())
         });
