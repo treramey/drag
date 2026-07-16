@@ -350,7 +350,7 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener};
     use std::thread;
     use std::time::{Duration, Instant};
 
@@ -426,7 +426,15 @@ mod tests {
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 );
-                let _ = stream.write_all(response.as_bytes());
+                stream
+                    .write_all(response.as_bytes())
+                    .map_err(|error| format!("failed to write Tempo response: {error}"))?;
+                stream
+                    .flush()
+                    .map_err(|error| format!("failed to flush Tempo response: {error}"))?;
+                stream
+                    .shutdown(Shutdown::Write)
+                    .map_err(|error| format!("failed to finish Tempo response: {error}"))?;
             }
             Ok(())
         });
