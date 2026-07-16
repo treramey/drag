@@ -3,7 +3,7 @@
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
 };
-use chrono_tz::Tz;
+use chrono_tz::{GapInfo, Tz};
 
 use crate::{models::ClockInterval, Error};
 
@@ -228,21 +228,27 @@ fn resolve_local(date: NaiveDate, time: NaiveTime, timezone: Tz) -> DateTime<Tz>
         LocalResult::Single(value) => value,
         LocalResult::Ambiguous(earliest, _) => earliest,
         LocalResult::None => {
-            // Match JavaScript Date's DST-gap normalization by advancing one hour
-            // while preserving minutes (02:59 becomes 03:59).
-            let shifted = local + Duration::hours(1);
-            match timezone.from_local_datetime(&shifted) {
-                LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => value,
-                LocalResult::None => timezone.from_utc_datetime(&local),
-            }
+            resolve_gap(local, timezone).unwrap_or_else(|| timezone.from_utc_datetime(&local))
         }
+    }
+}
+
+fn resolve_gap(local: NaiveDateTime, timezone: Tz) -> Option<DateTime<Tz>> {
+    let gap = GapInfo::new(&local, &timezone)?;
+    let (gap_start, _) = gap.begin?;
+    let gap_end = gap.end?;
+    let gap_width = gap_end.naive_local().signed_duration_since(gap_start);
+    let shifted = local.checked_add_signed(gap_width)?;
+    match timezone.from_local_datetime(&shifted) {
+        LocalResult::Single(value) | LocalResult::Ambiguous(value, _) => Some(value),
+        LocalResult::None => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
-    use chrono_tz::Europe::Warsaw;
+    use chrono_tz::{Australia::Lord_Howe, Europe::Warsaw, Pacific::Apia};
 
     use super::{clock_interval, format_duration, parse_duration_or_interval, select_date};
     use crate::Error;
@@ -339,6 +345,28 @@ mod tests {
         assert_eq!(
             parse_duration_or_interval("2:30-3", spring, Warsaw).map(|value| value.seconds),
             Ok(84_600)
+        );
+    }
+
+    #[test]
+    fn half_hour_dst_gap_uses_actual_transition_width() {
+        let date = chrono::NaiveDate::from_ymd_opt(2020, 10, 3);
+        let Some(date) = date else { return };
+
+        assert_eq!(
+            parse_duration_or_interval("23-2:15", date, Lord_Howe).map(|value| value.seconds),
+            Ok(11_700)
+        );
+    }
+
+    #[test]
+    fn skipped_local_day_uses_actual_transition_width() {
+        let date = chrono::NaiveDate::from_ymd_opt(2011, 12, 29);
+        let Some(date) = date else { return };
+
+        assert_eq!(
+            parse_duration_or_interval("23-3", date, Apia).map(|value| value.seconds),
+            Ok(14_400)
         );
     }
 
