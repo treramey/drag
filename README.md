@@ -144,7 +144,12 @@ drag stop ABC-123
 ```
 
 Accepted date selectors are `YYYY-MM-DD`, `y`, `yesterday`, `t±N`, and
-`today±N`. Intervals that end before their start cross midnight.
+`today±N`. `list` and its `ls` alias are read-only. With no date they select
+today in Drag's configured local time zone; `--verbose` adds descriptions and
+Jira URLs to human output without changing the JSON data shape. The command
+loads the selected calendar month's worklogs and schedule, including both
+month boundaries, to calculate its daily and monthly totals. Intervals that
+end before their start cross midnight.
 
 ### JSON and raw input
 

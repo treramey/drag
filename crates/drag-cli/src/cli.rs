@@ -44,7 +44,11 @@ pub enum Command {
     /// Add a worklog using a duration or interval.
     #[command(visible_alias = "l")]
     Log(LogArgs),
-    /// List worklogs for a date.
+    /// List worklogs for a date without changing Jira or Tempo.
+    ///
+    /// DATE defaults to today in the configured local time zone and accepts
+    /// YYYY-MM-DD, y, yesterday, t±N, or today±N. Add --verbose to include
+    /// descriptions and Jira URLs in human output.
     #[command(visible_alias = "ls")]
     List(ListArgs),
     /// Delete one or more worklogs.
@@ -157,7 +161,8 @@ pub struct LogInput {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
-    /// Date: YYYY-MM-DD, y, yesterday, t±N, or today±N.
+    /// Optional date (defaults to today): YYYY-MM-DD, y, yesterday, t±N, or today±N.
+    #[arg(value_name = "DATE")]
     pub when: Option<String>,
     /// Include descriptions and Jira URLs.
     #[arg(short, long)]
@@ -254,4 +259,26 @@ pub struct TrackerStopArgs {
     /// Build worklog requests but do not upload or remove the tracker.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    #[test]
+    fn list_and_ls_parse_to_the_same_command_arguments() -> Result<(), String> {
+        for command in ["list", "ls"] {
+            let cli = Cli::try_parse_from(["drag", command, "yesterday", "--verbose"])
+                .map_err(|error| error.to_string())?;
+            let args = match cli.command {
+                Command::List(args) => args,
+                _ => return Err(format!("{command} did not dispatch to list")),
+            };
+            assert_eq!(args.when.as_deref(), Some("yesterday"));
+            assert!(args.verbose);
+        }
+        Ok(())
+    }
 }

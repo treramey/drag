@@ -92,15 +92,24 @@ pub fn select_date(now: DateTime<Tz>, when: Option<&str>) -> Result<SelectedDate
     };
 
     if matches!(when, "y" | "yesterday") {
+        let date = now
+            .date_naive()
+            .checked_sub_signed(Duration::days(1))
+            .ok_or_else(|| Error::InvalidDate(when.to_owned()))?;
         return Ok(SelectedDate {
-            date: now.date_naive() - Duration::days(1),
+            date,
             default_start_time: midnight,
         });
     }
 
     if let Some(days) = parse_today_offset(when) {
+        let offset = Duration::try_days(days).ok_or_else(|| Error::InvalidDate(when.to_owned()))?;
+        let date = now
+            .date_naive()
+            .checked_add_signed(offset)
+            .ok_or_else(|| Error::InvalidDate(when.to_owned()))?;
         return Ok(SelectedDate {
-            date: now.date_naive() + Duration::days(days),
+            date,
             default_start_time: midnight,
         });
     }
@@ -233,6 +242,7 @@ mod tests {
     use chrono_tz::Europe::Warsaw;
 
     use super::{clock_interval, format_duration, parse_duration_or_interval, select_date};
+    use crate::Error;
 
     #[test]
     fn parses_original_duration_forms() {
@@ -306,5 +316,15 @@ mod tests {
             select_date(now, Some("today+10")).map(|value| value.date.to_string()),
             Ok("2020-03-09".to_owned())
         );
+        for selector in [
+            "today+9223372036854775807",
+            "today-9223372036854775808",
+            "today+999999999",
+        ] {
+            assert!(matches!(
+                select_date(now, Some(selector)),
+                Err(Error::InvalidDate(value)) if value == selector
+            ));
+        }
     }
 }

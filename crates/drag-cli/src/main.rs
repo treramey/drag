@@ -286,7 +286,17 @@ fn schema() -> Rendered {
                 "preservesConfiguration": ["aliases", "trackers"]
             },
             "log": {"aliases": ["l"], "rawJson": true, "dryRun": true},
-            "list": {"aliases": ["ls"]},
+            "list": {
+                "aliases": ["ls"],
+                "sideEffects": false,
+                "networkAccess": "read-only",
+                "date": {
+                    "required": false,
+                    "default": "todayInConfiguredLocalTimeZone",
+                    "syntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"]
+                },
+                "verbose": true
+            },
             "delete": {"aliases": ["d"], "dryRun": true},
             "alias": {"subcommands": ["set", "list", "delete"]},
             "tracker": {"subcommands": ["start", "pause", "resume", "stop", "delete", "list"], "stopDryRun": true},

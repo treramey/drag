@@ -28,6 +28,12 @@ This project follows [Semantic Versioning](https://semver.org/) and
 - Raw JSON input, environment-based headless setup, and mutation dry runs.
 - Cross-platform CI, dependency policy, audits, and release artifacts.
 
+### Fixed
+
+- Lock down the read-only `list`/`ls` contract: local-time date defaults and
+  relative selectors, inclusive calendar-month totals, structured failures,
+  stable JSON output, and safe multi-page Tempo worklog retrieval.
+
 ### Security
 
 - Restore terminal raw mode, alternate screen, cursor visibility, and bracketed
