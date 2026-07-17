@@ -384,14 +384,25 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "default": ["mayOpenBrowserTokenPages", "verifyCredentials", "writeConfiguration"],
                 "noOpen": ["verifyCredentials", "writeConfiguration"],
                 "fromEnv": ["verifyCredentials", "writeConfiguration"],
+                "fromEnvDryRun": [],
+                "fromEnvDryRunVerify": ["verifyCredentialsReadOnly"],
                 "preservesConfiguration": ["aliases"]
             }),
             network_access: json!({
                 "default": {"browser": "may-open", "jira": "read", "tempo": "read"},
                 "noOpen": {"browser": "none", "jira": "read", "tempo": "read"},
                 "fromEnv": {"browser": "none", "jira": "read", "tempo": "read"}
+                ,"fromEnvDryRun": {"browser": "none", "jira": "none", "tempo": "none"}
+                ,"fromEnvDryRunVerify": {"browser": "none", "jira": "read", "tempo": "read"}
             }),
-            dry_run: unsupported_dry_run(),
+            dry_run: json!({
+                "supported": true,
+                "option": "dryRun",
+                "requires": ["fromEnv"],
+                "verificationOption": "verify",
+                "sideEffects": false,
+                "networkAccess": {"default": false, "verify": "read-only"}
+            }),
         },
         "alias set" | "alias:set" => CommandSemantics {
             success: schema_ref("AliasSetResult"),
@@ -493,7 +504,10 @@ fn command_behavior(path: &str) -> Value {
             },
             "fromEnv": {
                 "interactive": false,
-                "requiredEnvironment": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"]
+                "requiredEnvironment": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
+                "secretTransport": "environmentOnly",
+                "dryRun": "validateAndPlanWithoutWriting",
+                "dryRunVerification": "plannedUnlessVerifyIsSet"
             },
             "browser": {
                 "default": "openEachTokenPageOnExplicitTokenStageEntry",
@@ -614,6 +628,25 @@ fn setup_success_schema() -> Value {
                         },
                         "additionalProperties": false
                     }
+                },
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "required": ["configured", "dryRun", "path", "source", "localValidation", "remoteVerification", "configuration"],
+                "properties": {
+                    "configured": {"const": false},
+                    "dryRun": {"const": true},
+                    "path": {"type": "string"},
+                    "source": {"const": "environment"},
+                    "localValidation": object_schema(&["status"], json!({"status": {"const": "passed"}})),
+                    "remoteVerification": {
+                        "oneOf": [
+                            object_schema(&["status", "jira", "tempo"], json!({"status": {"const": "planned"}, "jira": {"const": "read-only"}, "tempo": {"const": "read-only"}})),
+                            object_schema(&["status", "jira", "tempo"], json!({"status": {"const": "completed"}, "jira": {"const": "connected"}, "tempo": {"const": "connected"}}))
+                        ]
+                    },
+                    "configuration": object_schema(&["status", "credentials", "aliases"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}, "aliases": {"const": "preserve"}}))
                 },
                 "additionalProperties": false
             }
@@ -1076,6 +1109,20 @@ mod tests {
         assert_eq!(
             commands["setup"]["sideEffects"]["noOpen"],
             serde_json::json!(["verifyCredentials", "writeConfiguration"])
+        );
+        assert_eq!(commands["setup"]["dryRun"]["supported"], true);
+        assert_eq!(
+            commands["setup"]["networkAccess"]["fromEnvDryRun"],
+            serde_json::json!({"browser": "none", "jira": "none", "tempo": "none"})
+        );
+        assert_eq!(
+            commands["setup"]["networkAccess"]["fromEnvDryRunVerify"],
+            serde_json::json!({"browser": "none", "jira": "read", "tempo": "read"})
+        );
+        assert!(Cli::try_parse_from(["drag", "setup", "--dry-run"]).is_err());
+        assert!(Cli::try_parse_from(["drag", "setup", "--verify"]).is_err());
+        assert!(
+            Cli::try_parse_from(["drag", "setup", "--from-env", "--dry-run", "--verify"]).is_ok()
         );
         assert_eq!(
             commands["doctor"]["failureDetails"]["remote_check_failed"],

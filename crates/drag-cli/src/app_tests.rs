@@ -21,9 +21,9 @@ use tempfile::TempDir;
 
 use super::{
     normalize_jira_site, App, BrowserLauncher, Config, ConnectionOutcome, ConnectionVerifier,
-    JiraCredentials, NoopBrowserLauncher, OnboardingFuture, OnboardingSession, OnboardingWorkflow,
-    RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
-    VerificationFuture, ATLASSIAN_TOKEN_URL,
+    EnvironmentSetupPlan, JiraCredentials, NoopBrowserLauncher, OnboardingFuture,
+    OnboardingSession, OnboardingWorkflow, RatatuiOnboardingSession, SecretInput, SetupCredentials,
+    SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::cli::{DoctorArgs, SetupArgs};
 use crate::CliError;
@@ -691,6 +691,8 @@ async fn pty_setup_helper() -> Result<(), Box<dyn std::error::Error>> {
     let setup = app.setup(SetupArgs {
         from_env: false,
         no_open: true,
+        dry_run: false,
+        verify: false,
     });
     if scenario == "ratatui-panic" {
         let outcome = AssertUnwindSafe(setup).catch_unwind().await;
@@ -1281,6 +1283,8 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
     app.setup(SetupArgs {
         from_env: false,
         no_open: true,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -1350,6 +1354,8 @@ async fn ratatui_first_run_masks_secrets_verifies_and_saves_from_scripted_events
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await?;
 
@@ -1454,6 +1460,8 @@ async fn ratatui_opens_atlassian_only_after_explicit_token_stage_entry(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -1520,6 +1528,8 @@ async fn ratatui_back_from_jira_token_discards_only_the_unverified_buffer(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -1620,6 +1630,8 @@ async fn ratatui_validation_and_authentication_retries_stay_in_the_failed_stage(
     app.setup(SetupArgs {
         from_env: false,
         no_open: false,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -1736,6 +1748,8 @@ async fn ratatui_no_open_keeps_both_links_visible_without_browser_calls(
     app.setup(SetupArgs {
         from_env: false,
         no_open: true,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -1790,6 +1804,8 @@ async fn ratatui_whitespace_does_not_silently_retain_stored_tokens(
     app.setup(SetupArgs {
         from_env: false,
         no_open: true,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -1833,6 +1849,8 @@ async fn ratatui_fatal_verification_failure_propagates_without_rendering_secrets
         .setup(SetupArgs {
             from_env: false,
             no_open: true,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -1873,6 +1891,8 @@ async fn ratatui_first_run_does_not_write_before_explicit_save(
         .setup(SetupArgs {
             from_env: false,
             no_open: true,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -1913,6 +1933,8 @@ async fn ratatui_reconfiguration_retains_replaces_backtracks_and_reverifies(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await?;
 
@@ -2047,6 +2069,8 @@ async fn ratatui_backtracking_without_edits_does_not_repeat_verification(
     app.setup(SetupArgs {
         from_env: false,
         no_open: false,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -2111,6 +2135,8 @@ async fn ratatui_backtracking_discards_an_unverified_tempo_token_buffer(
     app.setup(SetupArgs {
         from_env: false,
         no_open: true,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -2157,6 +2183,8 @@ async fn ratatui_pending_tempo_back_discards_the_unverified_token_buffer(
         .setup(SetupArgs {
             from_env: false,
             no_open: true,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -2203,6 +2231,8 @@ async fn ratatui_reconfiguration_cancellation_leaves_config_byte_for_byte_unchan
         .setup(SetupArgs {
             from_env: false,
             no_open: true,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -2237,6 +2267,8 @@ async fn ratatui_verification_keeps_terminal_events_responsive(
         .setup(SetupArgs {
             from_env: false,
             no_open: true,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -2275,6 +2307,8 @@ async fn incomplete_onboarding_session_cannot_save_credentials(
         .setup(SetupArgs {
             from_env: false,
             no_open: true,
+            dry_run: false,
+            verify: false,
         })
         .await
         .err()
@@ -2314,6 +2348,8 @@ async fn interactive_setup_connects_both_services_and_saves_once_complete(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await?;
 
@@ -2402,6 +2438,8 @@ async fn interactive_setup_no_open_prints_links_without_launching_browser(
     app.setup(SetupArgs {
         from_env: false,
         no_open: true,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -2445,6 +2483,8 @@ async fn browser_launch_failure_warns_and_allows_setup_to_finish(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await?;
 
@@ -2496,6 +2536,8 @@ async fn environment_setup_never_launches_or_prompts_with_any_no_open_value(
         app.setup(SetupArgs {
             from_env: true,
             no_open,
+            dry_run: false,
+            verify: false,
         })
         .await?;
 
@@ -2532,6 +2574,8 @@ async fn interactive_reconfiguration_offers_defaults_and_retains_hidden_tokens(
     app.setup(SetupArgs {
         from_env: false,
         no_open: false,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -2604,6 +2648,8 @@ async fn interactive_setup_retries_only_the_failed_connection(
     app.setup(SetupArgs {
         from_env: false,
         no_open: false,
+        dry_run: false,
+        verify: false,
     })
     .await?;
 
@@ -2670,6 +2716,8 @@ async fn interactive_setup_propagates_non_authentication_verification_errors(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await
     {
@@ -2717,6 +2765,8 @@ async fn interactive_setup_does_not_retry_fatal_tempo_errors(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await
     {
@@ -2749,6 +2799,8 @@ async fn interactive_cancellation_leaves_existing_config_unchanged(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await
     {
@@ -2789,6 +2841,8 @@ async fn cancellation_after_a_failed_connection_check_leaves_config_unchanged(
         .setup(SetupArgs {
             from_env: false,
             no_open: false,
+            dry_run: false,
+            verify: false,
         })
         .await
         .is_err());
@@ -2850,7 +2904,7 @@ async fn verified_environment_setup_derives_account_and_preserves_local_state(
     );
 
     let result = app
-        .verify_and_save_environment_setup(setup_credentials())
+        .verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()))
         .await?;
 
     let saved = Config::load(&path)?;
@@ -2881,6 +2935,47 @@ async fn verified_environment_setup_derives_account_and_preserves_local_state(
 }
 
 #[tokio::test]
+async fn verified_environment_setup_dry_run_completes_read_only_checks_without_saving(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    existing_config().save(&path)?;
+    let before = fs::read(&path)?;
+    let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
+    let app = App::with_connection_verifier(
+        path.clone(),
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::clone(&tempo_accounts),
+            config_update: None,
+        },
+    );
+
+    let result = app
+        .plan_environment_setup(EnvironmentSetupPlan::new(setup_credentials()), true)
+        .await?;
+
+    assert_eq!(fs::read(path)?, before);
+    assert_eq!(result.data["configured"], false);
+    assert_eq!(result.data["remoteVerification"]["status"], "completed");
+    assert_eq!(result.data["remoteVerification"]["jira"], "connected");
+    assert_eq!(result.data["remoteVerification"]["tempo"], "connected");
+    assert_eq!(
+        tempo_accounts
+            .lock()
+            .map_err(|_| "test verifier lock was poisoned")?
+            .as_slice(),
+        ["derived-account"]
+    );
+    let output = format!("{} {}", result.human, result.data);
+    assert!(!output.contains("new-tempo-token"));
+    assert!(!output.contains("new-jira-token"));
+    assert!(!output.contains("derived-account"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn verified_environment_setup_preserves_config_updates_made_during_verification(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
@@ -2900,7 +2995,7 @@ async fn verified_environment_setup_preserves_config_updates_made_during_verific
         },
     );
 
-    app.verify_and_save_environment_setup(setup_credentials())
+    app.verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()))
         .await?;
 
     let saved = Config::load(&path)?;
@@ -2936,7 +3031,7 @@ async fn failed_verification_leaves_config_byte_for_byte_unchanged(
         );
 
         assert!(app
-            .verify_and_save_environment_setup(setup_credentials())
+            .verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()))
             .await
             .is_err());
         assert_eq!(fs::read(path)?, before);

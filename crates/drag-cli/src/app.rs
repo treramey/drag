@@ -22,8 +22,8 @@ use crate::setup::{
     SecretInput, SetupPrompter, TerminalSetupPrompter, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::setup::{
-    ConnectionVerifier, OnboardingSession, OnboardingWorkflow, RemoteConnectionVerifier,
-    SetupCredentials,
+    ConnectionVerifier, EnvironmentSetupPlan, OnboardingSession, OnboardingWorkflow,
+    RemoteConnectionVerifier, SetupCredentials,
 };
 use crate::setup_tui::RatatuiOnboardingSession;
 use crate::{CliError, Rendered};
@@ -141,9 +141,11 @@ impl App {
             let setup_credentials = SetupCredentials::from_source(|name| {
                 required_setup_environment(self.connection_environment.as_ref(), name)
             })?;
-            return self
-                .verify_and_save_environment_setup(setup_credentials)
-                .await;
+            let plan = EnvironmentSetupPlan::new(setup_credentials);
+            if args.dry_run {
+                return self.plan_environment_setup(plan, args.verify).await;
+            }
+            return self.verify_and_save_environment_setup(plan).await;
         }
 
         let config = Config::load(&self.path)?;
@@ -154,6 +156,46 @@ impl App {
             ));
         }
         self.run_interactive_setup(&config, !args.no_open).await
+    }
+
+    async fn plan_environment_setup(
+        &self,
+        plan: EnvironmentSetupPlan,
+        verify: bool,
+    ) -> Result<Rendered, CliError> {
+        let verification = if verify {
+            let account_id = self
+                .connection_verifier
+                .verify_jira(&plan.credentials().jira_connection(), self.debug)
+                .await?;
+            let credentials = plan.credentials().to_credentials(account_id);
+            self.connection_verifier
+                .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
+                .await?;
+            json!({"status": "completed", "jira": "connected", "tempo": "connected"})
+        } else {
+            json!({"status": "planned", "jira": "read-only", "tempo": "read-only"})
+        };
+
+        Ok(Rendered::new(
+            json!({
+                "configured": false,
+                "dryRun": true,
+                "path": self.path,
+                "source": "environment",
+                "localValidation": {"status": "passed"},
+                "remoteVerification": verification,
+                "configuration": {
+                    "status": "planned",
+                    "credentials": "replace",
+                    "aliases": "preserve"
+                }
+            }),
+            format!(
+                "Setup inputs are valid. Read-only verification is {} and configuration changes are planned; nothing was saved.",
+                if verify { "complete" } else { "planned" }
+            ),
+        ))
     }
 
     pub async fn doctor(&self, args: DoctorArgs) -> Result<Rendered, CliError> {
@@ -170,13 +212,13 @@ impl App {
 
     async fn verify_and_save_environment_setup(
         &self,
-        setup_credentials: SetupCredentials,
+        plan: EnvironmentSetupPlan,
     ) -> Result<Rendered, CliError> {
         let account_id = self
             .connection_verifier
-            .verify_jira(&setup_credentials.jira_connection(), self.debug)
+            .verify_jira(&plan.credentials().jira_connection(), self.debug)
             .await?;
-        let credentials = setup_credentials.to_credentials(account_id);
+        let credentials = plan.credentials().to_credentials(account_id);
         self.connection_verifier
             .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
             .await?;
@@ -280,7 +322,17 @@ fn required_setup_environment(
     name: &str,
 ) -> Result<String, CliError> {
     match environment.value(name) {
-        Some(value) if !value.trim().is_empty() => Ok(value),
+        Some(value)
+            if !value.trim().is_empty()
+                && !value.chars().any(|character| character.is_control()) =>
+        {
+            Ok(value)
+        }
+        Some(value) if value.chars().any(|character| character.is_control()) => {
+            Err(CliError::InvalidInput(format!(
+                "{name} contains unsafe control characters for `drag setup --from-env`"
+            )))
+        }
         Some(_) => Err(CliError::InvalidInput(format!(
             "{name} must be set and non-empty for `drag setup --from-env`"
         ))),

@@ -182,6 +182,21 @@ pub(crate) struct SetupCredentials {
     pub(crate) hostname: String,
 }
 
+/// A normalized unattended setup request shared by preview and execution.
+pub(crate) struct EnvironmentSetupPlan {
+    credentials: SetupCredentials,
+}
+
+impl EnvironmentSetupPlan {
+    pub(crate) fn new(credentials: SetupCredentials) -> Self {
+        Self { credentials }
+    }
+
+    pub(crate) fn credentials(&self) -> &SetupCredentials {
+        &self.credentials
+    }
+}
+
 impl SetupCredentials {
     pub(crate) fn from_source(
         mut source: impl FnMut(&str) -> Result<String, CliError>,

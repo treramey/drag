@@ -1041,6 +1041,97 @@ fn headless_setup_requires_only_the_four_connection_variables(
 }
 
 #[test]
+fn headless_setup_dry_run_emits_a_secret_free_local_plan_without_writing(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let original = br#"{"aliases":{"dataType":"Map","value":[["lunch","ABC-1"]]}}"#;
+    fs::write(&path, original)?;
+
+    let output = command(&path)?
+        .args(["setup", "--from-env", "--dry-run"])
+        .env("ATLASSIAN_HOST", "example.atlassian.net")
+        .env("ATLASSIAN_EMAIL", "person@example.com")
+        .env("ATLASSIAN_TOKEN", "jira-token-must-not-leak")
+        .env("TEMPO_TOKEN", "tempo-token-must-not-leak")
+        .output()?;
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(body["data"]["dryRun"], true);
+    assert_eq!(body["data"]["localValidation"]["status"], "passed");
+    assert_eq!(body["data"]["remoteVerification"]["status"], "planned");
+    assert_eq!(body["data"]["configuration"]["status"], "planned");
+    assert_eq!(body["data"]["configuration"]["aliases"], "preserve");
+    assert_eq!(fs::read(&path)?, original);
+    let all_output = format!(
+        "{}{}",
+        String::from_utf8(output.stdout)?,
+        String::from_utf8(output.stderr)?
+    );
+    assert!(!all_output.contains("jira-token-must-not-leak"));
+    assert!(!all_output.contains("tempo-token-must-not-leak"));
+    Ok(())
+}
+
+#[test]
+fn headless_setup_dry_run_rejects_unsafe_environment_values_without_writing(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let before = fs::read(&path)?;
+
+    let output = command(&path)?
+        .args(["setup", "--from-env", "--dry-run"])
+        .env("ATLASSIAN_HOST", "example.atlassian.net")
+        .env("ATLASSIAN_EMAIL", "person@example.com")
+        .env("ATLASSIAN_TOKEN", "jira-token\nwith-control")
+        .env("TEMPO_TOKEN", "tempo-token-must-not-leak")
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read(&path)?, before);
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(!stderr.contains("jira-token\nwith-control"));
+    assert!(!stderr.contains("tempo-token-must-not-leak"));
+    Ok(())
+}
+
+#[test]
+fn unattended_setup_rejects_argument_and_json_secret_transport_without_echoing_secrets(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for arguments in [
+        vec![
+            "setup",
+            "--from-env",
+            "--atlassian-token",
+            "argument-secret",
+        ],
+        vec![
+            "setup",
+            "--from-env",
+            "--json",
+            r#"{"atlassianToken":"json-secret","tempoToken":"json-tempo-secret"}"#,
+        ],
+    ] {
+        let directory = TempDir::new()?;
+        let path = directory.path().join("config.json");
+        let output = command(&path)?.args(arguments).output()?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert!(!stderr.contains("argument-secret"));
+        assert!(!stderr.contains("json-secret"));
+        assert!(!stderr.contains("json-tempo-secret"));
+        assert!(!path.exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn headless_setup_rejects_unsafe_jira_sites_without_network_access(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for site in [
