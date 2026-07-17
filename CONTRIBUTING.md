@@ -20,6 +20,13 @@ TypeScript `Map` format. API changes should preserve redaction and URL
 validation. Public changes require updates to
 `drag schema`, README examples, and `CHANGELOG.md`.
 
+User-visible changes also require a changeset. Run `pnpm install` once, then
+`pnpm changeset`, select `@treramey/drag`, and commit the generated file.
+Merging the resulting release-version PR prepares the Cargo, npm, and changelog
+versions; pushing its `vX.Y.Z` tag publishes the distribution artifacts.
+The Changesets workflow uses the repository's `RELEASE_TOKEN` bot credential so
+that a pushed release tag can trigger the native distribution workflow.
+
 Do not commit tokens, account IDs, private Jira hostnames, API response dumps,
 or real worklog descriptions. See [SECURITY.md](SECURITY.md) for private
 vulnerability reporting.

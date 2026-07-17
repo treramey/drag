@@ -1,0 +1,14 @@
+{
+  "name": "drag-release-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@11.13.1",
+  "scripts": {
+    "changeset": "changeset",
+    "version-sync": "bash scripts/version-sync.sh",
+    "tag-release": "bash scripts/tag-release.sh"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.29.8"
+  }
+}

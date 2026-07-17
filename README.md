@@ -17,7 +17,21 @@ output, dry runs, safer HTTP behavior, and cross-platform binaries.
 - Return readable terminal output or consistent JSON for scripts and agents.
 - Preview mutations with `--dry-run`.
 
-## Install from source
+## Installation
+
+Download a checksummed native archive from
+[GitHub Releases](https://github.com/treramey/drag/releases), or install the
+npm bootstrap package:
+
+```bash
+npm install --global @treramey/drag
+```
+
+The npm package downloads the matching release binary and verifies its SHA-256
+checksum. A Nix flake is also available with `nix run github:treramey/drag`.
+When the Homebrew tap is configured, use `brew install treramey/tap/drag`.
+
+### Install from source
 
 ```bash
 cargo install --path crates/drag-cli

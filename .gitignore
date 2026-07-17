@@ -1,5 +1,7 @@
 # Rust
 /target/
+/node_modules/
+/npm/bin/
 **/*.rs.bk
 lcov.info
 
