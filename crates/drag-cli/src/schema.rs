@@ -22,7 +22,7 @@ pub(crate) fn schema() -> Rendered {
         .collect::<Map<_, _>>();
 
     let data = json!({
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "schemaDialect": "https://json-schema.org/draft/2020-12/schema",
         "schemaVersion": SCHEMA_VERSION,
         "cliVersion": env!("CARGO_PKG_VERSION"),
         "name": "drag",
@@ -87,10 +87,17 @@ fn command_contract(command: &Command, path: &str) -> Value {
         "sideEffects": semantics.side_effects,
         "networkAccess": semantics.network_access,
         "dryRun": semantics.dry_run,
+        "failureDetails": command_failure_details(path),
         "behavior": command_behavior(path)
     });
     if command.get_name() == "help" {
-        contract["helpTargets"] = json!(help_targets(command));
+        contract["helpTargets"] = if path == "help" {
+            let mut root = Cli::command();
+            root.build();
+            json!(help_targets(&root))
+        } else {
+            json!(help_targets(command))
+        };
     }
     contract
 }
@@ -104,12 +111,21 @@ fn help_targets(command: &Command) -> Vec<String> {
                 format!("{prefix} {}", subcommand.get_name())
             };
             targets.push(path.clone());
+            for alias in subcommand.get_all_aliases() {
+                targets.push(if prefix.is_empty() {
+                    alias.to_owned()
+                } else {
+                    format!("{prefix} {alias}")
+                });
+            }
             collect(subcommand, &path, targets);
         }
     }
 
     let mut targets = Vec::new();
     collect(command, "", &mut targets);
+    targets.sort();
+    targets.dedup();
     targets
 }
 
@@ -131,15 +147,20 @@ fn argument_contracts(command: &Command, path: &str, globals_only: bool) -> Vec<
 fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
     let id = argument.get_id().as_str();
     let is_global = argument.is_global_set() || matches!(id, "help" | "version");
-    let possible_values = argument
-        .get_value_parser()
-        .possible_values()
-        .map(|values| {
-            values
-                .map(|value| value.get_name().to_owned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let switch = is_switch(argument);
+    let possible_values = if switch {
+        Vec::new()
+    } else {
+        argument
+            .get_value_parser()
+            .possible_values()
+            .map(|values| {
+                values
+                    .map(|value| value.get_name().to_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
     let defaults = argument
         .get_default_values()
         .iter()
@@ -197,7 +218,11 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
         contract["enum"] = json!(possible_values);
     }
     if defaults.len() == 1 {
-        contract["default"] = json!(defaults[0]);
+        contract["default"] = if switch {
+            json!(defaults[0] == "true")
+        } else {
+            json!(defaults[0])
+        };
     } else if !defaults.is_empty() {
         contract["default"] = json!(defaults);
     }
@@ -215,10 +240,7 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
 }
 
 fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'static str {
-    if matches!(
-        argument.get_action(),
-        ArgAction::SetTrue | ArgAction::SetFalse
-    ) {
+    if is_switch(argument) {
         "boolean"
     } else if path == "delete" && argument.get_id() == "worklog_ids" {
         "unsignedInteger"
@@ -229,6 +251,13 @@ fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'st
     } else {
         "string"
     }
+}
+
+fn is_switch(argument: &Arg) -> bool {
+    matches!(
+        argument.get_action(),
+        ArgAction::SetTrue | ArgAction::SetFalse | ArgAction::Help | ArgAction::Version
+    )
 }
 
 fn required_unless(path: &str, id: &str) -> Option<Vec<&'static str>> {
@@ -325,15 +354,30 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 json!({"dryRun": {"type": "boolean"}, "worklogs": {"type": "array", "items": schema_ref("Worklog")}}),
             ),
             error_codes: remote_errors,
-            side_effects: json!({"default": ["deleteTempoWorklogs"], "dryRun": []}),
+            side_effects: json!({
+                "default": ["deleteTempoWorklogs"],
+                "dryRun": [],
+                "atomic": false,
+                "processingOrder": "worklogIdsInArgumentOrder",
+                "failure": "stopOnFirstError; previously deleted worklogs remain deleted and no success result is emitted"
+            }),
             network_access: json!({"default": {"jira": "read", "tempo": "read-write"}, "dryRun": {"jira": "read", "tempo": "read"}}),
             dry_run: json!({"supported": true, "option": "dryRun", "sideEffects": false, "networkAccess": "read-only"}),
         },
         "setup" => CommandSemantics {
             success: setup_success_schema(),
             error_codes: remote_errors,
-            side_effects: json!({"default": ["verifyCredentials", "writeConfiguration"], "preservesConfiguration": ["aliases"]}),
-            network_access: json!({"default": {"browser": "may-open", "jira": "read", "tempo": "read"}, "fromEnv": {"browser": "none", "jira": "read", "tempo": "read"}}),
+            side_effects: json!({
+                "default": ["mayOpenBrowserTokenPages", "verifyCredentials", "writeConfiguration"],
+                "noOpen": ["verifyCredentials", "writeConfiguration"],
+                "fromEnv": ["verifyCredentials", "writeConfiguration"],
+                "preservesConfiguration": ["aliases"]
+            }),
+            network_access: json!({
+                "default": {"browser": "may-open", "jira": "read", "tempo": "read"},
+                "noOpen": {"browser": "none", "jira": "read", "tempo": "read"},
+                "fromEnv": {"browser": "none", "jira": "read", "tempo": "read"}
+            }),
             dry_run: unsupported_dry_run(),
         },
         "alias set" | "alias:set" => CommandSemantics {
@@ -499,6 +543,15 @@ fn add_definition<T: JsonSchema>(definitions: &mut Map<String, Value>, name: &st
                 definitions.entry(nested_name).or_insert(nested_schema);
             }
         }
+        if name == "Worklog" {
+            let required = object.entry("required").or_insert_with(|| json!([]));
+            if let Some(required) = required.as_array_mut() {
+                let interval = Value::String("interval".to_owned());
+                if !required.contains(&interval) {
+                    required.push(interval);
+                }
+            }
+        }
     }
     definitions.insert(name.to_owned(), schema);
 }
@@ -560,25 +613,41 @@ fn doctor_success_schema() -> Value {
             "name": {"const": "drag"},
             "version": {"type": "string"},
             "configPath": {"type": "string"},
-            "configured": {"type": "object", "additionalProperties": {"type": "boolean"}},
+            "configured": {
+                "type": "object",
+                "required": ["tempoToken", "accountId", "atlassianEmail", "atlassianToken", "atlassianHost"],
+                "properties": {
+                    "tempoToken": {"type": "boolean"},
+                    "accountId": {"type": "boolean"},
+                    "atlassianEmail": {"type": "boolean"},
+                    "atlassianToken": {"type": "boolean"},
+                    "atlassianHost": {"type": "boolean"}
+                },
+                "additionalProperties": false
+            },
             "aliases": {"type": "integer", "minimum": 0},
             "timezone": {"type": "string"},
             "target": {"type": "object", "required": ["architecture", "operatingSystem"], "properties": {"architecture": {"type": "string"}, "operatingSystem": {"type": "string"}}, "additionalProperties": false},
-            "remoteChecks": {"type": "object", "properties": {"jira": service_check_schema(), "tempo": service_check_schema()}, "additionalProperties": false}
+            "remoteChecks": {"type": "object", "required": ["jira", "tempo"], "properties": {"jira": service_check_schema(), "tempo": service_check_schema()}, "additionalProperties": false}
         }),
     )
 }
 
 fn service_check_schema() -> Value {
     json!({
-        "type": "object",
-        "required": ["status"],
-        "properties": {
-            "status": {"enum": ["connected", "notConfigured", "failed"]},
-            "errorCode": {"type": "string"}
-        },
-        "additionalProperties": false
+        "oneOf": [
+            object_schema(&["status"], json!({"status": {"const": "connected"}})),
+            object_schema(&["status"], json!({"status": {"const": "notConfigured"}})),
+            object_schema(&["status", "errorCode"], json!({"status": {"const": "failed"}, "errorCode": {"type": "string"}}))
+        ]
     })
+}
+
+fn command_failure_details(path: &str) -> Value {
+    match path {
+        "doctor" => json!({"remote_check_failed": doctor_success_schema()}),
+        _ => Value::Null,
+    }
 }
 
 fn output_contract() -> Value {
@@ -768,6 +837,11 @@ mod tests {
         let rendered = schema();
         assert_eq!(rendered.data["schemaVersion"], SCHEMA_VERSION);
         assert_eq!(rendered.data["cliVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            rendered.data["schemaDialect"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+        assert!(rendered.data.get("$schema").is_none());
         for command in rendered.data["commands"]
             .as_object()
             .into_iter()
@@ -778,6 +852,7 @@ mod tests {
             assert!(command["sideEffects"].is_object());
             assert!(command["networkAccess"].is_object());
             assert!(command["dryRun"].is_object());
+            assert!(command.get("failureDetails").is_some());
         }
     }
 
@@ -789,6 +864,9 @@ mod tests {
         assert!(definitions["Worklog"]["required"]
             .as_array()
             .is_some_and(|required| required.contains(&Value::String("interval".to_owned()))));
+        assert!(definitions["Worklog"]["properties"]["interval"]["anyOf"]
+            .as_array()
+            .is_some_and(|variants| variants.iter().any(|variant| variant["type"] == "null")));
         assert!(definitions["AddWorklogRequest"]["properties"]["timeSpentSeconds"].is_object());
         assert!(definitions["ScheduleDetails"]["properties"]["dayLoggedDuration"].is_object());
         assert_eq!(
@@ -822,5 +900,91 @@ mod tests {
         assert_eq!(output["default"], "auto");
         assert!(Cli::try_parse_from(["drag", "--output", "xml", "schema"]).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn switches_use_boolean_defaults_without_value_enums() -> Result<(), String> {
+        let rendered = schema();
+        let dry_run = rendered.data["commands"]["log"]["arguments"]
+            .as_array()
+            .and_then(|arguments| {
+                arguments
+                    .iter()
+                    .find(|argument| argument["id"] == "dry_run")
+            })
+            .ok_or_else(|| "missing log dry-run switch".to_owned())?;
+        assert_eq!(dry_run["type"], "boolean");
+        assert_eq!(dry_run["default"], false);
+        assert!(dry_run.get("enum").is_none());
+        assert_eq!(dry_run["valueCount"]["maximum"], 0);
+
+        for id in ["help", "version"] {
+            let switch = rendered.data["globalOptions"]
+                .as_array()
+                .and_then(|arguments| arguments.iter().find(|argument| argument["id"] == id))
+                .ok_or_else(|| format!("missing {id} switch"))?;
+            assert_eq!(switch["type"], "boolean");
+            assert!(switch.get("enum").is_none());
+        }
+        assert!(Cli::try_parse_from(["drag", "log", "ABC-1", "30m", "--dry-run=true"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn safety_sensitive_command_variants_are_explicit() {
+        let rendered = schema();
+        let commands = &rendered.data["commands"];
+        assert_eq!(commands["delete"]["sideEffects"]["atomic"], false);
+        assert_eq!(
+            commands["delete"]["sideEffects"]["processingOrder"],
+            "worklogIdsInArgumentOrder"
+        );
+        assert_eq!(
+            commands["setup"]["networkAccess"]["noOpen"]["browser"],
+            "none"
+        );
+        assert_eq!(
+            commands["setup"]["sideEffects"]["noOpen"],
+            serde_json::json!(["verifyCredentials", "writeConfiguration"])
+        );
+        assert_eq!(
+            commands["doctor"]["failureDetails"]["remote_check_failed"],
+            commands["doctor"]["success"]
+        );
+    }
+
+    #[test]
+    fn doctor_and_help_contracts_cover_conditional_shapes_and_aliases() {
+        let rendered = schema();
+        let doctor = &rendered.data["commands"]["doctor"]["success"];
+        assert_eq!(
+            doctor["properties"]["configured"]["required"],
+            serde_json::json!([
+                "tempoToken",
+                "accountId",
+                "atlassianEmail",
+                "atlassianToken",
+                "atlassianHost"
+            ])
+        );
+        assert_eq!(
+            doctor["properties"]["remoteChecks"]["required"],
+            serde_json::json!(["jira", "tempo"])
+        );
+        assert_eq!(
+            doctor["properties"]["remoteChecks"]["properties"]["jira"]["oneOf"][2]["required"],
+            serde_json::json!(["status", "errorCode"])
+        );
+
+        let targets = rendered.data["commands"]["help"]["helpTargets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for alias in ["l", "ls", "d", "autocomplete"] {
+            assert!(
+                targets.contains(&Value::String(alias.to_owned())),
+                "missing {alias}"
+            );
+        }
     }
 }

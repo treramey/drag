@@ -82,7 +82,6 @@ pub struct ScheduleEntity {
 #[serde(rename_all = "camelCase")]
 pub struct Worklog {
     pub id: String,
-    #[schemars(required)]
     pub interval: Option<ClockInterval>,
     pub issue_id: String,
     pub issue_key: String,
