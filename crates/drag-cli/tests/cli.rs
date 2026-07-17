@@ -78,6 +78,64 @@ fn reports_version() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn delete_json_rejects_invalid_batches_before_configuration_or_network_access(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing_config = directory.path().join("missing.json");
+    let cases = [
+        (
+            vec!["delete", "--json", r#"{"worklogIds":[]}"#],
+            "invalid_input",
+        ),
+        (
+            vec!["delete", "--json", r#"{"worklogIds":["123"]}"#],
+            "invalid_json",
+        ),
+        (vec!["delete", "--json", r#"[[123,456]]"#], "invalid_json"),
+        (
+            vec!["delete", "--json", r#"{"worklogIds":[123],"extra":true}"#],
+            "invalid_json",
+        ),
+        (
+            vec!["delete", "123", "--json", r#"{"worklogIds":[123]}"#],
+            "usage",
+        ),
+    ];
+
+    for (args, expected_code) in cases {
+        let output = command(&missing_config)?.args(args).output()?;
+        assert_eq!(output.status.code(), Some(2));
+        let body: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(body["error"]["code"], expected_code);
+    }
+    assert!(!missing_config.exists());
+    Ok(())
+}
+
+#[test]
+fn delete_accepts_ordered_json_batches_inline_and_from_stdin(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing_config = directory.path().join("missing.json");
+    let raw = r#"{"worklogIds":[123,456,123]}"#;
+
+    let inline = command(&missing_config)?
+        .args(["delete", "--json", raw, "--dry-run"])
+        .output()?;
+    let stdin = command(&missing_config)?
+        .args(["delete", "--json", "-", "--dry-run"])
+        .write_stdin(raw)
+        .output()?;
+
+    for output in [inline, stdin] {
+        assert_eq!(output.status.code(), Some(2));
+        let body: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(body["error"]["code"], "not_configured");
+    }
+    Ok(())
+}
+
+#[test]
 fn alias_commands_preserve_colon_compatibility() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = directory.path().join("config.json");
@@ -682,6 +740,35 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         contract["commands"]["delete"]["dryRun"]["networkAccess"],
         "read-only"
+    );
+    let delete_arguments = contract["commands"]["delete"]["arguments"]
+        .as_array()
+        .ok_or("delete arguments are not an array")?;
+    let delete_json = delete_arguments
+        .iter()
+        .find(|argument| argument["id"] == "json")
+        .ok_or("missing delete --json")?;
+    assert_eq!(delete_json["stdinValue"], "-");
+    assert_eq!(delete_json["jsonSchema"]["additionalProperties"], false);
+    assert_eq!(
+        delete_json["jsonSchema"]["required"],
+        serde_json::json!(["worklogIds"])
+    );
+    assert_eq!(
+        delete_json["jsonSchema"]["properties"]["worklogIds"]["minItems"],
+        1
+    );
+    let delete_ids = delete_arguments
+        .iter()
+        .find(|argument| argument["id"] == "worklog_ids")
+        .ok_or("missing positional delete IDs")?;
+    assert_eq!(
+        delete_ids["requiredUnlessPresent"],
+        serde_json::json!(["json"])
+    );
+    assert_eq!(
+        delete_json["conflictsWith"],
+        serde_json::json!(["worklogIds"])
     );
     for path in [
         &contract["commands"]["alias"]["subcommands"]["set"],

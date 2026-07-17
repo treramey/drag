@@ -171,6 +171,8 @@ Jira or Tempo.
 drag list
 drag ls 2026-07-14 --verbose
 drag delete 123456 123457
+drag delete --json '{"worklogIds":[123456,123457]}' --dry-run
+printf '%s' '{"worklogIds":[123456,123457]}' | drag delete --json -
 
 # Aliases (both modern and original colon forms work)
 drag alias set lunch ABC-123
@@ -189,10 +191,13 @@ to human output without changing the JSON data shape. The command loads the
 selected calendar month's worklogs and schedule, including both month
 boundaries, to calculate its daily and monthly totals.
 
-`delete` processes IDs sequentially in argument order and stops on the first
-error. Batch deletion is not atomic: worklogs deleted before a later failure
-remain deleted. Use `--dry-run` to perform the required reads and preview every
-target without deleting it.
+`delete` accepts ordered numeric IDs either positionally or in a camel-case
+JSON object through `--json`, with `-` reading from stdin. JSON payloads use
+`worklogIds`, for example `{"worklogIds":[123456,123457]}`. It processes IDs
+sequentially in the supplied order and stops on the first error. Batch deletion
+is not atomic: worklogs deleted before a later failure remain deleted. Use
+`--dry-run` to perform the same ordered reads and preview every target without
+deleting it.
 
 Alias set and delete operations accept either their positional arguments or a
 camel-case JSON document through `--json`, with `-` reading from stdin. Set
@@ -230,9 +235,9 @@ shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
 command also describes its JSON success data, possible structured error codes,
 side effects, network access, and dry-run behavior. The `--json` arguments for
-log and alias mutations contain nested JSON Schemas generated from the same
-serde input types used at runtime, while command and option metadata is read
-from Clap's command model.
+log, worklog deletion, and alias mutations contain nested JSON Schemas generated
+from the same serde input types used at runtime, while command and option
+metadata is read from Clap's command model.
 
 | Exit | Meaning |
 |---:|---|

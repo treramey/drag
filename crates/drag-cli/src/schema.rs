@@ -5,7 +5,7 @@ use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
 use serde_json::{json, Map, Value};
 
 use crate::alias::{AliasDeleteResult, AliasSetResult};
-use crate::cli::{AliasDeleteInput, AliasSetInput, Cli, LogInput};
+use crate::cli::{AliasDeleteInput, AliasSetInput, Cli, DeleteInput, LogInput};
 use crate::output::Rendered;
 
 const SCHEMA_VERSION: u64 = 2;
@@ -236,6 +236,7 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
     if id == "json" {
         let input_schema = match path {
             "log" => Some(json_schema::<LogInput>()),
+            "delete" => Some(json_schema::<DeleteInput>()),
             "alias set" | "alias:set" => Some(json_schema::<AliasSetInput>()),
             "alias delete" | "alias:delete" => Some(json_schema::<AliasDeleteInput>()),
             _ => None,
@@ -272,6 +273,7 @@ fn is_switch(argument: &Arg) -> bool {
 fn required_unless(path: &str, id: &str) -> Option<Vec<&'static str>> {
     match (path, id) {
         ("log", "issue_key_or_alias" | "duration_or_interval") => Some(vec!["json"]),
+        ("delete", "worklog_ids") => Some(vec!["json"]),
         ("alias set" | "alias:set", "alias" | "issue_key") => Some(vec!["json"]),
         ("alias delete" | "alias:delete", "alias_name") => Some(vec!["json"]),
         _ => None,
@@ -369,7 +371,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "default": ["deleteTempoWorklogs"],
                 "dryRun": [],
                 "atomic": false,
-                "processingOrder": "worklogIdsInArgumentOrder",
+                "processingOrder": "worklogIdsInInputOrder",
                 "failure": "stopOnFirstError; previously deleted worklogs remain deleted and no success result is emitted"
             }),
             network_access: json!({"default": {"jira": "read", "tempo": "read-write"}, "dryRun": {"jira": "read", "tempo": "read"}}),
@@ -1011,10 +1013,13 @@ mod tests {
             .find(|argument| argument["id"] == "worklog_ids")
             .ok_or_else(|| "missing worklog IDs".to_owned())?;
         assert_eq!(ids["type"], "unsignedInteger");
-        assert_eq!(ids["required"], true);
+        assert_eq!(ids["required"], false);
+        assert_eq!(ids["requiredUnlessPresent"], serde_json::json!(["json"]));
         assert_eq!(ids["valueCount"]["minimum"], 1);
         assert!(ids["valueCount"]["maximum"].is_null());
         Cli::try_parse_from(["drag", "delete", "1", "2"]).map_err(|error| error.to_string())?;
+        Cli::try_parse_from(["drag", "delete", "--json", r#"{"worklogIds":[1,2]}"#])
+            .map_err(|error| error.to_string())?;
         assert!(Cli::try_parse_from(["drag", "delete", "not-a-number"]).is_err());
 
         let output = rendered.data["globalOptions"]
@@ -1062,7 +1067,7 @@ mod tests {
         assert_eq!(commands["delete"]["sideEffects"]["atomic"], false);
         assert_eq!(
             commands["delete"]["sideEffects"]["processingOrder"],
-            "worklogIdsInArgumentOrder"
+            "worklogIdsInInputOrder"
         );
         assert_eq!(
             commands["setup"]["networkAccess"]["noOpen"]["browser"],
