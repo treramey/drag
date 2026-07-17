@@ -1,13 +1,38 @@
 {
-  "name": "drag-release-workspace",
+  "name": "@treramey/drag",
   "private": true,
   "version": "0.1.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/treramey/drag.git"
+  },
+  "author": {
+    "name": "Trevor Ramey",
+    "email": "trevor@trevors.email"
+  },
+  "homepage": "https://github.com/treramey/drag",
+  "bugs": {
+    "url": "https://github.com/treramey/drag/issues"
+  },
   "packageManager": "pnpm@11.13.1",
   "scripts": {
+    "test": "cargo test",
     "changeset": "changeset",
     "version-sync": "bash scripts/version-sync.sh",
     "tag-release": "bash scripts/tag-release.sh"
   },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cli",
+    "tempo",
+    "tempo-time-tracker",
+    "ai-agent",
+    "agent-skills",
+    "automation",
+    "rust"
+  ],
   "devDependencies": {
     "@changesets/cli": "^2.29.8"
   }
