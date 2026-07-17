@@ -68,8 +68,235 @@ fn alias_commands_preserve_colon_compatibility() -> Result<(), Box<dyn std::erro
     let body: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(body["data"]["aliases"]["lunch"], "ABC-1");
 
-    let persisted = fs::read_to_string(path)?;
+    let persisted = fs::read_to_string(&path)?;
     assert!(persisted.contains("\"dataType\": \"Map\""));
+
+    let delete = command(&path)?.args(["alias:delete", "lunch"]).output()?;
+    assert!(delete.status.success());
+    let body: Value = serde_json::from_slice(&delete.stdout)?;
+    assert_eq!(body["data"]["action"], "delete");
+    Ok(())
+}
+
+#[test]
+fn alias_set_inputs_normalize_to_the_same_dry_run_without_writing_config(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let before = fs::read(&path)?;
+    let raw = r#"{"alias":"lunch","issueKey":"ABC-1"}"#;
+
+    let positional = command(&path)?
+        .args(["alias", "set", "lunch", "ABC-1", "--dry-run"])
+        .output()?;
+    let inline = command(&path)?
+        .args(["alias", "set", "--json", raw, "--dry-run"])
+        .output()?;
+    let stdin = command(&path)?
+        .args(["alias", "set", "--json", "-", "--dry-run"])
+        .write_stdin(raw)
+        .output()?;
+
+    for output in [&positional, &inline, &stdin] {
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+    }
+    let positional: Value = serde_json::from_slice(&positional.stdout)?;
+    let inline: Value = serde_json::from_slice(&inline.stdout)?;
+    let stdin: Value = serde_json::from_slice(&stdin.stdout)?;
+    assert_eq!(inline["data"], positional["data"]);
+    assert_eq!(stdin["data"], positional["data"]);
+    assert_eq!(positional["data"]["dryRun"], true);
+    assert_eq!(positional["data"]["action"], "create");
+    assert_eq!(fs::read(&path)?, before);
+    Ok(())
+}
+
+#[test]
+fn alias_set_preview_and_execution_share_replace_and_unchanged_plans(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let preview_path = configured_file(&directory)?;
+    command(&preview_path)?
+        .args(["alias", "set", "lunch", "ABC-1"])
+        .assert()
+        .success();
+    let initial = fs::read(&preview_path)?;
+    let execution_path = directory.path().join("execution.json");
+    fs::write(&execution_path, &initial)?;
+
+    let preview = command(&preview_path)?
+        .args(["alias", "set", "lunch", "ABC-2", "--dry-run"])
+        .output()?;
+    let execution = command(&execution_path)?
+        .args(["alias", "set", "lunch", "ABC-2"])
+        .output()?;
+    assert!(preview.status.success());
+    assert!(execution.status.success());
+    let preview: Value = serde_json::from_slice(&preview.stdout)?;
+    let execution: Value = serde_json::from_slice(&execution.stdout)?;
+    for field in ["alias", "issueKey", "action", "previousIssueKey"] {
+        assert_eq!(preview["data"][field], execution["data"][field]);
+    }
+    assert_eq!(preview["data"]["action"], "replace");
+    assert_eq!(preview["data"]["previousIssueKey"], "ABC-1");
+    assert_eq!(preview["data"]["dryRun"], true);
+    assert_eq!(execution["data"]["dryRun"], false);
+    assert_eq!(fs::read(&preview_path)?, initial);
+
+    let unchanged = command(&preview_path)?
+        .args(["alias", "set", "lunch", "ABC-1"])
+        .output()?;
+    assert!(unchanged.status.success());
+    let unchanged: Value = serde_json::from_slice(&unchanged.stdout)?;
+    assert_eq!(unchanged["data"]["action"], "unchanged");
+    assert_eq!(unchanged["data"]["dryRun"], false);
+    assert_eq!(fs::read(&preview_path)?, initial);
+
+    let saved: Value = serde_json::from_slice(&fs::read(&execution_path)?)?;
+    assert_eq!(
+        saved["aliases"]["value"][0],
+        serde_json::json!(["lunch", "ABC-2"])
+    );
+    Ok(())
+}
+
+#[test]
+fn alias_delete_inputs_share_a_plan_and_dry_run_preserves_config_bytes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let preview_path = configured_file(&directory)?;
+    command(&preview_path)?
+        .args(["alias", "set", "lunch", "ABC-1"])
+        .assert()
+        .success();
+    let initial = fs::read(&preview_path)?;
+    let execution_path = directory.path().join("delete-execution.json");
+    fs::write(&execution_path, &initial)?;
+    let raw = r#"{"alias":"lunch"}"#;
+
+    let positional = command(&preview_path)?
+        .args(["alias", "delete", "lunch", "--dry-run"])
+        .output()?;
+    let inline = command(&preview_path)?
+        .args(["alias", "delete", "--json", raw, "--dry-run"])
+        .output()?;
+    let stdin = command(&preview_path)?
+        .args(["alias", "delete", "--json", "-", "--dry-run"])
+        .write_stdin(raw)
+        .output()?;
+    let execution = command(&execution_path)?
+        .args(["alias", "delete", "lunch"])
+        .output()?;
+
+    for output in [&positional, &inline, &stdin, &execution] {
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+    }
+    let positional: Value = serde_json::from_slice(&positional.stdout)?;
+    let inline: Value = serde_json::from_slice(&inline.stdout)?;
+    let stdin: Value = serde_json::from_slice(&stdin.stdout)?;
+    let execution: Value = serde_json::from_slice(&execution.stdout)?;
+    assert_eq!(inline["data"], positional["data"]);
+    assert_eq!(stdin["data"], positional["data"]);
+    for field in ["alias", "issueKey", "action"] {
+        assert_eq!(positional["data"][field], execution["data"][field]);
+    }
+    assert_eq!(positional["data"]["action"], "delete");
+    assert_eq!(positional["data"]["deleted"], false);
+    assert_eq!(positional["data"]["dryRun"], true);
+    assert_eq!(execution["data"]["deleted"], true);
+    assert_eq!(execution["data"]["dryRun"], false);
+    assert_eq!(fs::read(&preview_path)?, initial);
+
+    let unchanged = command(&preview_path)?
+        .args(["alias", "delete", "missing"])
+        .output()?;
+    assert!(unchanged.status.success());
+    let unchanged: Value = serde_json::from_slice(&unchanged.stdout)?;
+    assert_eq!(unchanged["data"]["action"], "unchanged");
+    assert_eq!(unchanged["data"]["deleted"], false);
+    assert_eq!(unchanged["data"]["dryRun"], false);
+    assert_eq!(fs::read(&preview_path)?, initial);
+    Ok(())
+}
+
+#[test]
+fn alias_json_conflicts_and_unknown_fields_fail_before_config_writes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let before = fs::read(&path)?;
+    let cases = [
+        (
+            vec![
+                "alias",
+                "set",
+                "lunch",
+                "ABC-1",
+                "--json",
+                r#"{"alias":"lunch","issueKey":"ABC-1"}"#,
+            ],
+            "usage",
+        ),
+        (
+            vec!["alias", "delete", "lunch", "--json", r#"{"alias":"lunch"}"#],
+            "usage",
+        ),
+        (
+            vec![
+                "alias",
+                "set",
+                "--json",
+                r#"{"alias":"lunch","issueKey":"ABC-1","issueKye":"ABC-2"}"#,
+            ],
+            "invalid_json",
+        ),
+        (
+            vec![
+                "alias",
+                "delete",
+                "--json",
+                r#"{"alias":"lunch","force":true}"#,
+            ],
+            "invalid_json",
+        ),
+    ];
+
+    for (arguments, expected_code) in cases {
+        let output = command(&path)?.args(arguments).output()?;
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let body: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(body["error"]["code"], expected_code);
+        assert_eq!(fs::read(&path)?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn live_alias_mutations_preserve_existing_human_output() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let config = path.to_str().ok_or("temporary config path is not UTF-8")?;
+
+    let set = Command::cargo_bin("drag")?
+        .args([
+            "--config", config, "--output", "human", "alias", "set", "lunch", "ABC-1",
+        ])
+        .output()?;
+    assert!(set.status.success());
+    assert_eq!(String::from_utf8(set.stdout)?, "lunch => ABC-1\n");
+    assert!(set.stderr.is_empty());
+
+    let delete = Command::cargo_bin("drag")?
+        .args([
+            "--config", config, "--output", "human", "alias", "delete", "lunch",
+        ])
+        .output()?;
+    assert!(delete.status.success());
+    assert_eq!(String::from_utf8(delete.stdout)?, "Deleted alias lunch.\n");
+    assert!(delete.stderr.is_empty());
     Ok(())
 }
 
@@ -423,6 +650,64 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         contract["commands"]["delete"]["dryRun"]["networkAccess"],
         "read-only"
     );
+    for path in [
+        &contract["commands"]["alias"]["subcommands"]["set"],
+        &contract["commands"]["alias:set"],
+    ] {
+        let arguments = path["arguments"]
+            .as_array()
+            .ok_or("alias set arguments are not an array")?;
+        let json_input = arguments
+            .iter()
+            .find(|argument| argument["id"] == "json")
+            .ok_or("missing alias set --json")?;
+        assert_eq!(json_input["stdinValue"], "-");
+        assert_eq!(json_input["jsonSchema"]["additionalProperties"], false);
+        assert_eq!(
+            json_input["jsonSchema"]["required"],
+            serde_json::json!(["alias", "issueKey"])
+        );
+        assert_eq!(path["dryRun"]["sideEffects"], false);
+        assert_eq!(path["dryRun"]["networkAccess"], false);
+        assert_eq!(path["success"]["$ref"], "#/$defs/AliasSetResult");
+    }
+    for path in [
+        &contract["commands"]["alias"]["subcommands"]["delete"],
+        &contract["commands"]["alias:delete"],
+    ] {
+        let arguments = path["arguments"]
+            .as_array()
+            .ok_or("alias delete arguments are not an array")?;
+        let json_input = arguments
+            .iter()
+            .find(|argument| argument["id"] == "json")
+            .ok_or("missing alias delete --json")?;
+        assert_eq!(json_input["stdinValue"], "-");
+        assert_eq!(json_input["jsonSchema"]["additionalProperties"], false);
+        assert_eq!(
+            json_input["jsonSchema"]["required"],
+            serde_json::json!(["alias"])
+        );
+        assert_eq!(path["dryRun"]["sideEffects"], false);
+        assert_eq!(path["dryRun"]["networkAccess"], false);
+        assert_eq!(path["success"]["$ref"], "#/$defs/AliasDeleteResult");
+    }
+    assert_eq!(
+        contract["$defs"]["SetAliasAction"]["enum"],
+        serde_json::json!(["create", "replace", "unchanged"])
+    );
+    assert_eq!(
+        contract["$defs"]["DeleteAliasAction"]["enum"],
+        serde_json::json!(["delete", "unchanged"])
+    );
+    for (result, nullable_field) in [
+        ("AliasSetResult", "previousIssueKey"),
+        ("AliasDeleteResult", "issueKey"),
+    ] {
+        assert!(contract["$defs"][result]["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&Value::String(nullable_field.to_owned()))));
+    }
     assert!(contract["commands"]["list"]["success"]["properties"]["worklogs"]["items"].is_object());
     assert_eq!(
         contract["commands"]["setup"]["behavior"]["interactive"]["renderStream"],

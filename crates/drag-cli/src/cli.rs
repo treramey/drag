@@ -194,13 +194,44 @@ pub enum AliasCommand {
 
 #[derive(Debug, Args)]
 pub struct AliasSetArgs {
+    /// Alias name to create or replace.
+    #[arg(required_unless_present = "json")]
+    pub alias: Option<String>,
+    /// Jira issue key assigned to the alias.
+    #[arg(required_unless_present = "json")]
+    pub issue_key: Option<String>,
+    /// Raw input JSON, or '-' to read it from stdin.
+    #[arg(long, conflicts_with_all = ["alias", "issue_key"])]
+    pub json: Option<String>,
+    /// Show the normalized config change without writing configuration.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AliasSetInput {
     pub alias: String,
     pub issue_key: String,
 }
 
 #[derive(Debug, Args)]
 pub struct AliasDeleteArgs {
-    pub alias_name: String,
+    /// Alias name to delete.
+    #[arg(required_unless_present = "json")]
+    pub alias_name: Option<String>,
+    /// Raw input JSON, or '-' to read it from stdin.
+    #[arg(long, conflicts_with = "alias_name")]
+    pub json: Option<String>,
+    /// Show the normalized config change without writing configuration.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AliasDeleteInput {
+    pub alias: String,
 }
 
 #[cfg(test)]

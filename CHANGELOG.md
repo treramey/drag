@@ -29,6 +29,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
   shared serde models, covering commands, compatibility forms, inputs, result
   schemas, structured errors, side effects, network access, and dry runs.
 - Raw JSON input, environment-based headless setup, and mutation dry runs.
+- Typed inline and stdin JSON for alias set/delete, with shared normalized
+  create, replace, delete, and unchanged plans and config-safe dry runs.
 - Cross-platform CI, dependency policy, audits, and release artifacts.
 
 ### Fixed

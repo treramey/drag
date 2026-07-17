@@ -61,7 +61,8 @@ several peer submodules rather than a single implementation file.
   characters from remote text; JSON preserves source data.
 - Only idempotent reads retry transient transport failures and retryable HTTP
   statuses; mutations are attempted once.
-- Mutating worklog operations support `--dry-run`.
+- Mutating worklog and alias operations support `--dry-run`; alias preview and
+  execution consume the same normalized config-change plan.
 
 ## Adding behavior
 

@@ -174,7 +174,11 @@ drag delete 123456 123457
 
 # Aliases (both modern and original colon forms work)
 drag alias set lunch ABC-123
+drag alias set lunch ABC-456 --dry-run
+printf '%s' '{"alias":"lunch","issueKey":"ABC-123"}' \
+  | drag alias set --json - --dry-run
 drag alias list
+drag alias delete lunch
 drag alias:set lunch ABC-123
 
 ```
@@ -189,6 +193,13 @@ boundaries, to calculate its daily and monthly totals.
 error. Batch deletion is not atomic: worklogs deleted before a later failure
 remain deleted. Use `--dry-run` to perform the required reads and preview every
 target without deleting it.
+
+Alias set and delete operations accept either their positional arguments or a
+camel-case JSON document through `--json`, with `-` reading from stdin. Set
+payloads contain `alias` and `issueKey`; delete payloads contain `alias`.
+`--dry-run` reports an `action` of `create`, `replace`, `delete`, or
+`unchanged` without rewriting the config file. Live execution uses the same
+normalized change plan and skips config writes for unchanged operations.
 
 ### JSON and raw input
 
@@ -205,7 +216,8 @@ printf '%s' '{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}' \
 Raw log input uses camel-case fields: `issueKeyOrAlias`,
 `durationOrInterval`, `when`, `description`, `start`, and
 `remainingEstimate`. Unknown fields are rejected. `--json` cannot be combined
-with positional log arguments or their corresponding flags.
+with positional log arguments or their corresponding flags. Alias JSON follows
+the same unknown-field and convenience-argument conflict rules.
 
 Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `{"ok":false,"error":{"code":"...","message":"..."}}`.
@@ -217,9 +229,10 @@ includes the installed CLI version and every command, nested subcommand,
 shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
 command also describes its JSON success data, possible structured error codes,
-side effects, network access, and dry-run behavior. The `log --json` argument
-contains a nested JSON Schema generated from the same serde input type used at
-runtime, while command and option metadata is read from Clap's command model.
+side effects, network access, and dry-run behavior. The `--json` arguments for
+log and alias mutations contain nested JSON Schemas generated from the same
+serde input types used at runtime, while command and option metadata is read
+from Clap's command model.
 
 | Exit | Meaning |
 |---:|---|
