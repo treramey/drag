@@ -60,6 +60,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Security
 
+- Keep untrusted Jira and Tempo values within their human-rendering fields by
+  visibly escaping line breaks, controls, bidirectional formatting, and
+  zero-width characters while preserving source strings in JSON.
 - Validate caller-provided and server-provided Tempo continuation URLs before
   authenticated requests, rejecting malformed, credential-bearing,
   cross-origin, and selected-month-mismatched URLs without echoing them or

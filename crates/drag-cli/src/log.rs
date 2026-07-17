@@ -13,6 +13,7 @@ use url::Url;
 use crate::api::ApiClient;
 use crate::cli::{LogArgs, LogInput};
 use crate::config::{Config, Credentials};
+use crate::output::escape_terminal_data;
 use crate::{CliError, Rendered};
 
 pub(crate) trait LogGateway: Send + Sync {
@@ -76,7 +77,9 @@ where
         serde_json::to_value(&worklog)?,
         format!(
             "Successfully logged {} to {}, type `drag d {}` to undo.",
-            worklog.duration, worklog.issue_key, worklog.id
+            escape_terminal_data(&worklog.duration),
+            escape_terminal_data(&worklog.issue_key),
+            escape_terminal_data(&worklog.id)
         ),
     ))
 }

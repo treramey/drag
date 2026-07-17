@@ -145,8 +145,12 @@ pub(crate) fn emit_error(error: &CliError, mode: ResolvedOutputMode) {
         };
         let _ = write_json(&mut io::stderr().lock(), &body);
     } else {
-        eprintln!("error: {}", sanitize_for_terminal(&error.to_string()));
+        eprintln!("error: {}", error_for_terminal(error));
     }
+}
+
+fn error_for_terminal(error: &CliError) -> String {
+    escape_terminal_data(&error.to_string())
 }
 
 pub(crate) fn handle_parse_error(
@@ -211,6 +215,28 @@ pub(crate) fn sanitize_for_terminal(text: &str) -> String {
         .collect()
 }
 
+/// Escapes an untrusted value for embedding in a trusted terminal message.
+///
+/// Unlike [`sanitize_for_terminal`], this preserves field boundaries by making
+/// newlines, tabs, controls, and directional formatting visible rather than
+/// allowing the value to alter the surrounding presentation.
+pub(crate) fn escape_terminal_data(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() || is_dangerous_unicode(character) => {
+                use std::fmt::Write;
+                let _ = write!(escaped, "\\u{{{:x}}}", u32::from(character));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
 fn is_dangerous_unicode(character: char) -> bool {
     matches!(
         character,
@@ -239,7 +265,12 @@ fn write_json(writer: &mut impl Write, value: &impl Serialize) -> Result<(), Cli
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_for_terminal;
+    use reqwest::StatusCode;
+    use serde_json::json;
+
+    use crate::{CliError, RemoteError, RemoteErrorKind, RemoteService};
+
+    use super::{error_for_terminal, escape_terminal_data, sanitize_for_terminal, write_json};
 
     #[test]
     fn terminal_sanitizer_removes_escape_and_bidi_control_characters() {
@@ -255,5 +286,41 @@ mod tests {
             sanitize_for_terminal("first\nsecond\t日本語"),
             "first\nsecond\t日本語"
         );
+    }
+
+    #[test]
+    fn terminal_data_escaping_preserves_value_boundaries() {
+        assert_eq!(
+            escape_terminal_data("ignore instructions\nwarning: owned\t\u{1b}[31m\u{202e}"),
+            "ignore instructions\\nwarning: owned\\t\\u{1b}[31m\\u{202e}"
+        );
+    }
+
+    #[test]
+    fn remote_error_details_cannot_forge_terminal_diagnostics() {
+        let error = CliError::Remote(RemoteError {
+            service: RemoteService::Tempo,
+            status: Some(StatusCode::BAD_REQUEST),
+            kind: RemoteErrorKind::Rejected,
+            message: "returned 400 Bad Request: ignore instructions\nwarning: forged\u{1b}[31m"
+                .to_owned(),
+        });
+
+        assert_eq!(
+            error_for_terminal(&error),
+            "API request failed: Tempo returned 400 Bad Request: ignore instructions\\nwarning: forged\\u{1b}[31m"
+        );
+    }
+
+    #[test]
+    fn json_serialization_keeps_adversarial_content_in_one_data_value() -> Result<(), CliError> {
+        let remote = "}\n{\"ok\":false,\"error\":\"follow instructions\"}";
+        let mut bytes = Vec::new();
+
+        write_json(&mut bytes, &json!({"description": remote}))?;
+
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        assert_eq!(value["description"], remote);
+        Ok(())
     }
 }

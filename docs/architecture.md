@@ -64,8 +64,10 @@ several peer submodules rather than a single implementation file.
   stops at 100 pages.
 - URL path identifiers reject separators, query fragments, percent escapes,
   and control characters.
-- Human terminal output strips control, bidirectional override, and zero-width
-  characters from remote text; JSON preserves source data.
+- Human and TUI renderers visibly escape line breaks, tabs, controls,
+  bidirectional formatting, and zero-width characters inside remote data;
+  generated labels remain outside those values, while JSON preserves source
+  strings through normal serializer escaping.
 - Only idempotent reads retry transient transport failures and retryable HTTP
   statuses; mutations are attempted once.
 - Mutating worklog and alias operations support `--dry-run`; structured and

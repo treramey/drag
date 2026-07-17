@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use crate::api::ApiClient;
 use crate::cli::{DeleteArgs, DeleteInput};
 use crate::config::{Config, Credentials};
+use crate::output::escape_terminal_data;
 use crate::{CliError, Rendered};
 
 pub(crate) trait DeleteGateway: Send + Sync {
@@ -70,12 +71,16 @@ where
             if dry_run {
                 format!(
                     "Would delete worklog {} ({} {}).",
-                    worklog.id, worklog.issue_key, worklog.duration
+                    escape_terminal_data(&worklog.id),
+                    escape_terminal_data(&worklog.issue_key),
+                    escape_terminal_data(&worklog.duration)
                 )
             } else {
                 format!(
                     "Deleted worklog {} ({} {}).",
-                    worklog.id, worklog.issue_key, worklog.duration
+                    escape_terminal_data(&worklog.id),
+                    escape_terminal_data(&worklog.issue_key),
+                    escape_terminal_data(&worklog.duration)
                 )
             }
         })

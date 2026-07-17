@@ -25,6 +25,7 @@ use tachyonfx::{
 };
 
 use crate::config::normalize_jira_site;
+use crate::output::escape_terminal_data;
 use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher,
@@ -1093,7 +1094,10 @@ where
                         model.jira_status = ConnectionStatus::NotConnected;
                         model.jira_token.clear();
                         model.focus = 0;
-                        model.error = Some(format!("Could not connect to Jira: {error}"));
+                        model.error = Some(format!(
+                            "Could not connect to Jira: {}",
+                            escape_terminal_data(&error.to_string())
+                        ));
                     }
                     Err(error) => return Err(error),
                 }
@@ -1177,7 +1181,10 @@ where
                         model.tempo_status = ConnectionStatus::NotConnected;
                         model.tempo_token.clear();
                         model.focus = 0;
-                        model.error = Some(format!("Could not connect to Tempo: {error}"));
+                        model.error = Some(format!(
+                            "Could not connect to Tempo: {}",
+                            escape_terminal_data(&error.to_string())
+                        ));
                     }
                     Err(error) => return Err(error),
                 }
@@ -1244,7 +1251,8 @@ fn present_page(
     if page.open_browser {
         if let Err(error) = browser_launcher.open(&page.url) {
             model.warning = Some(format!(
-                "Could not open token settings: {error}. Use the URL shown below."
+                "Could not open token settings: {}. Use the URL shown below.",
+                escape_terminal_data(&error.to_string())
             ));
         }
     }
