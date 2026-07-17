@@ -3,6 +3,7 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
@@ -10,6 +11,7 @@ use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
 use drag::pagination::PaginationPlan;
 use drag::schedule::{create_schedule_details, ScheduleDetails};
 use drag::time::{clock_interval, format_duration, month_bounds, select_date};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use url::Url;
 
@@ -19,6 +21,29 @@ use crate::config::{Config, Credentials};
 use crate::{CliError, Rendered};
 
 type ListFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ListContinuation {
+    version: u8,
+    selected_date: String,
+    month_start: String,
+    month_end: String,
+    url: String,
+}
+
+fn encode_continuation(continuation: &ListContinuation) -> Result<String, CliError> {
+    Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(continuation)?))
+}
+
+fn decode_continuation(value: &str) -> Result<ListContinuation, CliError> {
+    let bytes = URL_SAFE_NO_PAD.decode(value).map_err(|_| {
+        CliError::InvalidInput("continuation token is malformed or incompatible".to_owned())
+    })?;
+    serde_json::from_slice(&bytes).map_err(|_| {
+        CliError::InvalidInput("continuation token is malformed or incompatible".to_owned())
+    })
+}
 
 pub(crate) trait ListDataSource: Send + Sync {
     fn worklogs<'a>(
@@ -70,16 +95,30 @@ pub(crate) async fn run(
     args: ListArgs,
     make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
 ) -> Result<Rendered, CliError> {
-    if let Some(continuation) = args.continue_from.as_deref() {
-        validate_tempo_continuation_input(continuation)?;
-    }
-    let config = Config::load(config_path)?;
-    let credentials = config.credentials()?;
     let selected = select_date(now, args.when.as_deref())?;
-    let source = make_source(credentials.clone())?;
     let (month_start, month_end) = month_bounds(selected.date);
     let month_start = month_start.to_string();
     let month_end = month_end.to_string();
+    let continuation = args
+        .continue_from
+        .as_deref()
+        .map(decode_continuation)
+        .transpose()?;
+    if let Some(continuation) = &continuation {
+        if continuation.version != 1
+            || continuation.selected_date != selected.date.to_string()
+            || continuation.month_start != month_start
+            || continuation.month_end != month_end
+        {
+            return Err(CliError::InvalidInput(
+                "continuation token does not match the selected date".to_owned(),
+            ));
+        }
+        validate_tempo_continuation_input(&continuation.url, &month_start, &month_end)?;
+    }
+    let config = Config::load(config_path)?;
+    let credentials = config.credentials()?;
+    let source = make_source(credentials.clone())?;
     let plan = if args.all_pages {
         PaginationPlan::all_pages()
     } else {
@@ -90,7 +129,7 @@ pub(crate) async fn run(
             &month_start,
             &month_end,
             plan,
-            args.continue_from.as_deref()
+            continuation.as_ref().map(|value| value.url.as_str())
         ),
         source.schedule(&month_start, &month_end)
     )?;
@@ -131,22 +170,41 @@ pub(crate) async fn run(
             to_worklog(entity.clone(), issue_key, now.timezone())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    let complete = next.is_none();
+    let totals_complete = continuation.is_none() && complete;
     let mut human = worklogs_table(
         selected.date,
         &worklogs,
         &details,
         args.verbose,
         &config.aliases,
+        totals_complete,
     );
-    if next.is_some() {
-        human.push_str(
-            "\nMore worklogs are available; use JSON pagination metadata to continue. Totals reflect this bounded segment.",
-        );
+    if !totals_complete {
+        if next.is_some() {
+            human.push_str(
+                "\nMore worklogs are available; use JSON pagination metadata to continue.",
+            );
+        }
+        human.push_str("\nTotals reflect this bounded segment.");
     }
     let records_retrieved = entities.len();
     let records_returned = worklogs.len();
-    let complete = next.is_none();
+    let next = next
+        .map(|url| {
+            encode_continuation(&ListContinuation {
+                version: 1,
+                selected_date: selected.date.to_string(),
+                month_start: month_start.clone(),
+                month_end: month_end.clone(),
+                url,
+            })
+        })
+        .transpose()?;
     let pagination = ListPagination {
+        selected_date: selected.date.to_string(),
+        month_start,
+        month_end,
         limit: plan.record_limit(),
         page_limit: plan.page_limit(),
         all_pages: plan.is_all_pages(),
@@ -155,6 +213,7 @@ pub(crate) async fn run(
         records_returned,
         next,
         complete,
+        totals_complete,
     };
     Ok(Rendered::new(
         json!({"date": selected.date, "worklogs": worklogs, "schedule": details, "pagination": pagination}),
@@ -191,6 +250,7 @@ fn worklogs_table(
     details: &ScheduleDetails,
     verbose: bool,
     aliases: &BTreeMap<String, String>,
+    totals_complete: bool,
 ) -> String {
     let mut table = Table::new();
     table
@@ -225,7 +285,11 @@ fn worklogs_table(
         details.month_current_period_duration,
         date.format("%A, %Y-%m-%d"),
         if worklogs.is_empty() {
-            "No worklogs".to_owned()
+            if totals_complete {
+                "No worklogs".to_owned()
+            } else {
+                "No worklogs in this retrieved segment".to_owned()
+            }
         } else {
             table.to_string()
         },
@@ -632,7 +696,10 @@ mod tests {
             requests: Arc::clone(&requests),
             failing_issues: Vec::new(),
             pagination_result: Some((
-                Some("https://api.tempo.io/4/worklogs?offset=2".to_owned()),
+                Some(
+                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2"
+                        .to_owned(),
+                ),
                 2,
             )),
         };
@@ -647,7 +714,14 @@ mod tests {
             ListArgs {
                 limit: 10,
                 page_limit: 2,
-                continue_from: Some("https://api.tempo.io/4/worklogs?offset=1".to_owned()),
+                continue_from: Some(encode_continuation(&ListContinuation {
+                    version: 1,
+                    selected_date: "2026-07-14".to_owned(),
+                    month_start: "2026-07-01".to_owned(),
+                    month_end: "2026-07-31".to_owned(),
+                    url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1"
+                        .to_owned(),
+                })?),
                 ..ListArgs::default()
             },
             |_| Ok(Box::new(fake)),
@@ -659,11 +733,19 @@ mod tests {
         assert_eq!(rendered.data["pagination"]["pagesRetrieved"], 2);
         assert_eq!(rendered.data["pagination"]["recordsRetrieved"], 1);
         assert_eq!(rendered.data["pagination"]["recordsReturned"], 1);
+        let next = rendered.data["pagination"]["next"]
+            .as_str()
+            .ok_or_else(|| CliError::Api("expected continuation token".to_owned()))?;
+        let next = decode_continuation(next)?;
+        assert_eq!(next.selected_date, "2026-07-14");
+        assert_eq!(next.month_start, "2026-07-01");
+        assert_eq!(next.month_end, "2026-07-31");
         assert_eq!(
-            rendered.data["pagination"]["next"],
-            "https://api.tempo.io/4/worklogs?offset=2"
+            next.url,
+            "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2"
         );
         assert_eq!(rendered.data["pagination"]["complete"], false);
+        assert_eq!(rendered.data["pagination"]["totalsComplete"], false);
         assert_eq!(rendered.data["schedule"]["dayLoggedDuration"], "1h");
         assert!(rendered
             .human
@@ -675,9 +757,59 @@ mod tests {
             requests.pagination,
             [(
                 PaginationPlan::bounded(10, 2),
-                Some("https://api.tempo.io/4/worklogs?offset=1".to_owned())
+                Some(
+                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1"
+                        .to_owned()
+                )
             )]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_continuation_keeps_totals_partial_and_qualifies_empty_human_output(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let fake = FakeListDataSource {
+            worklogs: Vec::new(),
+            schedule: Vec::new(),
+            requests: Arc::new(Mutex::new(Requests::default())),
+            failing_issues: Vec::new(),
+            pagination_result: Some((None, 1)),
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let rendered = run(
+            &path,
+            now,
+            ListArgs {
+                when: Some("2026-07-14".to_owned()),
+                continue_from: Some(encode_continuation(&ListContinuation {
+                    version: 1,
+                    selected_date: "2026-07-14".to_owned(),
+                    month_start: "2026-07-01".to_owned(),
+                    month_end: "2026-07-31".to_owned(),
+                    url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=100"
+                        .to_owned(),
+                })?),
+                ..ListArgs::default()
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await?;
+
+        assert_eq!(rendered.data["pagination"]["complete"], true);
+        assert_eq!(rendered.data["pagination"]["totalsComplete"], false);
+        assert!(rendered
+            .human
+            .contains("No worklogs in this retrieved segment"));
+        assert!(rendered
+            .human
+            .contains("Totals reflect this bounded segment"));
         Ok(())
     }
 
@@ -738,7 +870,7 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
 
-        let output = worklogs_table(date, &[worklog], &details, true, &BTreeMap::new());
+        let output = worklogs_table(date, &[worklog], &details, true, &BTreeMap::new(), true);
 
         assert!(output.contains("description"));
         assert!(output.contains("description visible"));

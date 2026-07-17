@@ -61,8 +61,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 ### Security
 
 - Validate caller-provided and server-provided Tempo continuation URLs before
-  authenticated requests, rejecting malformed, credential-bearing, and
-  cross-origin URLs without echoing them.
+  authenticated requests, rejecting malformed, credential-bearing,
+  cross-origin, and selected-month-mismatched URLs without echoing them or
+  rewriting opaque continuation queries.
 - Sanitize remote text before human terminal rendering to remove control,
   bidirectional override, and zero-width characters without changing JSON.
 - Restore terminal raw mode, alternate screen, cursor visibility, and bracketed

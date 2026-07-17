@@ -1,6 +1,7 @@
 use std::fs;
 
 use assert_cmd::Command;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -66,6 +67,23 @@ fn schema_accepts_null(schema: &Value, definitions: &Value) -> bool {
         .as_str()
         .and_then(|reference| reference.strip_prefix("#/$defs/"))
         .is_some_and(|name| schema_accepts_null(&definitions[name], definitions))
+}
+
+fn list_continuation(
+    selected_date: &str,
+    month_start: &str,
+    month_end: &str,
+    url: &str,
+) -> Result<String, serde_json::Error> {
+    Ok(
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "selectedDate": selected_date,
+            "monthStart": month_start,
+            "monthEnd": month_end,
+            "url": url,
+        }))?),
+    )
 }
 
 #[test]
@@ -866,6 +884,11 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(pagination["required"]
         .as_array()
         .is_some_and(|required| required.contains(&Value::String("next".to_owned()))));
+    for field in ["selectedDate", "monthStart", "monthEnd", "totalsComplete"] {
+        assert!(pagination["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&Value::String(field.to_owned()))));
+    }
     assert_eq!(
         contract["commands"]["list"]["behavior"]["pagination"]["defaultPageLimit"],
         1
@@ -953,6 +976,7 @@ fn list_help_documents_read_only_date_and_verbose_behavior(
     assert!(stdout.contains("--page-limit"));
     assert!(stdout.contains("[default: 1]"));
     assert!(stdout.contains("--continue-from"));
+    assert!(stdout.contains("opaque continuation token"));
     assert!(stdout.contains("--all-pages"));
     assert!(stdout.contains("100-page safety ceiling"));
     Ok(())
@@ -990,13 +1014,24 @@ fn unsafe_list_continuations_fail_before_configuration_or_networking(
     let directory = TempDir::new()?;
     let missing = directory.path().join("missing.json");
 
-    for continuation in [
-        "not-a-url",
-        "https://attacker.example/4/worklogs?page=2",
-        "https://user:password@api.tempo.io/4/worklogs?page=2",
-    ] {
+    let continuations = [
+        "not-a-token".to_owned(),
+        list_continuation(
+            "2026-07-14",
+            "2026-07-01",
+            "2026-07-31",
+            "https://attacker.example/4/worklogs?from=2026-07-01&to=2026-07-31",
+        )?,
+        list_continuation(
+            "2026-07-14",
+            "2026-07-01",
+            "2026-07-31",
+            "https://user:password@api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31",
+        )?,
+    ];
+    for continuation in continuations {
         let output = command(&missing)?
-            .args(["list", "--continue-from", continuation])
+            .args(["list", "2026-07-14", "--continue-from", &continuation])
             .output()?;
 
         assert_eq!(output.status.code(), Some(2));
@@ -1005,8 +1040,34 @@ fn unsafe_list_continuations_fail_before_configuration_or_networking(
         assert_eq!(error["error"]["code"], "invalid_input");
         assert!(!error["error"]["message"]
             .as_str()
-            .is_some_and(|message| message.contains(continuation)));
+            .is_some_and(|message| message.contains(&continuation)));
     }
+    Ok(())
+}
+
+#[test]
+fn list_continuations_for_another_selected_date_fail_before_configuration_or_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+    let continuation = list_continuation(
+        "2026-07-13",
+        "2026-07-01",
+        "2026-07-31",
+        "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=100",
+    )?;
+
+    let output = command(&missing)?
+        .args(["list", "2026-07-14", "--continue-from", &continuation])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["error"]["code"], "invalid_input");
+    assert!(!error["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains(&continuation)));
     Ok(())
 }
 

@@ -183,7 +183,7 @@ Jira or Tempo.
 drag list
 drag ls 2026-07-14 --verbose
 drag --output json list --limit 250 --page-limit 3
-drag --output json list --continue-from 'https://api.tempo.io/4/worklogs?...'
+drag --output json list 2026-07-14 --continue-from '<pagination.next>'
 drag --output json list --all-pages
 drag delete 123456 123457
 drag delete --json '{"worklogIds":[123456,123457]}' --dry-run
@@ -206,15 +206,19 @@ to human output without changing the JSON data shape. Retrieval is bounded by
 default to at most 100 Tempo records and one page. Use `--limit` (1–1000) and
 `--page-limit` (1–100) to choose another bounded segment. JSON results include
 `pagination.next`; pass that exact, opaque value to `--continue-from` to
-retrieve the next segment deterministically.
+retrieve the next segment deterministically, while repeating the result's
+`pagination.selectedDate` as `DATE`. Drag rejects continuations whose embedded
+month differs from the selected date and never rewrites the continuation URL.
 
 `--all-pages` is an explicit exhaustive mode and cannot be combined with an
 explicit `--limit` or `--page-limit`. It still requests finite 100-record pages
 and fails if Tempo provides more than 100 pages. Every result reports the
-effective limit, page limit, pages and records retrieved, selected-day records
-returned, continuation, and whether traversal is complete. Schedule totals
-are calculated from the retrieved calendar-month segment. When `complete` is
-false, those totals may be partial and human output says so.
+selected date and month range, effective limit, page limit, pages and records
+retrieved, selected-day records returned, continuation, and whether traversal
+is terminal. Schedule totals are calculated from the retrieved calendar-month
+segment. `totalsComplete` is true only when the command started at the first
+page and reached the terminal page; otherwise human output marks totals as
+partial even when a resumed segment has no further continuation.
 
 `delete` accepts ordered numeric IDs either positionally or in a camel-case
 JSON object through `--json`, with `-` reading from stdin. JSON payloads use

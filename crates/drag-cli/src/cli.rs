@@ -168,8 +168,8 @@ pub struct ListArgs {
         conflicts_with = "all_pages"
     )]
     pub page_limit: u16,
-    /// Resume from an exact continuation URL returned by a prior list result.
-    #[arg(long, value_name = "URL")]
+    /// Resume from the opaque continuation token returned by a prior list result.
+    #[arg(long, value_name = "TOKEN")]
     pub continue_from: Option<String>,
     /// Retrieve every page, subject to the 100-page safety ceiling.
     #[arg(long)]

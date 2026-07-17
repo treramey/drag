@@ -102,6 +102,12 @@ pub struct ClockInterval {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ListPagination {
+    /// Selected day to reuse when continuing this traversal.
+    pub selected_date: String,
+    /// Inclusive month boundary embedded in the continuation.
+    pub month_start: String,
+    /// Inclusive month boundary embedded in the continuation.
+    pub month_end: String,
     #[schemars(range(min = 1, max = 1_000))]
     pub limit: Option<usize>,
     #[schemars(range(min = 1, max = 100))]
@@ -111,8 +117,12 @@ pub struct ListPagination {
     pub pages_retrieved: u16,
     pub records_retrieved: usize,
     pub records_returned: usize,
+    /// Opaque Drag token accepted by `list --continue-from`.
     pub next: Option<String>,
+    /// Whether this segment reached a terminal Tempo page.
     pub complete: bool,
+    /// Whether schedule totals include the entire selected month.
+    pub totals_complete: bool,
 }
 
 #[cfg(test)]

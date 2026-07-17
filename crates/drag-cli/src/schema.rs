@@ -532,7 +532,8 @@ fn command_behavior(path: &str) -> Value {
                 "continuationOption": "continueFrom",
                 "allPagesOption": "allPages",
                 "allPagesSafetyCeiling": 100,
-                "boundedTotals": "schedule calculations use the retrieved segment; complete=false means totals may be partial"
+                "boundedTotals": "schedule calculations use the retrieved segment; totalsComplete reports whether they cover the whole month",
+                "selectionBinding": "continueFrom is an opaque token bound to the selected date and month range"
             }
         }),
         "setup" => json!({
