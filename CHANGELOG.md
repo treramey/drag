@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Structured ordered worklog deletion through inline or stdin JSON, sharing the
+  existing batch and dry-run behavior with positional IDs.
 - Ratatui onboarding for interactive setup, with masked token input,
   asynchronous connection progress, backward navigation, safe stored-token
   reuse and replacement, an explicit review-and-save step, an interruptible

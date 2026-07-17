@@ -3,16 +3,15 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use drag::models::{Worklog, WorklogEntity};
 use serde_json::json;
 
-use crate::api::ApiClient;
 use crate::cli::{
     AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, SetupArgs,
 };
 #[cfg(test)]
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
+use crate::delete::{self, ApiDeleteGateway};
 use crate::list::{self, ApiListDataSource};
 use crate::log::{self, ApiLogGateway};
 #[cfg(test)]
@@ -253,40 +252,10 @@ impl App {
     }
 
     pub async fn delete(&self, args: DeleteArgs) -> Result<Rendered, CliError> {
-        let config = Config::load(&self.path)?;
-        let credentials = config.credentials()?;
-        let api = ApiClient::new(credentials, self.debug)?;
-        let mut deleted = Vec::new();
-        for id in args.worklog_ids {
-            let entity = api.get_worklog(id).await?;
-            let issue_key = api.get_issue_key(&entity.issue.id).await?;
-            let worklog = self.to_worklog(entity, issue_key)?;
-            if !args.dry_run {
-                api.delete_worklog(id).await?;
-            }
-            deleted.push(worklog);
-        }
-        let human = deleted
-            .iter()
-            .map(|worklog| {
-                if args.dry_run {
-                    format!(
-                        "Would delete worklog {} ({} {}).",
-                        worklog.id, worklog.issue_key, worklog.duration
-                    )
-                } else {
-                    format!(
-                        "Deleted worklog {} ({} {}).",
-                        worklog.id, worklog.issue_key, worklog.duration
-                    )
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(Rendered::new(
-            json!({"dryRun": args.dry_run, "worklogs": deleted}),
-            human,
-        ))
+        delete::run(&self.path, self.timezone, args, |credentials| {
+            ApiDeleteGateway::new(credentials, self.debug)
+        })
+        .await
     }
 
     pub fn alias_set(&self, args: AliasSetArgs) -> Result<Rendered, CliError> {
@@ -299,10 +268,6 @@ impl App {
 
     pub fn alias_list(&self) -> Result<Rendered, CliError> {
         crate::alias::list(&self.path)
-    }
-
-    fn to_worklog(&self, entity: WorklogEntity, issue_key: String) -> Result<Worklog, CliError> {
-        log::to_worklog(entity, issue_key, self.timezone)
     }
 
     fn now(&self) -> DateTime<Tz> {

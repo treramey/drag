@@ -3,6 +3,7 @@ mod api;
 mod app;
 mod cli;
 mod config;
+mod delete;
 mod doctor;
 mod error;
 mod list;

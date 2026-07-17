@@ -157,11 +157,21 @@ pub struct ListArgs {
 #[derive(Debug, Args)]
 pub struct DeleteArgs {
     /// Numeric Tempo worklog IDs.
-    #[arg(required = true, num_args = 1..)]
+    #[arg(required_unless_present = "json", num_args = 1..)]
     pub worklog_ids: Vec<u64>,
+    /// Raw input JSON, or '-' to read it from stdin.
+    #[arg(long, conflicts_with = "worklog_ids")]
+    pub json: Option<String>,
     /// Show what would be deleted without changing Tempo.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteInput {
+    #[schemars(length(min = 1))]
+    pub worklog_ids: Vec<u64>,
 }
 
 #[derive(Debug, Args)]
