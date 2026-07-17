@@ -7,6 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Bounded `list` retrieval with finite record/page defaults, deterministic
+  continuation metadata, and explicit all-pages traversal under a hard
+  100-page ceiling.
 - Secret-free unattended setup dry-run plans with optional read-only Jira and
   Tempo verification and no configuration writes.
 - Structured ordered worklog deletion through inline or stdin JSON, sharing the
@@ -57,6 +60,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Security
 
+- Validate caller-provided and server-provided Tempo continuation URLs before
+  authenticated requests, rejecting malformed, credential-bearing, and
+  cross-origin URLs without echoing them.
 - Sanitize remote text before human terminal rendering to remove control,
   bidirectional override, and zero-width characters without changing JSON.
 - Restore terminal raw mode, alternate screen, cursor visibility, and bracketed

@@ -30,6 +30,7 @@ several peer submodules rather than a single implementation file.
 ## Modules
 
 - `drag::time`: duration/interval syntax, date selectors, DST behavior.
+- `drag::pagination`: deterministic bounded and exhaustive traversal plans.
 - `drag::schedule`: month/day required and logged totals.
 - `drag_cli::alias`: alias persistence and presentation.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
@@ -58,6 +59,9 @@ several peer submodules rather than a single implementation file.
 - Config parse errors are never converted into an empty config.
 - Config writes use mode `0600` on Unix and a temporary file before replace.
 - Authenticated pagination stays on `https://api.tempo.io`.
+- List retrieval defaults to 100 records and one page, exposes opaque
+  continuations, and requires explicit all-pages traversal; even all-pages
+  stops at 100 pages.
 - URL path identifiers reject separators, query fragments, percent escapes,
   and control characters.
 - Human terminal output strips control, bidirectional override, and zero-width

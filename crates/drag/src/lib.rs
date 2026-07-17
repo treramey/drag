@@ -1,6 +1,7 @@
 //! Core, I/O-independent behavior for the Drag CLI.
 
 pub mod models;
+pub mod pagination;
 pub mod schedule;
 pub mod time;
 

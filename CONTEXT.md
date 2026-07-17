@@ -8,4 +8,7 @@
 - Exit `2` means the request must be corrected; exit `1` means config,
   network, server, or local I/O failed.
 - Use `--verbose` only when descriptions and issue URLs are needed.
+- Keep `list` bounded: start with its 100-record/one-page defaults, then pass
+  `pagination.next` unchanged to `--continue-from`. Use `--all-pages` only for
+  intentional exhaustive reads; it still stops at the 100-page ceiling.
 - Never request, print, or copy values from the stored token fields.

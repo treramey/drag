@@ -6,13 +6,14 @@ use std::pin::Pin;
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
-use drag::models::{ScheduleEntity, Worklog, WorklogEntity};
+use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
+use drag::pagination::PaginationPlan;
 use drag::schedule::{create_schedule_details, ScheduleDetails};
 use drag::time::{clock_interval, format_duration, month_bounds, select_date};
 use serde_json::json;
 use url::Url;
 
-use crate::api::ApiClient;
+use crate::api::{validate_tempo_continuation_input, ApiClient, WorklogPage};
 use crate::cli::ListArgs;
 use crate::config::{Config, Credentials};
 use crate::{CliError, Rendered};
@@ -20,7 +21,13 @@ use crate::{CliError, Rendered};
 type ListFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
 
 pub(crate) trait ListDataSource: Send + Sync {
-    fn worklogs<'a>(&'a self, from: &'a str, to: &'a str) -> ListFuture<'a, Vec<WorklogEntity>>;
+    fn worklogs<'a>(
+        &'a self,
+        from: &'a str,
+        to: &'a str,
+        plan: PaginationPlan,
+        continue_from: Option<&'a str>,
+    ) -> ListFuture<'a, WorklogPage>;
     fn schedule<'a>(&'a self, from: &'a str, to: &'a str) -> ListFuture<'a, Vec<ScheduleEntity>>;
     fn issue_key<'a>(&'a self, issue_id: &'a str) -> ListFuture<'a, String>;
 }
@@ -38,8 +45,14 @@ impl ApiListDataSource {
 }
 
 impl ListDataSource for ApiListDataSource {
-    fn worklogs<'a>(&'a self, from: &'a str, to: &'a str) -> ListFuture<'a, Vec<WorklogEntity>> {
-        Box::pin(self.api.get_worklogs(from, to))
+    fn worklogs<'a>(
+        &'a self,
+        from: &'a str,
+        to: &'a str,
+        plan: PaginationPlan,
+        continue_from: Option<&'a str>,
+    ) -> ListFuture<'a, WorklogPage> {
+        Box::pin(self.api.get_worklogs_bounded(from, to, plan, continue_from))
     }
 
     fn schedule<'a>(&'a self, from: &'a str, to: &'a str) -> ListFuture<'a, Vec<ScheduleEntity>> {
@@ -57,6 +70,9 @@ pub(crate) async fn run(
     args: ListArgs,
     make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
 ) -> Result<Rendered, CliError> {
+    if let Some(continuation) = args.continue_from.as_deref() {
+        validate_tempo_continuation_input(continuation)?;
+    }
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
     let selected = select_date(now, args.when.as_deref())?;
@@ -64,10 +80,25 @@ pub(crate) async fn run(
     let (month_start, month_end) = month_bounds(selected.date);
     let month_start = month_start.to_string();
     let month_end = month_end.to_string();
-    let (entities, schedule) = tokio::try_join!(
-        source.worklogs(&month_start, &month_end),
+    let plan = if args.all_pages {
+        PaginationPlan::all_pages()
+    } else {
+        PaginationPlan::bounded(usize::from(args.limit), args.page_limit)
+    };
+    let (page, schedule) = tokio::try_join!(
+        source.worklogs(
+            &month_start,
+            &month_end,
+            plan,
+            args.continue_from.as_deref()
+        ),
         source.schedule(&month_start, &month_end)
     )?;
+    let WorklogPage {
+        results: entities,
+        next,
+        pages_retrieved,
+    } = page;
     let details = create_schedule_details(
         &entities,
         &schedule,
@@ -100,15 +131,33 @@ pub(crate) async fn run(
             to_worklog(entity.clone(), issue_key, now.timezone())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let human = worklogs_table(
+    let mut human = worklogs_table(
         selected.date,
         &worklogs,
         &details,
         args.verbose,
         &config.aliases,
     );
+    if next.is_some() {
+        human.push_str(
+            "\nMore worklogs are available; use JSON pagination metadata to continue. Totals reflect this bounded segment.",
+        );
+    }
+    let records_retrieved = entities.len();
+    let records_returned = worklogs.len();
+    let complete = next.is_none();
+    let pagination = ListPagination {
+        limit: plan.record_limit(),
+        page_limit: plan.page_limit(),
+        all_pages: plan.is_all_pages(),
+        pages_retrieved,
+        records_retrieved,
+        records_returned,
+        next,
+        complete,
+    };
     Ok(Rendered::new(
-        json!({"date": selected.date, "worklogs": worklogs, "schedule": details}),
+        json!({"date": selected.date, "worklogs": worklogs, "schedule": details, "pagination": pagination}),
         human,
     ))
 }
@@ -220,6 +269,7 @@ mod tests {
     #[derive(Default)]
     struct Requests {
         worklogs: Vec<(String, String)>,
+        pagination: Vec<(PaginationPlan, Option<String>)>,
         schedules: Vec<(String, String)>,
         issues: Vec<String>,
     }
@@ -229,6 +279,7 @@ mod tests {
         schedule: Vec<ScheduleEntity>,
         requests: Arc<Mutex<Requests>>,
         failing_issues: Vec<String>,
+        pagination_result: Option<(Option<String>, u16)>,
     }
 
     impl ListDataSource for FakeListDataSource {
@@ -236,13 +287,27 @@ mod tests {
             &'a self,
             from: &'a str,
             to: &'a str,
-        ) -> ListFuture<'a, Vec<WorklogEntity>> {
+            plan: PaginationPlan,
+            continue_from: Option<&'a str>,
+        ) -> ListFuture<'a, WorklogPage> {
             self.requests
                 .lock()
-                .map(|mut requests| requests.worklogs.push((from.to_owned(), to.to_owned())))
+                .map(|mut requests| {
+                    requests.worklogs.push((from.to_owned(), to.to_owned()));
+                    requests
+                        .pagination
+                        .push((plan, continue_from.map(str::to_owned)));
+                })
                 .ok();
             let worklogs = self.worklogs.clone();
-            Box::pin(async move { Ok(worklogs) })
+            let (next, pages_retrieved) = self.pagination_result.clone().unwrap_or((None, 1));
+            Box::pin(async move {
+                Ok(WorklogPage {
+                    results: worklogs,
+                    next,
+                    pages_retrieved,
+                })
+            })
         }
 
         fn schedule<'a>(
@@ -341,6 +406,7 @@ mod tests {
             }],
             requests: Arc::clone(&requests),
             failing_issues: vec!["10".to_owned()],
+            pagination_result: None,
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -353,6 +419,7 @@ mod tests {
             ListArgs {
                 when: None,
                 verbose: false,
+                ..ListArgs::default()
             },
             |_| Ok(Box::new(fake)),
         )
@@ -389,6 +456,7 @@ mod tests {
             schedule: Vec::new(),
             requests: Arc::clone(&requests),
             failing_issues: Vec::new(),
+            pagination_result: None,
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -401,6 +469,7 @@ mod tests {
             ListArgs {
                 when: Some("2026-07-01".to_owned()),
                 verbose: false,
+                ..ListArgs::default()
             },
             |_| Ok(Box::new(fake)),
         )
@@ -438,6 +507,7 @@ mod tests {
                 schedule: Vec::new(),
                 requests: Arc::clone(&requests),
                 failing_issues: Vec::new(),
+                pagination_result: None,
             };
             let rendered = run(
                 &path,
@@ -445,6 +515,7 @@ mod tests {
                 ListArgs {
                     when: selector.map(str::to_owned),
                     verbose: false,
+                    ..ListArgs::default()
                 },
                 |_| Ok(Box::new(fake)),
             )
@@ -484,6 +555,7 @@ mod tests {
             }],
             requests: Arc::clone(&requests),
             failing_issues: vec!["blocked".to_owned()],
+            pagination_result: None,
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -496,6 +568,7 @@ mod tests {
             ListArgs {
                 when: None,
                 verbose: false,
+                ..ListArgs::default()
             },
             |_| Ok(Box::new(fake)),
         )
@@ -543,6 +616,114 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn bounded_list_reports_continuation_and_preserves_schedule_calculations(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let requests = Arc::new(Mutex::new(Requests::default()));
+        let fake = FakeListDataSource {
+            worklogs: vec![worklog("visible", "2026-07-14", "me", "10")],
+            schedule: vec![ScheduleEntity {
+                date: "2026-07-14".to_owned(),
+                required_seconds: 28_800,
+                kind: "WORKING_DAY".to_owned(),
+            }],
+            requests: Arc::clone(&requests),
+            failing_issues: Vec::new(),
+            pagination_result: Some((
+                Some("https://api.tempo.io/4/worklogs?offset=2".to_owned()),
+                2,
+            )),
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let rendered = run(
+            &path,
+            now,
+            ListArgs {
+                limit: 10,
+                page_limit: 2,
+                continue_from: Some("https://api.tempo.io/4/worklogs?offset=1".to_owned()),
+                ..ListArgs::default()
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await?;
+
+        assert_eq!(rendered.data["pagination"]["limit"], 10);
+        assert_eq!(rendered.data["pagination"]["pageLimit"], 2);
+        assert_eq!(rendered.data["pagination"]["pagesRetrieved"], 2);
+        assert_eq!(rendered.data["pagination"]["recordsRetrieved"], 1);
+        assert_eq!(rendered.data["pagination"]["recordsReturned"], 1);
+        assert_eq!(
+            rendered.data["pagination"]["next"],
+            "https://api.tempo.io/4/worklogs?offset=2"
+        );
+        assert_eq!(rendered.data["pagination"]["complete"], false);
+        assert_eq!(rendered.data["schedule"]["dayLoggedDuration"], "1h");
+        assert!(rendered
+            .human
+            .contains("Totals reflect this bounded segment"));
+        let requests = requests
+            .lock()
+            .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
+        assert_eq!(
+            requests.pagination,
+            [(
+                PaginationPlan::bounded(10, 2),
+                Some("https://api.tempo.io/4/worklogs?offset=1".to_owned())
+            )]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn all_pages_uses_the_hard_ceiling_without_a_record_limit() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let requests = Arc::new(Mutex::new(Requests::default()));
+        let fake = FakeListDataSource {
+            worklogs: Vec::new(),
+            schedule: Vec::new(),
+            requests: Arc::clone(&requests),
+            failing_issues: Vec::new(),
+            pagination_result: Some((None, 4)),
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let rendered = run(
+            &path,
+            now,
+            ListArgs {
+                all_pages: true,
+                ..ListArgs::default()
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await?;
+
+        assert_eq!(
+            rendered.data["pagination"]["limit"],
+            serde_json::Value::Null
+        );
+        assert_eq!(rendered.data["pagination"]["pageLimit"], 100);
+        assert_eq!(rendered.data["pagination"]["allPages"], true);
+        assert_eq!(rendered.data["pagination"]["pagesRetrieved"], 4);
+        assert_eq!(rendered.data["pagination"]["complete"], true);
+        let requests = requests
+            .lock()
+            .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
+        assert_eq!(requests.pagination, [(PaginationPlan::all_pages(), None)]);
+        Ok(())
+    }
+
     #[test]
     fn verbose_table_adds_terminal_columns_without_changing_worklogs() -> Result<(), CliError> {
         let entity = worklog("visible", "2026-07-14", "me", "10");
@@ -575,6 +756,7 @@ mod tests {
             schedule: Vec::new(),
             requests: Arc::new(Mutex::new(Requests::default())),
             failing_issues: vec!["10".to_owned()],
+            pagination_result: None,
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -587,6 +769,7 @@ mod tests {
             ListArgs {
                 when: None,
                 verbose: false,
+                ..ListArgs::default()
             },
             |_| Ok(Box::new(fake)),
         )

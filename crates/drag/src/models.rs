@@ -98,6 +98,23 @@ pub struct ClockInterval {
     pub end_time: String,
 }
 
+/// Bounded traversal state emitted with list results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListPagination {
+    #[schemars(range(min = 1, max = 1_000))]
+    pub limit: Option<usize>,
+    #[schemars(range(min = 1, max = 100))]
+    pub page_limit: u16,
+    pub all_pages: bool,
+    #[schemars(range(min = 1, max = 100))]
+    pub pages_retrieved: u16,
+    pub records_retrieved: usize,
+    pub records_returned: usize,
+    pub next: Option<String>,
+    pub complete: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::WorklogEntity;

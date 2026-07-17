@@ -835,6 +835,41 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         assert_eq!(definition["additionalProperties"], false);
     }
     assert!(contract["commands"]["list"]["success"]["properties"]["worklogs"]["items"].is_object());
+    let list_arguments = contract["commands"]["list"]["arguments"]
+        .as_array()
+        .ok_or("list arguments are not an array")?;
+    let list_argument = |id: &str| list_arguments.iter().find(|argument| argument["id"] == id);
+    let limit = list_argument("limit").ok_or("missing list --limit")?;
+    assert_eq!(limit["type"], "unsignedInteger");
+    assert_eq!(limit["default"], 100);
+    assert_eq!(limit["minimum"], 1);
+    assert_eq!(limit["maximum"], 1000);
+    assert_eq!(limit["conflictsWith"], serde_json::json!(["allPages"]));
+    let page_limit = list_argument("page_limit").ok_or("missing list --page-limit")?;
+    assert_eq!(page_limit["type"], "unsignedInteger");
+    assert_eq!(page_limit["default"], 1);
+    assert_eq!(page_limit["minimum"], 1);
+    assert_eq!(page_limit["maximum"], 100);
+    assert!(list_argument("continue_from").is_some());
+    let all_pages = list_argument("all_pages").ok_or("missing list --all-pages")?;
+    assert_eq!(
+        all_pages["conflictsWith"],
+        serde_json::json!(["limit", "pageLimit"])
+    );
+    let pagination = &contract["$defs"]["ListPagination"];
+    assert_eq!(
+        contract["commands"]["list"]["success"]["properties"]["pagination"]["$ref"],
+        "#/$defs/ListPagination"
+    );
+    assert_eq!(pagination["additionalProperties"], false);
+    assert_eq!(pagination["properties"]["pageLimit"]["maximum"], 100);
+    assert!(pagination["required"]
+        .as_array()
+        .is_some_and(|required| required.contains(&Value::String("next".to_owned()))));
+    assert_eq!(
+        contract["commands"]["list"]["behavior"]["pagination"]["defaultPageLimit"],
+        1
+    );
     assert_eq!(
         contract["commands"]["setup"]["behavior"]["interactive"]["renderStream"],
         "stderr"
@@ -913,6 +948,65 @@ fn list_help_documents_read_only_date_and_verbose_behavior(
     assert!(stdout.contains("[DATE]"));
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("descriptions and Jira URLs"));
+    assert!(stdout.contains("--limit"));
+    assert!(stdout.contains("[default: 100]"));
+    assert!(stdout.contains("--page-limit"));
+    assert!(stdout.contains("[default: 1]"));
+    assert!(stdout.contains("--continue-from"));
+    assert!(stdout.contains("--all-pages"));
+    assert!(stdout.contains("100-page safety ceiling"));
+    Ok(())
+}
+
+#[test]
+fn invalid_list_bounds_and_incompatible_all_pages_fail_before_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+
+    for arguments in [
+        vec!["list", "--limit", "0"],
+        vec!["list", "--limit", "1001"],
+        vec!["list", "--page-limit", "0"],
+        vec!["list", "--page-limit", "101"],
+        vec!["list", "--all-pages", "--limit", "10"],
+        vec!["list", "--all-pages", "--page-limit", "2"],
+    ] {
+        let output = command(&missing)?.args(&arguments).output()?;
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["ok"], false, "{arguments:?}");
+        assert_eq!(error["error"]["code"], "usage", "{arguments:?}");
+        assert_ne!(error["error"]["code"], "config_error", "{arguments:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn unsafe_list_continuations_fail_before_configuration_or_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+
+    for continuation in [
+        "not-a-url",
+        "https://attacker.example/4/worklogs?page=2",
+        "https://user:password@api.tempo.io/4/worklogs?page=2",
+    ] {
+        let output = command(&missing)?
+            .args(["list", "--continue-from", continuation])
+            .output()?;
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["error"]["code"], "invalid_input");
+        assert!(!error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(continuation)));
+    }
     Ok(())
 }
 

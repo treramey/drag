@@ -182,6 +182,9 @@ Jira or Tempo.
 # Worklogs
 drag list
 drag ls 2026-07-14 --verbose
+drag --output json list --limit 250 --page-limit 3
+drag --output json list --continue-from 'https://api.tempo.io/4/worklogs?...'
+drag --output json list --all-pages
 drag delete 123456 123457
 drag delete --json '{"worklogIds":[123456,123457]}' --dry-run
 printf '%s' '{"worklogIds":[123456,123457]}' | drag delete --json -
@@ -199,9 +202,19 @@ drag alias:set lunch ABC-123
 
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
-to human output without changing the JSON data shape. The command loads the
-selected calendar month's worklogs and schedule, including both month
-boundaries, to calculate its daily and monthly totals.
+to human output without changing the JSON data shape. Retrieval is bounded by
+default to at most 100 Tempo records and one page. Use `--limit` (1–1000) and
+`--page-limit` (1–100) to choose another bounded segment. JSON results include
+`pagination.next`; pass that exact, opaque value to `--continue-from` to
+retrieve the next segment deterministically.
+
+`--all-pages` is an explicit exhaustive mode and cannot be combined with an
+explicit `--limit` or `--page-limit`. It still requests finite 100-record pages
+and fails if Tempo provides more than 100 pages. Every result reports the
+effective limit, page limit, pages and records retrieved, selected-day records
+returned, continuation, and whether traversal is complete. Schedule totals
+are calculated from the retrieved calendar-month segment. When `complete` is
+false, those totals may be partial and human output says so.
 
 `delete` accepts ordered numeric IDs either positionally or in a camel-case
 JSON object through `--json`, with `-` reading from stdin. JSON payloads use
