@@ -230,6 +230,9 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
     if let Some(required_unless) = required_unless(path, id) {
         contract["requiredUnlessPresent"] = json!(required_unless);
     }
+    if let Some(required_with) = required_with(path, id) {
+        contract["requires"] = json!(required_with);
+    }
     if let Some(default) = semantic_default(path, id) {
         contract["semanticDefault"] = json!(default);
     }
@@ -276,6 +279,14 @@ fn required_unless(path: &str, id: &str) -> Option<Vec<&'static str>> {
         ("delete", "worklog_ids") => Some(vec!["json"]),
         ("alias set" | "alias:set", "alias" | "issue_key") => Some(vec!["json"]),
         ("alias delete" | "alias:delete", "alias_name") => Some(vec!["json"]),
+        _ => None,
+    }
+}
+
+fn required_with(path: &str, id: &str) -> Option<Vec<&'static str>> {
+    match (path, id) {
+        ("setup", "dry_run") => Some(vec!["fromEnv"]),
+        ("setup", "verify") => Some(vec!["fromEnv", "dryRun"]),
         _ => None,
     }
 }
@@ -507,7 +518,8 @@ fn command_behavior(path: &str) -> Value {
                 "requiredEnvironment": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
                 "secretTransport": "environmentOnly",
                 "dryRun": "validateAndPlanWithoutWriting",
-                "dryRunVerification": "plannedUnlessVerifyIsSet"
+                "dryRunVerification": "plannedUnlessVerifyIsSet",
+                "verificationRequires": ["fromEnv", "dryRun"]
             },
             "browser": {
                 "default": "openEachTokenPageOnExplicitTokenStageEntry",
@@ -1094,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn safety_sensitive_command_variants_are_explicit() {
+    fn safety_sensitive_command_variants_are_explicit() -> Result<(), String> {
         let rendered = schema();
         let commands = &rendered.data["commands"];
         assert_eq!(commands["delete"]["sideEffects"]["atomic"], false);
@@ -1111,6 +1123,14 @@ mod tests {
             serde_json::json!(["verifyCredentials", "writeConfiguration"])
         );
         assert_eq!(commands["setup"]["dryRun"]["supported"], true);
+        let setup_arguments = commands["setup"]["arguments"]
+            .as_array()
+            .ok_or_else(|| "setup arguments must be an array".to_owned())?;
+        let verify = setup_arguments
+            .iter()
+            .find(|argument| argument["id"] == "verify")
+            .ok_or_else(|| "setup verify argument must be documented".to_owned())?;
+        assert_eq!(verify["requires"], serde_json::json!(["fromEnv", "dryRun"]));
         assert_eq!(
             commands["setup"]["networkAccess"]["fromEnvDryRun"],
             serde_json::json!({"browser": "none", "jira": "none", "tempo": "none"})
@@ -1128,6 +1148,7 @@ mod tests {
             commands["doctor"]["failureDetails"]["remote_check_failed"],
             commands["doctor"]["success"]
         );
+        Ok(())
     }
 
     #[test]

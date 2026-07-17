@@ -1110,11 +1110,17 @@ fn unattended_setup_rejects_argument_and_json_secret_transport_without_echoing_s
             "--atlassian-token",
             "argument-secret",
         ],
+        vec!["setup", "--from-env", "positional-secret"],
         vec![
             "setup",
             "--from-env",
             "--json",
             r#"{"atlassianToken":"json-secret","tempoToken":"json-tempo-secret"}"#,
+        ],
+        vec![
+            "setup",
+            "--from-env",
+            r#"--json={"atlassianToken":"equals-json-secret"}"#,
         ],
     ] {
         let directory = TempDir::new()?;
@@ -1126,6 +1132,8 @@ fn unattended_setup_rejects_argument_and_json_secret_transport_without_echoing_s
         assert!(!stderr.contains("argument-secret"));
         assert!(!stderr.contains("json-secret"));
         assert!(!stderr.contains("json-tempo-secret"));
+        assert!(!stderr.contains("positional-secret"));
+        assert!(!stderr.contains("equals-json-secret"));
         assert!(!path.exists());
     }
     Ok(())

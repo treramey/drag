@@ -2942,7 +2942,7 @@ async fn verified_environment_setup_dry_run_completes_read_only_checks_without_s
     existing_config().save(&path)?;
     let before = fs::read(&path)?;
     let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
-    let app = App::with_connection_verifier(
+    let mut app = App::with_connection_verifier(
         path.clone(),
         FakeVerifier {
             jira_error: None,
@@ -2951,9 +2951,25 @@ async fn verified_environment_setup_dry_run_completes_read_only_checks_without_s
             config_update: None,
         },
     );
+    app.connection_environment = Box::new(FakeConnectionEnvironment {
+        values: BTreeMap::from([
+            (
+                "ATLASSIAN_HOST".to_owned(),
+                "example.atlassian.net".to_owned(),
+            ),
+            ("ATLASSIAN_EMAIL".to_owned(), "new@example.com".to_owned()),
+            ("ATLASSIAN_TOKEN".to_owned(), "new-jira-token".to_owned()),
+            ("TEMPO_TOKEN".to_owned(), "new-tempo-token".to_owned()),
+        ]),
+    });
 
     let result = app
-        .plan_environment_setup(EnvironmentSetupPlan::new(setup_credentials()), true)
+        .setup(SetupArgs {
+            from_env: true,
+            no_open: false,
+            dry_run: true,
+            verify: true,
+        })
         .await?;
 
     assert_eq!(fs::read(path)?, before);
