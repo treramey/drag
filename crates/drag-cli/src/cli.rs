@@ -144,7 +144,7 @@ pub struct LogInput {
     pub remaining_estimate: Option<String>,
 }
 
-#[derive(Debug, Args)]
+#[derive(Debug, Args, Default)]
 pub struct ListArgs {
     /// Optional date (defaults to today): YYYY-MM-DD, y, yesterday, t±N, or today±N.
     #[arg(value_name = "DATE")]
@@ -152,6 +152,26 @@ pub struct ListArgs {
     /// Include descriptions and Jira URLs.
     #[arg(short, long)]
     pub verbose: bool,
+    /// Maximum worklogs to retrieve and return (1-1000; default: 100).
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u16).range(1..=1000),
+        conflicts_with = "all_pages"
+    )]
+    pub limit: Option<u16>,
+    /// Maximum Tempo pages to retrieve (1-100; default: 1).
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u16).range(1..=100),
+        conflicts_with = "all_pages"
+    )]
+    pub page_limit: Option<u16>,
+    /// Resume from the opaque continuation token returned by a prior list result.
+    #[arg(long, value_name = "TOKEN")]
+    pub continue_from: Option<String>,
+    /// Retrieve every page, subject to the 100-page safety ceiling.
+    #[arg(long)]
+    pub all_pages: bool,
 }
 
 #[derive(Debug, Args)]

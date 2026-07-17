@@ -1,6 +1,7 @@
 use std::fs;
 
 use assert_cmd::Command;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -66,6 +67,29 @@ fn schema_accepts_null(schema: &Value, definitions: &Value) -> bool {
         .as_str()
         .and_then(|reference| reference.strip_prefix("#/$defs/"))
         .is_some_and(|name| schema_accepts_null(&definitions[name], definitions))
+}
+
+fn list_continuation(
+    selected_date: &str,
+    month_start: &str,
+    month_end: &str,
+    url: &str,
+    limit: Option<u16>,
+    page_limit: u16,
+    all_pages: bool,
+) -> Result<String, serde_json::Error> {
+    Ok(
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
+            "version": 1,
+            "selectedDate": selected_date,
+            "monthStart": month_start,
+        "monthEnd": month_end,
+        "url": url,
+        "limit": limit,
+        "pageLimit": page_limit,
+        "allPages": all_pages,
+        }))?),
+    )
 }
 
 #[test]
@@ -835,6 +859,46 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         assert_eq!(definition["additionalProperties"], false);
     }
     assert!(contract["commands"]["list"]["success"]["properties"]["worklogs"]["items"].is_object());
+    let list_arguments = contract["commands"]["list"]["arguments"]
+        .as_array()
+        .ok_or("list arguments are not an array")?;
+    let list_argument = |id: &str| list_arguments.iter().find(|argument| argument["id"] == id);
+    let limit = list_argument("limit").ok_or("missing list --limit")?;
+    assert_eq!(limit["type"], "unsignedInteger");
+    assert_eq!(limit["default"], 100);
+    assert_eq!(limit["minimum"], 1);
+    assert_eq!(limit["maximum"], 1000);
+    assert_eq!(limit["conflictsWith"], serde_json::json!(["allPages"]));
+    let page_limit = list_argument("page_limit").ok_or("missing list --page-limit")?;
+    assert_eq!(page_limit["type"], "unsignedInteger");
+    assert_eq!(page_limit["default"], 1);
+    assert_eq!(page_limit["minimum"], 1);
+    assert_eq!(page_limit["maximum"], 100);
+    assert!(list_argument("continue_from").is_some());
+    let all_pages = list_argument("all_pages").ok_or("missing list --all-pages")?;
+    assert_eq!(
+        all_pages["conflictsWith"],
+        serde_json::json!(["limit", "pageLimit"])
+    );
+    let pagination = &contract["$defs"]["ListPagination"];
+    assert_eq!(
+        contract["commands"]["list"]["success"]["properties"]["pagination"]["$ref"],
+        "#/$defs/ListPagination"
+    );
+    assert_eq!(pagination["additionalProperties"], false);
+    assert_eq!(pagination["properties"]["pageLimit"]["maximum"], 100);
+    assert!(pagination["required"]
+        .as_array()
+        .is_some_and(|required| required.contains(&Value::String("next".to_owned()))));
+    for field in ["selectedDate", "monthStart", "monthEnd", "totalsComplete"] {
+        assert!(pagination["required"]
+            .as_array()
+            .is_some_and(|required| required.contains(&Value::String(field.to_owned()))));
+    }
+    assert_eq!(
+        contract["commands"]["list"]["behavior"]["pagination"]["defaultPageLimit"],
+        1
+    );
     assert_eq!(
         contract["commands"]["setup"]["behavior"]["interactive"]["renderStream"],
         "stderr"
@@ -913,6 +977,160 @@ fn list_help_documents_read_only_date_and_verbose_behavior(
     assert!(stdout.contains("[DATE]"));
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("descriptions and Jira URLs"));
+    assert!(stdout.contains("--limit"));
+    assert!(stdout.contains("default: 100"));
+    assert!(stdout.contains("--page-limit"));
+    assert!(stdout.contains("default: 1"));
+    assert!(stdout.contains("--continue-from"));
+    assert!(stdout.contains("opaque continuation token"));
+    assert!(stdout.contains("--all-pages"));
+    assert!(stdout.contains("100-page safety ceiling"));
+    Ok(())
+}
+
+#[test]
+fn invalid_list_bounds_and_incompatible_all_pages_fail_before_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+
+    for arguments in [
+        vec!["list", "--limit", "0"],
+        vec!["list", "--limit", "1001"],
+        vec!["list", "--page-limit", "0"],
+        vec!["list", "--page-limit", "101"],
+        vec!["list", "--all-pages", "--limit", "10"],
+        vec!["list", "--all-pages", "--page-limit", "2"],
+    ] {
+        let output = command(&missing)?.args(&arguments).output()?;
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}");
+        assert!(output.stdout.is_empty(), "{arguments:?}");
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["ok"], false, "{arguments:?}");
+        assert_eq!(error["error"]["code"], "usage", "{arguments:?}");
+        assert_ne!(error["error"]["code"], "config_error", "{arguments:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn unsafe_list_continuations_fail_before_configuration_or_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+
+    let continuations = [
+        "not-a-token".to_owned(),
+        list_continuation(
+            "2026-07-14",
+            "2026-07-01",
+            "2026-07-31",
+            "https://attacker.example/4/worklogs?from=2026-07-01&to=2026-07-31",
+            Some(100),
+            1,
+            false,
+        )?,
+        list_continuation(
+            "2026-07-14",
+            "2026-07-01",
+            "2026-07-31",
+            "https://user:password@api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31",
+            Some(100),
+            1,
+            false,
+        )?,
+    ];
+    for continuation in continuations {
+        let output = command(&missing)?
+            .args(["list", "2026-07-14", "--continue-from", &continuation])
+            .output()?;
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["error"]["code"], "invalid_input");
+        assert!(!error["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains(&continuation)));
+    }
+    Ok(())
+}
+
+#[test]
+fn list_continuations_for_another_selected_date_fail_before_configuration_or_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+    let continuation = list_continuation(
+        "2026-07-13",
+        "2026-07-01",
+        "2026-07-31",
+        "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=100",
+        Some(100),
+        1,
+        false,
+    )?;
+
+    let output = command(&missing)?
+        .args(["list", "2026-07-14", "--continue-from", &continuation])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["error"]["code"], "invalid_input");
+    assert!(!error["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains(&continuation)));
+    Ok(())
+}
+
+#[test]
+fn list_continuation_rejects_incompatible_explicit_bounds_before_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+    let continuation = list_continuation(
+        "2026-07-14",
+        "2026-07-01",
+        "2026-07-31",
+        "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&limit=250&offset=250",
+        Some(250),
+        3,
+        false,
+    )?;
+
+    for arguments in [
+        vec![
+            "list",
+            "2026-07-14",
+            "--continue-from",
+            &continuation,
+            "--limit",
+            "100",
+        ],
+        vec![
+            "list",
+            "2026-07-14",
+            "--continue-from",
+            &continuation,
+            "--page-limit",
+            "1",
+        ],
+        vec![
+            "list",
+            "2026-07-14",
+            "--continue-from",
+            &continuation,
+            "--all-pages",
+        ],
+    ] {
+        let output = command(&missing)?.args(arguments).output()?;
+        assert_eq!(output.status.code(), Some(2));
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["error"]["code"], "invalid_input");
+    }
     Ok(())
 }
 

@@ -182,6 +182,9 @@ Jira or Tempo.
 # Worklogs
 drag list
 drag ls 2026-07-14 --verbose
+drag --output json list --limit 250 --page-limit 3
+drag --output json list 2026-07-14 --continue-from '<pagination.next>'
+drag --output json list --all-pages
 drag delete 123456 123457
 drag delete --json '{"worklogIds":[123456,123457]}' --dry-run
 printf '%s' '{"worklogIds":[123456,123457]}' | drag delete --json -
@@ -199,9 +202,26 @@ drag alias:set lunch ABC-123
 
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
-to human output without changing the JSON data shape. The command loads the
-selected calendar month's worklogs and schedule, including both month
-boundaries, to calculate its daily and monthly totals.
+to human output without changing the JSON data shape. Retrieval is bounded by
+default to at most 100 Tempo records and one page. Use `--limit` (1–1000) and
+`--page-limit` (1–100) to choose another bounded segment. JSON results include
+`pagination.next`; pass that exact, opaque value to `--continue-from` to
+retrieve the next segment deterministically, while repeating the result's
+`pagination.selectedDate` as `DATE`. Drag rejects continuations whose embedded
+month differs from the selected date and never rewrites the continuation URL.
+The token also restores its original record/page plan when those options are
+omitted; explicitly supplied `--limit`, `--page-limit`, or `--all-pages` values
+must match the token or fail before networking.
+
+`--all-pages` is an explicit exhaustive mode and cannot be combined with an
+explicit `--limit` or `--page-limit`. It still requests finite 100-record pages
+and fails if Tempo provides more than 100 pages. Every result reports the
+selected date and month range, effective limit, page limit, pages and records
+retrieved, selected-day records returned, continuation, and whether traversal
+is terminal. Schedule totals are calculated from the retrieved calendar-month
+segment. `totalsComplete` is true only when the command started at the first
+page and reached the terminal page; otherwise human output marks totals as
+partial even when a resumed segment has no further continuation.
 
 `delete` accepts ordered numeric IDs either positionally or in a camel-case
 JSON object through `--json`, with `-` reading from stdin. JSON payloads use

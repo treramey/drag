@@ -98,6 +98,33 @@ pub struct ClockInterval {
     pub end_time: String,
 }
 
+/// Bounded traversal state emitted with list results.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListPagination {
+    /// Selected day to reuse when continuing this traversal.
+    pub selected_date: String,
+    /// Inclusive month boundary embedded in the continuation.
+    pub month_start: String,
+    /// Inclusive month boundary embedded in the continuation.
+    pub month_end: String,
+    #[schemars(range(min = 1, max = 1_000))]
+    pub limit: Option<usize>,
+    #[schemars(range(min = 1, max = 100))]
+    pub page_limit: u16,
+    pub all_pages: bool,
+    #[schemars(range(min = 1, max = 100))]
+    pub pages_retrieved: u16,
+    pub records_retrieved: usize,
+    pub records_returned: usize,
+    /// Opaque Drag token accepted by `list --continue-from`.
+    pub next: Option<String>,
+    /// Whether this segment reached a terminal Tempo page.
+    pub complete: bool,
+    /// Whether schedule totals include the entire selected month.
+    pub totals_complete: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::WorklogEntity;

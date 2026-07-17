@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use drag::models::{AddWorklogRequest, ScheduleEntity, WorklogEntity};
+use drag::pagination::{PaginationPlan, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
@@ -10,6 +11,25 @@ use crate::transport;
 use crate::{config::Credentials, CliError, RemoteError, RemoteErrorKind, RemoteService};
 
 const TEMPO_BASE: &str = "https://api.tempo.io/4/";
+
+pub(crate) fn validate_tempo_continuation_input(
+    value: &str,
+    from: &str,
+    to: &str,
+    plan: PaginationPlan,
+) -> Result<(), CliError> {
+    let origin = Url::parse(TEMPO_BASE)
+        .map_err(CliError::Url)?
+        .origin()
+        .ascii_serialization();
+    parse_tempo_continuation(value, &origin, from, to, plan)
+        .map(|_| ())
+        .map_err(|_| {
+            CliError::InvalidInput(
+                "continuation must be a Tempo pagination URL for the selected month".to_owned(),
+            )
+        })
+}
 
 pub struct ApiClient {
     client: Client,
@@ -29,6 +49,13 @@ struct Page<T> {
 #[derive(Debug, Default, Deserialize)]
 struct Metadata {
     next: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorklogPage {
+    pub(crate) results: Vec<WorklogEntity>,
+    pub(crate) next: Option<String>,
+    pub(crate) pages_retrieved: u16,
 }
 
 impl ApiClient {
@@ -82,39 +109,100 @@ impl ApiClient {
         self.empty(self.tempo(Method::DELETE, url)).await
     }
 
-    pub async fn get_worklogs(&self, from: &str, to: &str) -> Result<Vec<WorklogEntity>, CliError> {
+    #[cfg(test)]
+    async fn get_worklogs(&self, from: &str, to: &str) -> Result<Vec<WorklogEntity>, CliError> {
+        Ok(self
+            .get_worklogs_bounded(from, to, PaginationPlan::all_pages(), None)
+            .await?
+            .results)
+    }
+
+    pub(crate) async fn get_worklogs_bounded(
+        &self,
+        from: &str,
+        to: &str,
+        plan: PaginationPlan,
+        continue_from: Option<&str>,
+    ) -> Result<WorklogPage, CliError> {
         let account = safe_segment(&self.credentials.account_id)?;
-        let url = self
-            .tempo_base
-            .join(&format!("worklogs/user/{account}"))
-            .map_err(CliError::Url)?;
-        let first =
-            self.tempo(Method::GET, url)
-                .query(&[("from", from), ("to", to), ("limit", "1000")]);
-        let mut page: Page<WorklogEntity> = self.json(first).await?;
-        let mut results = std::mem::take(&mut page.results);
-        let mut next = page.metadata.next;
-        let mut pages = 1_u16;
-        while let Some(next_url) = next {
-            pages += 1;
-            if pages > 100 {
+        let mut url = match continue_from {
+            Some(continuation) => self.valid_tempo_continuation(continuation, from, to, plan)?,
+            None => self
+                .tempo_base
+                .join(&format!("worklogs/user/{account}"))
+                .map_err(CliError::Url)?,
+        };
+        let mut results = Vec::new();
+        let mut pages_retrieved = 0_u16;
+
+        loop {
+            let request_limit = plan.request_limit(results.len());
+            let request = self.tempo(Method::GET, url);
+            let request = if pages_retrieved == 0 && continue_from.is_none() {
+                request.query(&[
+                    ("from", from),
+                    ("to", to),
+                    ("limit", request_limit.to_string().as_str()),
+                ])
+            } else {
+                request
+            };
+            let mut page: Page<WorklogEntity> = self.json(request).await?;
+            if page.results.len() > request_limit {
                 return Err(CliError::Api(
-                    "Tempo pagination exceeded the 100-page safety limit".to_owned(),
+                    "Tempo returned more worklogs than the requested record limit".to_owned(),
                 ));
             }
-            let url = Url::parse(&next_url).map_err(|_| {
-                CliError::Api("Tempo returned a malformed pagination URL".to_owned())
-            })?;
-            if url.origin().ascii_serialization() != self.tempo_origin {
-                return Err(CliError::Api(
-                    "Tempo returned an unsafe pagination URL".to_owned(),
-                ));
-            }
-            let mut page: Page<WorklogEntity> = self.json(self.tempo(Method::GET, url)).await?;
             results.append(&mut page.results);
-            next = page.metadata.next;
+            pages_retrieved += 1;
+
+            let Some(next) = page.metadata.next else {
+                return Ok(WorklogPage {
+                    results,
+                    next: None,
+                    pages_retrieved,
+                });
+            };
+            let next_url = self.valid_tempo_continuation(&next, from, to, plan)?;
+            if !plan.should_follow(pages_retrieved, results.len()) {
+                if plan.is_all_pages() && pages_retrieved == HARD_PAGE_LIMIT {
+                    return Err(CliError::Api(
+                        "Tempo pagination exceeded the 100-page safety limit".to_owned(),
+                    ));
+                }
+                return Ok(WorklogPage {
+                    results,
+                    next: Some(next),
+                    pages_retrieved,
+                });
+            }
+            url = next_url;
         }
-        Ok(results)
+    }
+
+    fn valid_tempo_continuation(
+        &self,
+        value: &str,
+        from: &str,
+        to: &str,
+        plan: PaginationPlan,
+    ) -> Result<Url, CliError> {
+        parse_tempo_continuation(value, &self.tempo_origin, from, to, plan).map_err(|kind| {
+            match kind {
+                ContinuationError::Malformed => {
+                    CliError::Api("Tempo returned a malformed pagination URL".to_owned())
+                }
+                ContinuationError::Unsafe => {
+                    CliError::Api("Tempo returned an unsafe pagination URL".to_owned())
+                }
+                ContinuationError::Range => CliError::Api(
+                    "Tempo returned pagination for an unexpected date range".to_owned(),
+                ),
+                ContinuationError::Limit => CliError::Api(
+                    "Tempo returned pagination with an unsafe record limit".to_owned(),
+                ),
+            }
+        })
     }
 
     pub async fn get_schedule(
@@ -296,6 +384,55 @@ impl ApiClient {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ContinuationError {
+    Malformed,
+    Unsafe,
+    Range,
+    Limit,
+}
+
+fn parse_tempo_continuation(
+    value: &str,
+    expected_origin: &str,
+    expected_from: &str,
+    expected_to: &str,
+    plan: PaginationPlan,
+) -> Result<Url, ContinuationError> {
+    let url = Url::parse(value).map_err(|_| ContinuationError::Malformed)?;
+    if url.origin().ascii_serialization() != expected_origin
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return Err(ContinuationError::Unsafe);
+    }
+    let mut from = Vec::new();
+    let mut to = Vec::new();
+    let mut limits = Vec::new();
+    for (name, value) in url.query_pairs() {
+        match name.as_ref() {
+            "from" => from.push(value.into_owned()),
+            "to" => to.push(value.into_owned()),
+            "limit" => limits.push(value.into_owned()),
+            _ => {}
+        }
+    }
+    if from.as_slice() != [expected_from] || to.as_slice() != [expected_to] {
+        return Err(ContinuationError::Range);
+    }
+    let maximum = plan.record_limit().unwrap_or(DEFAULT_RECORD_LIMIT);
+    if limits
+        .first()
+        .filter(|_| limits.len() == 1)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|limit| *limit > 0 && *limit <= maximum)
+        .is_none()
+    {
+        return Err(ContinuationError::Limit);
+    }
+    Ok(url)
+}
+
 fn safe_segment(value: &str) -> Result<String, CliError> {
     if value.is_empty()
         || value.chars().any(|character| {
@@ -387,12 +524,12 @@ mod tests {
 
     use reqwest::{Client, Method, StatusCode};
     use url::Url;
-    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use drag::models::AddWorklogRequest;
 
-    use super::{api_error, safe_segment, ApiClient};
+    use super::{api_error, safe_segment, ApiClient, PaginationPlan};
     use crate::{config::Credentials, CliError};
 
     fn credentials() -> Credentials {
@@ -597,7 +734,10 @@ mod tests {
     async fn worklog_pagination_aggregates_pages_and_stops_at_terminal_page(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
-        let next = format!("{}/4/worklogs?page=2", server.uri());
+        let next = format!(
+            "{}/4/worklogs?page=2&from=2026-07-01&to=2026-07-31&limit=100",
+            server.uri()
+        );
         Mock::given(method("GET"))
             .and(path("/4/worklogs/user/account-1"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(
@@ -621,15 +761,171 @@ mod tests {
             .await;
         let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
 
-        let results = api.get_worklogs("2026-07-01", "2026-07-31").await?;
+        let page = api
+            .get_worklogs_bounded(
+                "2026-07-01",
+                "2026-07-31",
+                PaginationPlan::all_pages(),
+                None,
+            )
+            .await?;
 
         assert_eq!(
-            results
+            page.results
                 .iter()
                 .map(|worklog| worklog.tempo_worklog_id.as_str())
                 .collect::<Vec<_>>(),
             ["1", "2"]
         );
+        assert_eq!(page.pages_retrieved, 2);
+        assert!(page.next.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bounded_worklog_pagination_stops_at_the_page_limit_and_returns_the_continuation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/4/worklogs?page=2&from=2026-07-01&to=2026-07-31&limit=10",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .and(query_param("limit", "10"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"results":[{}],"metadata":{{"next":"{next}"}}}}"#,
+                    worklog("1")
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let page = api
+            .get_worklogs_bounded(
+                "2026-07-01",
+                "2026-07-31",
+                PaginationPlan::bounded(10, 1)?,
+                None,
+            )
+            .await?;
+
+        assert_eq!(page.results.len(), 1);
+        assert_eq!(page.pages_retrieved, 1);
+        assert_eq!(page.next.as_deref(), Some(next.as_str()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bounded_worklog_pagination_stops_at_the_record_limit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/4/worklogs?page=2&from=2026-07-01&to=2026-07-31&limit=1",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .and(query_param("limit", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"results":[{}],"metadata":{{"next":"{next}"}}}}"#,
+                    worklog("1")
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let page = api
+            .get_worklogs_bounded(
+                "2026-07-01",
+                "2026-07-31",
+                PaginationPlan::bounded(1, 3)?,
+                None,
+            )
+            .await?;
+
+        assert_eq!(page.results.len(), 1);
+        assert_eq!(page.pages_retrieved, 1);
+        assert_eq!(page.next.as_deref(), Some(next.as_str()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bounded_worklog_pagination_resumes_from_an_exact_continuation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs"))
+            .and(query_param("page", "2"))
+            .and(query_param("limit", "7"))
+            .and(query_param("from", "2026-07-01"))
+            .and(query_param("to", "2026-07-31"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(r#"{{"results":[{}],"metadata":{{}}}}"#, worklog("2")),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+        let continuation = format!(
+            "{}/4/worklogs?page=2&limit=7&from=2026-07-01&to=2026-07-31",
+            server.uri()
+        );
+
+        let page = api
+            .get_worklogs_bounded(
+                "2026-07-01",
+                "2026-07-31",
+                PaginationPlan::bounded(7, 1)?,
+                Some(&continuation),
+            )
+            .await?;
+
+        assert_eq!(page.results[0].tempo_worklog_id, "2");
+        assert_eq!(page.pages_retrieved, 1);
+        assert!(page.next.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn caller_continuations_are_validated_before_an_authenticated_request(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        for continuation in [
+            "https://[tempo-secret",
+            "https://attacker.example/worklogs?token=tempo-secret",
+            &format!("http://user:password@{}/4/worklogs", server.address()),
+            &format!(
+                "{}/4/worklogs?from=2026-07-01&to=2026-07-31&limit=250&offset=250",
+                server.uri()
+            ),
+        ] {
+            let error = api
+                .get_worklogs_bounded(
+                    "2026-07-01",
+                    "2026-07-31",
+                    PaginationPlan::bounded(10, 1)?,
+                    Some(continuation),
+                )
+                .await
+                .err()
+                .ok_or("unsafe caller continuation unexpectedly succeeded")?;
+
+            assert_eq!(error.exit_code(), 1);
+            assert!(!error.to_string().contains("tempo-secret"));
+            assert!(!error.to_string().contains("password"));
+        }
         Ok(())
     }
 
@@ -657,6 +953,44 @@ mod tests {
 
         assert!(error.to_string().contains("unsafe pagination URL"));
         assert!(!error.to_string().contains("tempo-secret"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worklog_pagination_rejects_continuations_for_another_month(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/4/worklogs?from=2026-06-01&to=2026-06-30&offset=100&limit=10",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"results":[{}],"metadata":{{"next":"{next}"}}}}"#,
+                    worklog("1")
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let error = api
+            .get_worklogs_bounded(
+                "2026-07-01",
+                "2026-07-31",
+                PaginationPlan::bounded(10, 1)?,
+                None,
+            )
+            .await
+            .err()
+            .ok_or("mismatched continuation unexpectedly succeeded")?;
+
+        assert!(error.to_string().contains("unexpected date range"));
+        assert!(!error.to_string().contains("2026-06"));
         Ok(())
     }
 
@@ -715,7 +1049,10 @@ mod tests {
     async fn worklog_pagination_retains_the_hundred_page_safety_limit(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
-        let next = format!("{}/4/worklogs?page=next", server.uri());
+        let next = format!(
+            "{}/4/worklogs?page=next&from=2026-07-01&to=2026-07-31&limit=100",
+            server.uri()
+        );
         let body = format!(r#"{{"results":[],"metadata":{{"next":"{next}"}}}}"#);
         Mock::given(method("GET"))
             .and(path("/4/worklogs/user/account-1"))

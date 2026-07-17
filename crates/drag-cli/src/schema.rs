@@ -1,5 +1,5 @@
 use clap::{Arg, ArgAction, Command, CommandFactory};
-use drag::models::{AddWorklogRequest, Worklog};
+use drag::models::{AddWorklogRequest, ListPagination, Worklog};
 use drag::schedule::ScheduleDetails;
 use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
 use serde_json::{json, Map, Value};
@@ -221,11 +221,17 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
     if defaults.len() == 1 {
         contract["default"] = if switch {
             json!(defaults[0] == "true")
+        } else if argument_type(path, argument, &possible_values) == "unsignedInteger" {
+            defaults[0]
+                .parse::<u64>()
+                .map_or_else(|_| json!(defaults[0]), |value| json!(value))
         } else {
             json!(defaults[0])
         };
     } else if !defaults.is_empty() {
         contract["default"] = json!(defaults);
+    } else if let Some(default) = documented_default(path, id) {
+        contract["default"] = default;
     }
     if let Some(required_unless) = required_unless(path, id) {
         contract["requiredUnlessPresent"] = json!(required_unless);
@@ -235,6 +241,10 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
     }
     if let Some(default) = semantic_default(path, id) {
         contract["semanticDefault"] = json!(default);
+    }
+    if let Some((minimum, maximum)) = numeric_bounds(path, id) {
+        contract["minimum"] = json!(minimum);
+        contract["maximum"] = json!(maximum);
     }
     if id == "json" {
         let input_schema = match path {
@@ -252,10 +262,20 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
     contract
 }
 
+fn documented_default(path: &str, id: &str) -> Option<Value> {
+    match (path, id) {
+        ("list", "limit") => Some(json!(100)),
+        ("list", "page_limit") => Some(json!(1)),
+        _ => None,
+    }
+}
+
 fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'static str {
     if is_switch(argument) {
         "boolean"
-    } else if path == "delete" && argument.get_id() == "worklog_ids" {
+    } else if (path == "delete" && argument.get_id() == "worklog_ids")
+        || (path == "list" && matches!(argument.get_id().as_str(), "limit" | "page_limit"))
+    {
         "unsignedInteger"
     } else if argument.get_id() == "config" {
         "path"
@@ -263,6 +283,14 @@ fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'st
         "enum"
     } else {
         "string"
+    }
+}
+
+fn numeric_bounds(path: &str, id: &str) -> Option<(u64, u64)> {
+    match (path, id) {
+        ("list", "limit") => Some((1, 1_000)),
+        ("list", "page_limit") => Some((1, 100)),
+        _ => None,
     }
 }
 
@@ -364,8 +392,13 @@ fn command_semantics(path: &str) -> CommandSemantics {
         },
         "list" => CommandSemantics {
             success: object_schema(
-                &["date", "worklogs", "schedule"],
-                json!({"date": {"type": "string", "format": "date"}, "worklogs": {"type": "array", "items": schema_ref("Worklog")}, "schedule": schema_ref("ScheduleDetails")}),
+                &["date", "worklogs", "schedule", "pagination"],
+                json!({
+                    "date": {"type": "string", "format": "date"},
+                    "worklogs": {"type": "array", "items": schema_ref("Worklog")},
+                    "schedule": schema_ref("ScheduleDetails"),
+                    "pagination": schema_ref("ListPagination")
+                }),
             ),
             error_codes: [remote_errors, vec!["invalid_date"]].concat(),
             side_effects: json!({"default": []}),
@@ -502,7 +535,16 @@ fn command_behavior(path: &str) -> Value {
         }),
         "list" => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
-            "verbose": "adds descriptions and Jira URLs to human output only"
+            "verbose": "adds descriptions and Jira URLs to human output only",
+            "pagination": {
+                "defaultRecordLimit": 100,
+                "defaultPageLimit": 1,
+                "continuationOption": "continueFrom",
+                "allPagesOption": "allPages",
+                "allPagesSafetyCeiling": 100,
+                "boundedTotals": "schedule calculations use the retrieved segment; totalsComplete reports whether they cover the whole month",
+                "selectionBinding": "continueFrom is an opaque token bound to the selected date, month range, and effective pagination plan; omitted bounds are restored and explicit mismatches fail before networking"
+            }
         }),
         "setup" => json!({
             "interactive": {
@@ -571,6 +613,7 @@ fn shared_definitions() -> Value {
     add_definition::<Worklog>(&mut definitions, "Worklog");
     add_definition::<AddWorklogRequest>(&mut definitions, "AddWorklogRequest");
     add_definition::<ScheduleDetails>(&mut definitions, "ScheduleDetails");
+    add_serialization_definition::<ListPagination>(&mut definitions, "ListPagination");
     add_serialization_definition::<AliasSetResult>(&mut definitions, "AliasSetResult");
     add_serialization_definition::<AliasDeleteResult>(&mut definitions, "AliasDeleteResult");
     Value::Object(definitions)

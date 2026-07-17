@@ -126,3 +126,9 @@ impl CliError {
         })
     }
 }
+
+impl From<drag::pagination::PaginationError> for CliError {
+    fn from(error: drag::pagination::PaginationError) -> Self {
+        Self::InvalidInput(error.to_string())
+    }
+}
