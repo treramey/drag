@@ -207,6 +207,15 @@ Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 output stays machine-readable.
 
+`drag --output json schema` emits the versioned CLI contract. Schema version 2
+includes the installed CLI version and every command, nested subcommand,
+shortcut, and hidden compatibility form. Arguments report their types,
+cardinality, defaults, enums, conditional requirements, and conflicts. Each
+command also describes its JSON success data, possible structured error codes,
+side effects, network access, and dry-run behavior. The `log --json` argument
+contains a nested JSON Schema generated from the same serde input type used at
+runtime, while command and option metadata is read from Clap's command model.
+
 | Exit | Meaning |
 |---:|---|
 | `0` | Success |

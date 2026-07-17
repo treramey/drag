@@ -1,6 +1,7 @@
 //! Worklog schedule summaries.
 
 use chrono::NaiveDate;
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
@@ -9,7 +10,7 @@ use crate::{
 };
 
 /// Month/day duration totals shown by `drag list`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleDetails {
     pub month_required_duration: String,

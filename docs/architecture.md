@@ -40,7 +40,8 @@ several peer submodules rather than a single implementation file.
 - `drag_cli::doctor`: local diagnostics and optional remote connection checks.
 - `drag_cli::error`: typed process and remote-service failures.
 - `drag_cli::output`: JSON envelopes, stream selection, and terminal-safe text.
-- `drag_cli::schema`: the machine-readable command contract.
+- `drag_cli::schema`: the versioned machine contract, derived from Clap command
+  metadata and schemars schemas for shared serde input and result models.
 - `drag_cli::setup`: setup state and connection verification.
 - `drag_cli::setup_tui`: Ratatui rendering, Crossterm events, and the
   stderr terminal lifecycle for interactive setup.

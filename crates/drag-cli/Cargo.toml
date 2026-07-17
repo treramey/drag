@@ -26,6 +26,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm",
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 tachyonfx = { version = "0.25.1", default-features = false, features = ["sendable", "std-duration"] }
 drag = { version = "0.1.0", path = "../drag" }
 thiserror.workspace = true

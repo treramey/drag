@@ -328,170 +328,110 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     let output = command(&path)?.arg("schema").output()?;
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
+    let contract = &body["data"];
+    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(contract["output"]["successStream"], "stdout");
+    assert_eq!(contract["output"]["errorStream"], "stderr");
+    assert_eq!(contract["errors"]["codes"]["usage"], 2);
+    assert_eq!(contract["errors"]["codes"]["api_error"], 1);
+
+    for name in [
+        "log",
+        "list",
+        "delete",
+        "setup",
+        "alias",
+        "completions",
+        "doctor",
+        "schema",
+        "help",
+        "alias:set",
+        "alias:list",
+        "alias:delete",
+    ] {
+        let command = &contract["commands"][name];
+        assert!(command.is_object(), "missing command {name}");
+        assert!(
+            command["errorCodes"].is_array(),
+            "missing errors for {name}"
+        );
+        assert!(
+            command["sideEffects"].is_object(),
+            "missing effects for {name}"
+        );
+        assert!(
+            command["networkAccess"].is_object(),
+            "missing network contract for {name}"
+        );
+        assert!(
+            command["dryRun"].is_object(),
+            "missing dry-run contract for {name}"
+        );
+    }
+    for subcommand in ["set", "list", "delete", "help"] {
+        assert!(contract["commands"]["alias"]["subcommands"][subcommand].is_object());
+    }
+
     assert_eq!(
-        body["data"]["commands"]["log"],
-        serde_json::json!({
-            "aliases": ["l"],
-            "sideEffects": true,
-            "networkAccess": {"jira": "read", "tempo": "write"},
-            "mutation": "createTempoWorklog",
-            "arguments": [
-                {"name": "issueKeyOrAlias", "requiredUnless": "json"},
-                {"name": "durationOrInterval", "requiredUnless": "json"},
-                {
-                    "name": "when",
-                    "required": false,
-                    "default": "todayInConfiguredLocalTimeZone"
-                }
-            ],
-            "durationOrInterval": {
-                "durationSyntax": ["15m", "1h", "1h15m"],
-                "intervalSyntax": ["11-14", "11-14:30", "11:35-14:20", "11.35-14.20"],
-                "overnight": "endAtOrBeforeStartUsesNextLocalDay"
-            },
-            "date": {
-                "required": false,
-                "default": "todayInConfiguredLocalTimeZone",
-                "syntax": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"]
-            },
-            "flags": {
-                "description": {"short": "d", "value": "string"},
-                "start": {"short": "s", "value": "HH:mm", "appliesTo": "duration"},
-                "remainingEstimate": {
-                    "short": "r",
-                    "value": "duration",
-                    "syntax": ["15m", "1h", "1h15m"]
-                },
-                "debug": {
-                    "global": true,
-                    "output": "humanStderr",
-                    "credentials": "redacted"
-                }
-            },
-            "rawJson": true,
-            "rawJsonInput": {
-                "stdinValue": "-",
-                "denyUnknownFields": true,
-                "fields": [
-                    "issueKeyOrAlias",
-                    "durationOrInterval",
-                    "when",
-                    "description",
-                    "start",
-                    "remainingEstimate"
-                ]
-            },
-            "dryRun": true,
-            "dryRunBehavior": {"sideEffects": false, "networkAccess": false}
-        })
+        contract["commands"]["log"]["aliases"],
+        serde_json::json!(["l"])
     );
     assert_eq!(
-        body["data"]["commands"]["list"]["aliases"],
+        contract["commands"]["list"]["aliases"],
         serde_json::json!(["ls"])
     );
-    assert_eq!(body["data"]["commands"]["list"]["sideEffects"], false);
     assert_eq!(
-        body["data"]["commands"]["list"]["networkAccess"],
+        contract["commands"]["delete"]["aliases"],
+        serde_json::json!(["d"])
+    );
+    assert_eq!(
+        contract["commands"]["completions"]["aliases"],
+        serde_json::json!(["autocomplete"])
+    );
+    assert_eq!(contract["commands"]["alias:set"]["hidden"], true);
+
+    let log_arguments = contract["commands"]["log"]["arguments"]
+        .as_array()
+        .ok_or("log arguments are not an array")?;
+    let json_input = log_arguments
+        .iter()
+        .find(|argument| argument["id"] == "json")
+        .ok_or("missing --json")?;
+    assert_eq!(json_input["stdinValue"], "-");
+    assert_eq!(json_input["jsonSchema"]["additionalProperties"], false);
+    assert_eq!(
+        json_input["jsonSchema"]["required"],
+        serde_json::json!(["issueKeyOrAlias", "durationOrInterval"])
+    );
+    assert_eq!(
+        json_input["conflictsWith"],
+        serde_json::json!([
+            "description",
+            "durationOrInterval",
+            "issueKeyOrAlias",
+            "remainingEstimate",
+            "start",
+            "when"
+        ])
+    );
+    assert_eq!(
+        contract["commands"]["log"]["dryRun"]["networkAccess"],
+        false
+    );
+    assert_eq!(
+        contract["commands"]["delete"]["dryRun"]["networkAccess"],
         "read-only"
     );
-    assert_eq!(body["data"]["commands"]["list"]["date"]["required"], false);
+    assert!(contract["commands"]["list"]["success"]["properties"]["worklogs"]["items"].is_object());
     assert_eq!(
-        body["data"]["commands"]["list"]["date"]["default"],
-        "todayInConfiguredLocalTimeZone"
-    );
-    assert_eq!(body["data"]["commands"]["list"]["verbose"], true);
-    assert_eq!(body["data"]["commands"]["setup"]["interactive"], true);
-    assert_eq!(
-        body["data"]["commands"]["setup"]["interactiveInterface"],
-        "ratatui"
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["interactiveRendering"],
+        contract["commands"]["setup"]["behavior"]["interactive"]["renderStream"],
         "stderr"
     );
     assert_eq!(
-        body["data"]["commands"]["setup"]["interactiveTerminalRequired"],
-        true
+        contract["commands"]["doctor"]["networkAccess"]["default"],
+        serde_json::json!({})
     );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["interactiveStages"],
-        serde_json::json!([
-            "jiraAccountDetails",
-            "atlassianApiToken",
-            "tempoAccount",
-            "reviewAndSave"
-        ])
-    );
-    assert_eq!(body["data"]["commands"]["setup"]["sideEffects"], true);
-    assert_eq!(
-        body["data"]["commands"]["setup"]["reducedMotionEnvironment"],
-        "DRAG_REDUCED_MOTION"
-    );
-    assert_eq!(body["data"]["commands"]["setup"]["fromEnv"], true);
-    assert_eq!(
-        body["data"]["commands"]["setup"]["fromEnvInteractive"],
-        false
-    );
-    assert_eq!(body["data"]["commands"]["setup"]["noOpen"], true);
-    assert_eq!(
-        body["data"]["commands"]["setup"]["fromEnvRequired"],
-        serde_json::json!([
-            "ATLASSIAN_HOST",
-            "ATLASSIAN_EMAIL",
-            "ATLASSIAN_TOKEN",
-            "TEMPO_TOKEN"
-        ])
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["accountId"]["setup"],
-        "derivedFromVerifiedJiraUser"
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["accountId"]["runtimeCompatibilityEnvironment"],
-        "TEMPO_ACCOUNT_ID"
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["browser"]["default"],
-        "openEachTokenPageOnExplicitTokenStageEntry"
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["browser"]["beforeTokenStage"],
-        false
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["browser"]["fromEnv"],
-        false
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["browser"]["noOpen"],
-        "printLinksWithoutOpening"
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["writesConfiguration"],
-        "onceAfterVerification"
-    );
-    assert_eq!(
-        body["data"]["commands"]["setup"]["preservesConfiguration"],
-        serde_json::json!(["aliases"])
-    );
-    assert_eq!(
-        body["data"]["commands"]["doctor"]["defaultNetworkAccess"],
-        false
-    );
-    assert_eq!(body["data"]["commands"]["doctor"]["remote"], true);
-    assert_eq!(
-        body["data"]["commands"]["doctor"]["remoteNetworkAccess"],
-        "read-only"
-    );
-    assert_eq!(
-        body["data"]["commands"]["doctor"]["remoteChecks"],
-        serde_json::json!({"jira": "read-only", "tempo": "read-only"})
-    );
-    assert_eq!(
-        body["data"]["commands"]["doctor"]["failureExitCodes"]["remoteFailure"],
-        1
-    );
-    assert_eq!(body["data"]["schemaVersion"], 1);
     Ok(())
 }
 

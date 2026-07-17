@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 #[derive(Debug, Parser)]
@@ -128,7 +129,7 @@ pub struct LogArgs {
     pub dry_run: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogInput {
     pub issue_key_or_alias: String,
