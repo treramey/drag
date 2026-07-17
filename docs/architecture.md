@@ -31,12 +31,20 @@ several peer submodules rather than a single implementation file.
 
 - `drag::time`: duration/interval syntax, date selectors, DST behavior.
 - `drag::schedule`: month/day required and logged totals.
+- `drag_cli::alias`: alias persistence and presentation.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
-- `drag_cli::api`: authentication, pagination, endpoint validation.
+- `drag_cli::api`: authenticated Jira/Tempo requests, pagination, and response
+  decoding.
+- `drag_cli::transport`: shared HTTP client policy and bounded retries for
+  idempotent reads.
+- `drag_cli::doctor`: local diagnostics and optional remote connection checks.
+- `drag_cli::error`: typed process and remote-service failures.
+- `drag_cli::output`: JSON envelopes, stream selection, and terminal-safe text.
+- `drag_cli::schema`: the machine-readable command contract.
 - `drag_cli::setup`: setup state and connection verification.
 - `drag_cli::setup_tui`: Ratatui rendering, Crossterm events, and the
   stderr terminal lifecycle for interactive setup.
-- `drag_cli::app`: use-case orchestration.
+- `drag_cli::app`: dependency composition and thin use-case routing.
 
 ## Safety invariants
 
@@ -48,6 +56,10 @@ several peer submodules rather than a single implementation file.
 - Authenticated pagination stays on `https://api.tempo.io`.
 - URL path identifiers reject separators, query fragments, percent escapes,
   and control characters.
+- Human terminal output strips control, bidirectional override, and zero-width
+  characters from remote text; JSON preserves source data.
+- Only idempotent reads retry transient transport failures and retryable HTTP
+  statuses; mutations are attempted once.
 - Mutating worklog operations support `--dry-run`.
 
 ## Adding behavior

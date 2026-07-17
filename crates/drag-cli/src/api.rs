@@ -6,7 +6,8 @@ use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use url::Url;
 
-use crate::{config::Credentials, CliError};
+use crate::transport;
+use crate::{config::Credentials, CliError, RemoteError, RemoteErrorKind, RemoteService};
 
 const TEMPO_BASE: &str = "https://api.tempo.io/4/";
 
@@ -44,12 +45,7 @@ impl ApiClient {
         debug: bool,
         tempo_base: Url,
     ) -> Result<Self, CliError> {
-        let client = Client::builder()
-            .user_agent(concat!("drag/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(CliError::Http)?;
+        let client = transport::shared_client()?;
         let tempo_origin = tempo_base.origin().ascii_serialization();
         Ok(Self {
             client,
@@ -235,34 +231,52 @@ impl ApiClient {
 
     async fn json<T: DeserializeOwned>(&self, builder: RequestBuilder) -> Result<T, CliError> {
         let request = builder.build().map_err(CliError::Http)?;
+        let service = RemoteService::from_url(request.url());
         if self.debug {
             eprintln!("debug: {} {}", request.method(), request.url());
         }
-        let response = self.client.execute(request).await.map_err(CliError::Http)?;
+        let response = transport::execute(&self.client, request).await?;
         let status = response.status();
         let bytes = response.bytes().await.map_err(CliError::Http)?;
         if self.debug {
             eprintln!("debug: response {status}");
         }
         if !status.is_success() {
-            return Err(api_error(status, &bytes, &self.redaction_secrets()));
+            return Err(api_error_for_service(
+                service,
+                status,
+                &bytes,
+                &self.redaction_secrets(),
+            ));
         }
-        serde_json::from_slice(&bytes)
-            .map_err(|error| CliError::Api(format!("server returned malformed JSON: {error}")))
+        serde_json::from_slice(&bytes).map_err(|error| {
+            CliError::Remote(RemoteError {
+                service,
+                status: Some(status),
+                kind: RemoteErrorKind::InvalidResponse,
+                message: format!("returned malformed JSON: {error}"),
+            })
+        })
     }
 
     async fn empty(&self, builder: RequestBuilder) -> Result<(), CliError> {
         let request = builder.build().map_err(CliError::Http)?;
+        let service = RemoteService::from_url(request.url());
         if self.debug {
             eprintln!("debug: {} {}", request.method(), request.url());
         }
-        let response = self.client.execute(request).await.map_err(CliError::Http)?;
+        let response = transport::execute(&self.client, request).await?;
         let status = response.status();
         let bytes = response.bytes().await.map_err(CliError::Http)?;
         if status.is_success() {
             Ok(())
         } else {
-            Err(api_error(status, &bytes, &self.redaction_secrets()))
+            Err(api_error_for_service(
+                service,
+                status,
+                &bytes,
+                &self.redaction_secrets(),
+            ))
         }
     }
 
@@ -297,11 +311,19 @@ fn safe_segment(value: &str) -> Result<String, CliError> {
     Ok(value.to_owned())
 }
 
-fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
+fn api_error_for_service(
+    service: RemoteService,
+    status: StatusCode,
+    body: &[u8],
+    secrets: &[String],
+) -> CliError {
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        return CliError::Authentication(format!(
-            "{status}; credentials are invalid, expired, or lack access"
-        ));
+        return CliError::Remote(RemoteError {
+            service,
+            status: Some(status),
+            kind: RemoteErrorKind::Authentication,
+            message: format!("returned {status}; credentials are invalid, expired, or lack access"),
+        });
     }
     let parsed: Option<Value> = serde_json::from_slice(body).ok();
     let details = parsed
@@ -341,20 +363,32 @@ fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
         }
         value
     };
-    match details {
-        Some(details) => CliError::Api(format!("server returned {status}: {}", redact(details))),
-        None => CliError::Api(format!("server returned {status}")),
-    }
+    let message = match details {
+        Some(details) => format!("returned {status}: {}", redact(details)),
+        None => format!("returned {status}"),
+    };
+    CliError::Remote(RemoteError {
+        service,
+        status: Some(status),
+        kind: RemoteErrorKind::Rejected,
+        message,
+    })
+}
+
+#[cfg(test)]
+fn api_error(status: StatusCode, body: &[u8], secrets: &[String]) -> CliError {
+    api_error_for_service(RemoteService::Unknown, status, body, secrets)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use reqwest::{Client, Method, StatusCode};
     use url::Url;
     use wiremock::matchers::{body_json, header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
     use drag::models::AddWorklogRequest;
 
@@ -393,6 +427,23 @@ mod tests {
         }
     }
 
+    struct TransientThenSuccess {
+        calls: AtomicUsize,
+        success_body: String,
+    }
+
+    impl Respond for TransientThenSuccess {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                ResponseTemplate::new(StatusCode::SERVICE_UNAVAILABLE)
+                    .append_header("retry-after", "0")
+            } else {
+                ResponseTemplate::new(StatusCode::OK)
+                    .set_body_raw(self.success_body.clone(), "application/json")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn add_worklog_posts_one_authenticated_request_with_the_configured_author(
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -418,6 +469,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn idempotent_reads_retry_transient_server_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(TransientThenSuccess {
+                calls: AtomicUsize::new(0),
+                success_body: r#"{"results":[],"metadata":{}}"#.to_owned(),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let worklogs = api.get_worklogs("2026-07-01", "2026-07-31").await?;
+
+        assert!(worklogs.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mutations_are_not_retried_on_transient_server_failures(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/4/worklogs"))
+            .respond_with(ResponseTemplate::new(StatusCode::SERVICE_UNAVAILABLE))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let error = api
+            .add_worklog(add_worklog_request())
+            .await
+            .err()
+            .ok_or("mutation unexpectedly succeeded")?;
+
+        assert!(matches!(error, CliError::Remote(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn add_worklog_server_failure_is_redacted_and_classified_as_runtime_failure(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let server = MockServer::start().await;
@@ -438,7 +532,7 @@ mod tests {
             .err()
             .ok_or("server failure unexpectedly succeeded")?;
 
-        assert!(matches!(&error, CliError::Api(_)));
+        assert!(matches!(&error, CliError::Remote(_)));
         assert_eq!(error.exit_code(), 1);
         assert!(!error.to_string().contains("tempo-secret"));
         assert!(!error.to_string().contains("jira-secret"));
@@ -464,7 +558,7 @@ mod tests {
             .err()
             .ok_or("malformed response unexpectedly succeeded")?;
 
-        assert!(matches!(&error, CliError::Api(_)));
+        assert!(matches!(&error, CliError::Remote(_)));
         assert_eq!(error.exit_code(), 1);
         Ok(())
     }
@@ -612,7 +706,7 @@ mod tests {
             .err()
             .ok_or("malformed response unexpectedly succeeded")?;
 
-        assert!(matches!(&error, CliError::Api(_)));
+        assert!(matches!(&error, CliError::Remote(_)));
         assert_eq!(error.exit_code(), 1);
         Ok(())
     }
@@ -676,10 +770,7 @@ mod tests {
     #[test]
     fn classifies_authentication_statuses_as_correctable_credentials() {
         for status in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
-            assert!(matches!(
-                api_error(status, b"", &[]),
-                CliError::Authentication(_)
-            ));
+            assert!(api_error(status, b"", &[]).is_authentication());
         }
     }
 
@@ -706,7 +797,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "API request failed: server returned 400 Bad Request: rejected [REDACTED]"
+            "API request failed: remote service returned 400 Bad Request: rejected [REDACTED]"
         );
     }
 

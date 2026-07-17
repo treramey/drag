@@ -30,6 +30,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Fixed
 
+- Centralize CLI errors, output, schema, diagnostics, aliases, and HTTP policy
+  behind owned modules; reuse pooled HTTP connections and retry only
+  idempotent reads after bounded transient failures.
 - Lock down the mutating `log`/`l` contract: duration, interval, date, start,
   description, and remaining-estimate inputs; DST-aware overnight intervals;
   network-free dry runs; ordered Jira-to-Tempo creation; structured failures;
@@ -45,6 +48,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Security
 
+- Sanitize remote text before human terminal rendering to remove control,
+  bidirectional override, and zero-width characters without changing JSON.
 - Restore terminal raw mode, alternate screen, cursor visibility, and bracketed
   paste after onboarding success, cancellation, errors, and panics.
 - Keep Ratatui rendering on standard error so successful JSON output remains

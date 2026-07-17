@@ -508,7 +508,7 @@ impl<'a> OnboardingWorkflow<'a> {
                 self.stage = OnboardingStage::Tempo;
                 Ok(ConnectionOutcome::Connected)
             }
-            Err(error @ CliError::Authentication(_)) => Ok(ConnectionOutcome::Rejected(error)),
+            Err(error) if error.is_authentication() => Ok(ConnectionOutcome::Rejected(error)),
             Err(error) => Err(error),
         }
     }
@@ -541,7 +541,7 @@ impl<'a> OnboardingWorkflow<'a> {
                 self.stage = OnboardingStage::Complete;
                 Ok(ConnectionOutcome::Connected)
             }
-            Err(error @ CliError::Authentication(_)) => Ok(ConnectionOutcome::Rejected(error)),
+            Err(error) if error.is_authentication() => Ok(ConnectionOutcome::Rejected(error)),
             Err(error) => Err(error),
         }
     }
