@@ -235,9 +235,9 @@ shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
 command also describes its JSON success data, possible structured error codes,
 side effects, network access, and dry-run behavior. The `--json` arguments for
-log and alias mutations contain nested JSON Schemas generated from the same
-serde input types used at runtime, while command and option metadata is read
-from Clap's command model.
+log, worklog deletion, and alias mutations contain nested JSON Schemas generated
+from the same serde input types used at runtime, while command and option
+metadata is read from Clap's command model.
 
 | Exit | Meaning |
 |---:|---|

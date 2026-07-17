@@ -91,6 +91,7 @@ fn delete_json_rejects_invalid_batches_before_configuration_or_network_access(
             vec!["delete", "--json", r#"{"worklogIds":["123"]}"#],
             "invalid_json",
         ),
+        (vec!["delete", "--json", r#"[[123,456]]"#], "invalid_json"),
         (
             vec!["delete", "--json", r#"{"worklogIds":[123],"extra":true}"#],
             "invalid_json",

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use chrono_tz::Tz;
 use drag::models::WorklogEntity;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::api::ApiClient;
 use crate::cli::{DeleteArgs, DeleteInput};
@@ -96,7 +96,14 @@ fn delete_input(args: DeleteArgs) -> Result<(DeleteInput, bool), CliError> {
         } else {
             raw
         };
-        serde_json::from_str(&raw)?
+        let value: Value = serde_json::from_str(&raw)?;
+        if !value.is_object() {
+            return Err(CliError::Json(serde_json::Error::io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "delete JSON input must be an object",
+            ))));
+        }
+        serde_json::from_value(value)?
     } else {
         DeleteInput {
             worklog_ids: args.worklog_ids,
