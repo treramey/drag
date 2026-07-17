@@ -34,3 +34,17 @@ On Unix, saved configuration is restricted to the current user. Tokens are
 excluded from human and JSON results, errors, diagnostics, and TUI review
 screens. Treat the config file and environment variables as secrets despite
 those output protections.
+
+## Remote-content rendering
+
+Treat worklog descriptions, issue identifiers, Jira URLs, and API error details
+as untrusted data. Drag preserves those values in structured JSON, where the
+JSON serializer escapes them as string contents. In human and TUI output, Drag
+renders control characters, line breaks, tabs, bidirectional formatting, and
+zero-width characters as visible escapes so a remote value cannot add a row,
+warning, diagnostic, or terminal control sequence.
+
+Generated labels such as `error:`, `warning:`, and table column headings remain
+outside escaped remote values. This boundary is syntactic: Drag does not claim
+to detect the meaning of prose or prevent semantic prompt injection. Consumers
+must continue treating every remote string as data rather than instructions.

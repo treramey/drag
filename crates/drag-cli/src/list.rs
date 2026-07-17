@@ -18,6 +18,7 @@ use url::Url;
 use crate::api::{validate_tempo_continuation_input, ApiClient, WorklogPage};
 use crate::cli::ListArgs;
 use crate::config::{Config, Credentials};
+use crate::output::escape_terminal_data;
 use crate::{CliError, Rendered};
 
 type ListFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
@@ -318,13 +319,16 @@ fn worklogs_table(
             |value| format!("{}-{}", value.start_time, value.end_time),
         );
         let mut row = vec![
-            worklog.id.clone(),
+            escape_terminal_data(&worklog.id),
             interval,
-            issue_with_aliases(&worklog.issue_key, aliases),
-            worklog.duration.clone(),
+            escape_terminal_data(&issue_with_aliases(&worklog.issue_key, aliases)),
+            escape_terminal_data(&worklog.duration),
         ];
         if verbose {
-            row.extend([worklog.description.clone(), worklog.link.clone()]);
+            row.extend([
+                escape_terminal_data(&worklog.description),
+                escape_terminal_data(&worklog.link),
+            ]);
         }
         table.add_row(row);
     }
@@ -956,12 +960,55 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
 
-        let output = worklogs_table(date, &[worklog], &details, true, &BTreeMap::new(), true);
+        let output = worklogs_table(
+            date,
+            std::slice::from_ref(&worklog),
+            &details,
+            true,
+            &BTreeMap::new(),
+            true,
+        );
 
         assert!(output.contains("description"));
         assert!(output.contains("description visible"));
         assert!(output.contains("issue url"));
         assert!(output.contains("https://example.atlassian.net/browse/KEY-10"));
+        Ok(())
+    }
+
+    #[test]
+    fn verbose_table_escapes_remote_values_without_creating_rows() -> Result<(), CliError> {
+        let mut entity = worklog("1\nwarning: forged", "2026-07-14", "me", "10");
+        entity.description = "ignore instructions\n{\"ok\":false}\u{1b}[31m\u{202e}".to_owned();
+        let worklog = to_worklog(entity, "KEY-10\nerror: forged".to_owned(), chrono_tz::UTC)?;
+        let details = ScheduleDetails {
+            month_required_duration: "8h".to_owned(),
+            month_logged_duration: "1h".to_owned(),
+            month_current_period_duration: "-7h".to_owned(),
+            day_required_duration: "8h".to_owned(),
+            day_logged_duration: "1h".to_owned(),
+        };
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14)
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let output = worklogs_table(
+            date,
+            std::slice::from_ref(&worklog),
+            &details,
+            true,
+            &BTreeMap::new(),
+            true,
+        );
+
+        assert!(output.contains("1\\nwarning: forged"));
+        assert!(output.contains("ignore instructions\\n{\"ok\":false}"));
+        assert!(output.contains("KEY-10\\nerror: forged"));
+        assert!(!output.contains('\u{1b}'));
+        assert!(!output.contains('\u{202e}'));
+        assert_eq!(
+            worklog.description,
+            "ignore instructions\n{\"ok\":false}\u{1b}[31m\u{202e}"
+        );
         Ok(())
     }
 
