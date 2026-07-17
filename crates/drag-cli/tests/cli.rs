@@ -45,6 +45,29 @@ fn configured_file(directory: &TempDir) -> Result<std::path::PathBuf, std::io::E
     Ok(path)
 }
 
+fn schema_accepts_null(schema: &Value, definitions: &Value) -> bool {
+    if schema["type"] == "null"
+        || schema["type"]
+            .as_array()
+            .is_some_and(|types| types.iter().any(|kind| kind == "null"))
+    {
+        return true;
+    }
+    for keyword in ["anyOf", "oneOf"] {
+        if schema[keyword].as_array().is_some_and(|variants| {
+            variants
+                .iter()
+                .any(|variant| schema_accepts_null(variant, definitions))
+        }) {
+            return true;
+        }
+    }
+    schema["$ref"]
+        .as_str()
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .is_some_and(|name| schema_accepts_null(&definitions[name], definitions))
+}
+
 #[test]
 fn reports_version() -> Result<(), Box<dyn std::error::Error>> {
     Command::cargo_bin("drag")?
@@ -108,6 +131,7 @@ fn alias_set_inputs_normalize_to_the_same_dry_run_without_writing_config(
     assert_eq!(stdin["data"], positional["data"]);
     assert_eq!(positional["data"]["dryRun"], true);
     assert_eq!(positional["data"]["action"], "create");
+    assert!(positional["data"]["previousIssueKey"].is_null());
     assert_eq!(fs::read(&path)?, before);
     Ok(())
 }
@@ -217,6 +241,7 @@ fn alias_delete_inputs_share_a_plan_and_dry_run_preserves_config_bytes(
     assert_eq!(unchanged["data"]["action"], "unchanged");
     assert_eq!(unchanged["data"]["deleted"], false);
     assert_eq!(unchanged["data"]["dryRun"], false);
+    assert!(unchanged["data"]["issueKey"].is_null());
     assert_eq!(fs::read(&preview_path)?, initial);
     Ok(())
 }
@@ -250,6 +275,14 @@ fn alias_json_conflicts_and_unknown_fields_fail_before_config_writes(
                 "--json",
                 r#"{"alias":"lunch","issueKey":"ABC-1","issueKye":"ABC-2"}"#,
             ],
+            "invalid_json",
+        ),
+        (
+            vec!["alias", "set", "--json", r#"["lunch","ABC-1"]"#],
+            "invalid_json",
+        ),
+        (
+            vec!["alias", "delete", "--json", r#"["lunch"]"#],
             "invalid_json",
         ),
         (
@@ -704,9 +737,15 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         ("AliasSetResult", "previousIssueKey"),
         ("AliasDeleteResult", "issueKey"),
     ] {
-        assert!(contract["$defs"][result]["required"]
+        let definition = &contract["$defs"][result];
+        assert!(definition["required"]
             .as_array()
             .is_some_and(|required| required.contains(&Value::String(nullable_field.to_owned()))));
+        assert!(schema_accepts_null(
+            &definition["properties"][nullable_field],
+            &contract["$defs"]
+        ));
+        assert_eq!(definition["additionalProperties"], false);
     }
     assert!(contract["commands"]["list"]["success"]["properties"]["worklogs"]["items"].is_object());
     assert_eq!(

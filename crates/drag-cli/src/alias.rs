@@ -2,8 +2,9 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::cli::{AliasDeleteArgs, AliasDeleteInput, AliasSetArgs, AliasSetInput};
 use crate::config::Config;
@@ -47,7 +48,7 @@ pub(crate) fn list(path: &Path) -> Result<Rendered, CliError> {
 fn set_input(args: AliasSetArgs) -> Result<(AliasSetInput, bool), CliError> {
     let dry_run = args.dry_run;
     let input = if let Some(raw) = args.json {
-        serde_json::from_str(&raw_input(raw)?)?
+        structured_input(raw)?
     } else {
         AliasSetInput {
             alias: args
@@ -64,7 +65,7 @@ fn set_input(args: AliasSetArgs) -> Result<(AliasSetInput, bool), CliError> {
 fn delete_input(args: AliasDeleteArgs) -> Result<(AliasDeleteInput, bool), CliError> {
     let dry_run = args.dry_run;
     let input = if let Some(raw) = args.json {
-        serde_json::from_str(&raw_input(raw)?)?
+        structured_input(raw)?
     } else {
         AliasDeleteInput {
             alias: args
@@ -84,6 +85,17 @@ fn raw_input(raw: String) -> Result<String, CliError> {
     Ok(input)
 }
 
+fn structured_input<T: DeserializeOwned>(raw: String) -> Result<T, CliError> {
+    let value: Value = serde_json::from_str(&raw_input(raw)?)?;
+    if !value.is_object() {
+        return Err(CliError::Json(serde_json::Error::io(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "alias JSON input must be an object",
+        ))));
+    }
+    Ok(serde_json::from_value(value)?)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum SetAliasAction {
@@ -100,12 +112,11 @@ struct SetAliasPlan {
 }
 
 #[derive(Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AliasSetResult {
     alias: String,
     issue_key: String,
     action: SetAliasAction,
-    #[schemars(required)]
     previous_issue_key: Option<String>,
     dry_run: bool,
 }
@@ -181,11 +192,10 @@ struct DeleteAliasPlan {
 }
 
 #[derive(Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct AliasDeleteResult {
     alias: String,
     deleted: bool,
-    #[schemars(required)]
     issue_key: Option<String>,
     action: DeleteAliasAction,
     dry_run: bool,

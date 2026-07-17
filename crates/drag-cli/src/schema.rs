@@ -1,7 +1,7 @@
 use clap::{Arg, ArgAction, Command, CommandFactory};
 use drag::models::{AddWorklogRequest, Worklog};
 use drag::schedule::ScheduleDetails;
-use schemars::{schema_for, JsonSchema};
+use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
 use serde_json::{json, Map, Value};
 
 use crate::alias::{AliasDeleteResult, AliasSetResult};
@@ -527,6 +527,13 @@ fn json_schema<T: JsonSchema>() -> Value {
     json!(schema_for!(T))
 }
 
+fn serialization_schema<T: JsonSchema>() -> Value {
+    let generator = SchemaSettings::draft2020_12()
+        .for_serialize()
+        .into_generator();
+    json!(generator.into_root_schema_for::<T>())
+}
+
 fn schema_ref(name: &str) -> Value {
     json!({"$ref": format!("#/$defs/{name}")})
 }
@@ -536,13 +543,20 @@ fn shared_definitions() -> Value {
     add_definition::<Worklog>(&mut definitions, "Worklog");
     add_definition::<AddWorklogRequest>(&mut definitions, "AddWorklogRequest");
     add_definition::<ScheduleDetails>(&mut definitions, "ScheduleDetails");
-    add_definition::<AliasSetResult>(&mut definitions, "AliasSetResult");
-    add_definition::<AliasDeleteResult>(&mut definitions, "AliasDeleteResult");
+    add_serialization_definition::<AliasSetResult>(&mut definitions, "AliasSetResult");
+    add_serialization_definition::<AliasDeleteResult>(&mut definitions, "AliasDeleteResult");
     Value::Object(definitions)
 }
 
 fn add_definition<T: JsonSchema>(definitions: &mut Map<String, Value>, name: &str) {
-    let mut schema = json_schema::<T>();
+    add_schema_definition(definitions, name, json_schema::<T>());
+}
+
+fn add_serialization_definition<T: JsonSchema>(definitions: &mut Map<String, Value>, name: &str) {
+    add_schema_definition(definitions, name, serialization_schema::<T>());
+}
+
+fn add_schema_definition(definitions: &mut Map<String, Value>, name: &str, mut schema: Value) {
     if let Some(object) = schema.as_object_mut() {
         object.remove("$schema");
         if let Some(Value::Object(nested)) = object.remove("$defs") {
