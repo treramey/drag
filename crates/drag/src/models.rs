@@ -1,9 +1,10 @@
 //! Shared API and presentation models.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 /// Request body accepted by Tempo API v4 when creating a worklog.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AddWorklogRequest {
     pub issue_id: String,
@@ -77,7 +78,7 @@ pub struct ScheduleEntity {
 }
 
 /// Friendly worklog shape emitted by the CLI.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Worklog {
     pub id: String,
@@ -90,7 +91,7 @@ pub struct Worklog {
 }
 
 /// Human-readable start and end clock times.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ClockInterval {
     pub start_time: String,

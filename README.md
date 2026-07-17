@@ -185,6 +185,11 @@ to human output without changing the JSON data shape. The command loads the
 selected calendar month's worklogs and schedule, including both month
 boundaries, to calculate its daily and monthly totals.
 
+`delete` processes IDs sequentially in argument order and stops on the first
+error. Batch deletion is not atomic: worklogs deleted before a later failure
+remain deleted. Use `--dry-run` to perform the required reads and preview every
+target without deleting it.
+
 ### JSON and raw input
 
 Output defaults to human text in a terminal and JSON when redirected. Pin the
@@ -206,6 +211,15 @@ Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `{"ok":false,"error":{"code":"...","message":"..."}}`.
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 output stays machine-readable.
+
+`drag --output json schema` emits the versioned CLI contract. Schema version 2
+includes the installed CLI version and every command, nested subcommand,
+shortcut, and hidden compatibility form. Arguments report their types,
+cardinality, defaults, enums, conditional requirements, and conflicts. Each
+command also describes its JSON success data, possible structured error codes,
+side effects, network access, and dry-run behavior. The `log --json` argument
+contains a nested JSON Schema generated from the same serde input type used at
+runtime, while command and option metadata is read from Clap's command model.
 
 | Exit | Meaning |
 |---:|---|

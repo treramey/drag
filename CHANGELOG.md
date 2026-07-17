@@ -25,6 +25,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 - Tempo API v4 and Atlassian API v3 clients using Rustls.
 - Compatibility with the original map format.
 - Human/JSON output, structured errors, schema discovery, and diagnostics.
+- A complete versioned machine-readable CLI contract derived from Clap and
+  shared serde models, covering commands, compatibility forms, inputs, result
+  schemas, structured errors, side effects, network access, and dry runs.
 - Raw JSON input, environment-based headless setup, and mutation dry runs.
 - Cross-platform CI, dependency policy, audits, and release artifacts.
 
