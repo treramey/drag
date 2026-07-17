@@ -74,14 +74,20 @@ fn list_continuation(
     month_start: &str,
     month_end: &str,
     url: &str,
+    limit: Option<u16>,
+    page_limit: u16,
+    all_pages: bool,
 ) -> Result<String, serde_json::Error> {
     Ok(
         URL_SAFE_NO_PAD.encode(serde_json::to_vec(&serde_json::json!({
             "version": 1,
             "selectedDate": selected_date,
             "monthStart": month_start,
-            "monthEnd": month_end,
-            "url": url,
+        "monthEnd": month_end,
+        "url": url,
+        "limit": limit,
+        "pageLimit": page_limit,
+        "allPages": all_pages,
         }))?),
     )
 }
@@ -972,9 +978,9 @@ fn list_help_documents_read_only_date_and_verbose_behavior(
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("descriptions and Jira URLs"));
     assert!(stdout.contains("--limit"));
-    assert!(stdout.contains("[default: 100]"));
+    assert!(stdout.contains("default: 100"));
     assert!(stdout.contains("--page-limit"));
-    assert!(stdout.contains("[default: 1]"));
+    assert!(stdout.contains("default: 1"));
     assert!(stdout.contains("--continue-from"));
     assert!(stdout.contains("opaque continuation token"));
     assert!(stdout.contains("--all-pages"));
@@ -1021,12 +1027,18 @@ fn unsafe_list_continuations_fail_before_configuration_or_networking(
             "2026-07-01",
             "2026-07-31",
             "https://attacker.example/4/worklogs?from=2026-07-01&to=2026-07-31",
+            Some(100),
+            1,
+            false,
         )?,
         list_continuation(
             "2026-07-14",
             "2026-07-01",
             "2026-07-31",
             "https://user:password@api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31",
+            Some(100),
+            1,
+            false,
         )?,
     ];
     for continuation in continuations {
@@ -1055,6 +1067,9 @@ fn list_continuations_for_another_selected_date_fail_before_configuration_or_net
         "2026-07-01",
         "2026-07-31",
         "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=100",
+        Some(100),
+        1,
+        false,
     )?;
 
     let output = command(&missing)?
@@ -1068,6 +1083,54 @@ fn list_continuations_for_another_selected_date_fail_before_configuration_or_net
     assert!(!error["error"]["message"]
         .as_str()
         .is_some_and(|message| message.contains(&continuation)));
+    Ok(())
+}
+
+#[test]
+fn list_continuation_rejects_incompatible_explicit_bounds_before_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+    let continuation = list_continuation(
+        "2026-07-14",
+        "2026-07-01",
+        "2026-07-31",
+        "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&limit=250&offset=250",
+        Some(250),
+        3,
+        false,
+    )?;
+
+    for arguments in [
+        vec![
+            "list",
+            "2026-07-14",
+            "--continue-from",
+            &continuation,
+            "--limit",
+            "100",
+        ],
+        vec![
+            "list",
+            "2026-07-14",
+            "--continue-from",
+            &continuation,
+            "--page-limit",
+            "1",
+        ],
+        vec![
+            "list",
+            "2026-07-14",
+            "--continue-from",
+            &continuation,
+            "--all-pages",
+        ],
+    ] {
+        let output = command(&missing)?.args(arguments).output()?;
+        assert_eq!(output.status.code(), Some(2));
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["error"]["code"], "invalid_input");
+    }
     Ok(())
 }
 

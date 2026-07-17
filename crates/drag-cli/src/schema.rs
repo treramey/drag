@@ -230,6 +230,8 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
         };
     } else if !defaults.is_empty() {
         contract["default"] = json!(defaults);
+    } else if let Some(default) = documented_default(path, id) {
+        contract["default"] = default;
     }
     if let Some(required_unless) = required_unless(path, id) {
         contract["requiredUnlessPresent"] = json!(required_unless);
@@ -258,6 +260,14 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
         }
     }
     contract
+}
+
+fn documented_default(path: &str, id: &str) -> Option<Value> {
+    match (path, id) {
+        ("list", "limit") => Some(json!(100)),
+        ("list", "page_limit") => Some(json!(1)),
+        _ => None,
+    }
 }
 
 fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'static str {
@@ -533,7 +543,7 @@ fn command_behavior(path: &str) -> Value {
                 "allPagesOption": "allPages",
                 "allPagesSafetyCeiling": 100,
                 "boundedTotals": "schedule calculations use the retrieved segment; totalsComplete reports whether they cover the whole month",
-                "selectionBinding": "continueFrom is an opaque token bound to the selected date and month range"
+                "selectionBinding": "continueFrom is an opaque token bound to the selected date, month range, and effective pagination plan; omitted bounds are restored and explicit mismatches fail before networking"
             }
         }),
         "setup" => json!({

@@ -8,8 +8,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 ### Added
 
 - Bounded `list` retrieval with finite record/page defaults, deterministic
-  continuation metadata, and explicit all-pages traversal under a hard
-  100-page ceiling.
+  continuation metadata bound to the selected date and effective pagination
+  plan, and explicit all-pages traversal under a hard 100-page ceiling.
 - Secret-free unattended setup dry-run plans with optional read-only Jira and
   Tempo verification and no configuration writes.
 - Structured ordered worklog deletion through inline or stdin JSON, sharing the

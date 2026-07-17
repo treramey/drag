@@ -8,7 +8,7 @@ use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
-use drag::pagination::PaginationPlan;
+use drag::pagination::{PaginationPlan, DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
 use drag::schedule::{create_schedule_details, ScheduleDetails};
 use drag::time::{clock_interval, format_duration, month_bounds, select_date};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,9 @@ struct ListContinuation {
     month_start: String,
     month_end: String,
     url: String,
+    limit: Option<usize>,
+    page_limit: u16,
+    all_pages: bool,
 }
 
 fn encode_continuation(continuation: &ListContinuation) -> Result<String, CliError> {
@@ -43,6 +46,55 @@ fn decode_continuation(value: &str) -> Result<ListContinuation, CliError> {
     serde_json::from_slice(&bytes).map_err(|_| {
         CliError::InvalidInput("continuation token is malformed or incompatible".to_owned())
     })
+}
+
+fn requested_plan(
+    args: &ListArgs,
+    continuation: Option<&ListContinuation>,
+) -> Result<PaginationPlan, CliError> {
+    let Some(continuation) = continuation else {
+        return if args.all_pages {
+            Ok(PaginationPlan::all_pages())
+        } else {
+            PaginationPlan::bounded(
+                args.limit.map_or(DEFAULT_RECORD_LIMIT, usize::from),
+                args.page_limit.unwrap_or(DEFAULT_PAGE_LIMIT),
+            )
+            .map_err(Into::into)
+        };
+    };
+
+    let plan = if continuation.all_pages {
+        if continuation.limit.is_some() || continuation.page_limit != HARD_PAGE_LIMIT {
+            return Err(incompatible_continuation_plan());
+        }
+        PaginationPlan::all_pages()
+    } else {
+        PaginationPlan::bounded(
+            continuation
+                .limit
+                .ok_or_else(incompatible_continuation_plan)?,
+            continuation.page_limit,
+        )?
+    };
+    if (args.all_pages && !continuation.all_pages)
+        || (continuation.all_pages && (args.limit.is_some() || args.page_limit.is_some()))
+        || args
+            .limit
+            .is_some_and(|limit| Some(usize::from(limit)) != plan.record_limit())
+        || args
+            .page_limit
+            .is_some_and(|page_limit| page_limit != plan.page_limit())
+    {
+        return Err(incompatible_continuation_plan());
+    }
+    Ok(plan)
+}
+
+fn incompatible_continuation_plan() -> CliError {
+    CliError::InvalidInput(
+        "explicit pagination options do not match the continuation token".to_owned(),
+    )
 }
 
 pub(crate) trait ListDataSource: Send + Sync {
@@ -104,6 +156,7 @@ pub(crate) async fn run(
         .as_deref()
         .map(decode_continuation)
         .transpose()?;
+    let plan = requested_plan(&args, continuation.as_ref())?;
     if let Some(continuation) = &continuation {
         if continuation.version != 1
             || continuation.selected_date != selected.date.to_string()
@@ -114,16 +167,11 @@ pub(crate) async fn run(
                 "continuation token does not match the selected date".to_owned(),
             ));
         }
-        validate_tempo_continuation_input(&continuation.url, &month_start, &month_end)?;
+        validate_tempo_continuation_input(&continuation.url, &month_start, &month_end, plan)?;
     }
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
     let source = make_source(credentials.clone())?;
-    let plan = if args.all_pages {
-        PaginationPlan::all_pages()
-    } else {
-        PaginationPlan::bounded(usize::from(args.limit), args.page_limit)
-    };
     let (page, schedule) = tokio::try_join!(
         source.worklogs(
             &month_start,
@@ -198,6 +246,9 @@ pub(crate) async fn run(
                 month_start: month_start.clone(),
                 month_end: month_end.clone(),
                 url,
+                limit: plan.record_limit(),
+                page_limit: plan.page_limit(),
+                all_pages: plan.is_all_pages(),
             })
         })
         .transpose()?;
@@ -456,6 +507,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn all_pages_continuation_restores_its_plan_and_rejects_bounded_overrides(
+    ) -> Result<(), CliError> {
+        let continuation = ListContinuation {
+            version: 1,
+            selected_date: "2026-07-14".to_owned(),
+            month_start: "2026-07-01".to_owned(),
+            month_end: "2026-07-31".to_owned(),
+            url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&limit=100"
+                .to_owned(),
+            limit: None,
+            page_limit: HARD_PAGE_LIMIT,
+            all_pages: true,
+        };
+
+        let restored = requested_plan(&ListArgs::default(), Some(&continuation))?;
+        assert_eq!(restored, PaginationPlan::all_pages());
+        assert!(requested_plan(
+            &ListArgs {
+                limit: Some(10),
+                ..ListArgs::default()
+            },
+            Some(&continuation)
+        )
+        .is_err());
+        Ok(())
+    }
+
     #[tokio::test]
     async fn empty_selected_day_uses_month_data_without_jira_requests() -> Result<(), CliError> {
         let directory = TempDir::new()?;
@@ -697,7 +776,7 @@ mod tests {
             failing_issues: Vec::new(),
             pagination_result: Some((
                 Some(
-                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2"
+                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2&limit=10"
                         .to_owned(),
                 ),
                 2,
@@ -712,15 +791,16 @@ mod tests {
             &path,
             now,
             ListArgs {
-                limit: 10,
-                page_limit: 2,
                 continue_from: Some(encode_continuation(&ListContinuation {
                     version: 1,
                     selected_date: "2026-07-14".to_owned(),
                     month_start: "2026-07-01".to_owned(),
                     month_end: "2026-07-31".to_owned(),
-                    url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1"
+                    url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1&limit=10"
                         .to_owned(),
+                    limit: Some(10),
+                    page_limit: 2,
+                    all_pages: false,
                 })?),
                 ..ListArgs::default()
             },
@@ -740,9 +820,12 @@ mod tests {
         assert_eq!(next.selected_date, "2026-07-14");
         assert_eq!(next.month_start, "2026-07-01");
         assert_eq!(next.month_end, "2026-07-31");
+        assert_eq!(next.limit, Some(10));
+        assert_eq!(next.page_limit, 2);
+        assert!(!next.all_pages);
         assert_eq!(
             next.url,
-            "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2"
+            "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2&limit=10"
         );
         assert_eq!(rendered.data["pagination"]["complete"], false);
         assert_eq!(rendered.data["pagination"]["totalsComplete"], false);
@@ -756,9 +839,9 @@ mod tests {
         assert_eq!(
             requests.pagination,
             [(
-                PaginationPlan::bounded(10, 2),
+                PaginationPlan::bounded(10, 2)?,
                 Some(
-                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1"
+                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1&limit=10"
                         .to_owned()
                 )
             )]
@@ -793,8 +876,11 @@ mod tests {
                     selected_date: "2026-07-14".to_owned(),
                     month_start: "2026-07-01".to_owned(),
                     month_end: "2026-07-31".to_owned(),
-                    url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=100"
+                    url: "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=100&limit=100"
                         .to_owned(),
+                    limit: Some(100),
+                    page_limit: 1,
+                    all_pages: false,
                 })?),
                 ..ListArgs::default()
             },

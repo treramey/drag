@@ -209,6 +209,9 @@ default to at most 100 Tempo records and one page. Use `--limit` (1–1000) and
 retrieve the next segment deterministically, while repeating the result's
 `pagination.selectedDate` as `DATE`. Drag rejects continuations whose embedded
 month differs from the selected date and never rewrites the continuation URL.
+The token also restores its original record/page plan when those options are
+omitted; explicitly supplied `--limit`, `--page-limit`, or `--all-pages` values
+must match the token or fail before networking.
 
 `--all-pages` is an explicit exhaustive mode and cannot be combined with an
 explicit `--limit` or `--page-limit`. It still requests finite 100-record pages
