@@ -304,9 +304,9 @@ fn safe_segment(value: &str) -> Result<String, CliError> {
                 || matches!(character, '/' | '?' | '#' | '%')
         })
     {
-        return Err(CliError::InvalidInput(format!(
-            "unsafe issue or account identifier: {value:?}"
-        )));
+        return Err(CliError::InvalidInput(
+            "unsafe issue or account identifier".to_owned(),
+        ));
     }
     Ok(value.to_owned())
 }
@@ -752,7 +752,13 @@ mod tests {
             "ABC 1",
             "ABC\n1",
         ] {
-            assert!(safe_segment(value).is_err(), "{value:?}");
+            let result = safe_segment(value);
+            assert!(result.is_err(), "{value:?}");
+            if let Err(error) = result {
+                if !value.is_empty() {
+                    assert!(!error.to_string().contains(value), "{value:?}");
+                }
+            }
         }
         assert!(safe_segment("ABC-123").is_ok());
     }

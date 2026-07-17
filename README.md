@@ -107,6 +107,18 @@ export ATLASSIAN_HOST=https://yourcompany.atlassian.net/jira/software
 drag setup --from-env
 ```
 
+Preview unattended setup without network access or configuration writes:
+
+```bash
+drag --output json setup --from-env --dry-run
+```
+
+The plan reports completed local validation, planned read-only Jira and Tempo
+verification, and the planned credential replacement while preserving aliases.
+Add `--verify` to perform the read-only connection checks during the dry-run;
+the configuration is still not written. Tokens are accepted only through the
+four environment variables and never through command arguments or JSON.
+
 `ATLASSIAN_HOST` may be a bare hostname or any HTTPS URL on the Jira site. The
 runtime `TEMPO_ACCOUNT_ID` override remains supported for compatibility, but
 setup does not require or trust it; verified setup always uses the account ID

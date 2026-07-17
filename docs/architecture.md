@@ -43,6 +43,9 @@ several peer submodules rather than a single implementation file.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
   metadata and schemars schemas for shared serde input and result models.
 - `drag_cli::setup`: setup state and connection verification.
+- Unattended setup dry-runs use the same validated environment credentials and
+  verifier boundary as execution, but emit a secret-free plan and never call
+  configuration persistence; remote verification requires explicit opt-in.
 - `drag_cli::setup_tui`: Ratatui rendering, Crossterm events, and the
   stderr terminal lifecycle for interactive setup.
 - `drag_cli::app`: dependency composition and thin use-case routing.

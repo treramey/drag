@@ -36,7 +36,7 @@ async fn main() -> ExitCode {
     let requested_mode = output_mode_from_args(&args);
     let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(error) => return handle_parse_error(error, requested_mode),
+        Err(error) => return handle_parse_error(error, requested_mode, &args),
     };
     let mode = resolve_mode(cli.output);
     match run(cli, mode).await {

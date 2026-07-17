@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Secret-free unattended setup dry-run plans with optional read-only Jira and
+  Tempo verification and no configuration writes.
 - Structured ordered worklog deletion through inline or stdin JSON, sharing the
   existing batch and dry-run behavior with positional IDs.
 - Ratatui onboarding for interactive setup, with masked token input,

@@ -183,6 +183,14 @@ pub struct SetupArgs {
     /// Print token URLs without launching a browser.
     #[arg(long)]
     pub no_open: bool,
+
+    /// Validate unattended setup and report planned effects without saving.
+    #[arg(long, requires = "from_env")]
+    pub dry_run: bool,
+
+    /// Perform read-only Jira and Tempo checks during an unattended dry-run.
+    #[arg(long, requires_all = ["from_env", "dry_run"])]
+    pub verify: bool,
 }
 
 #[derive(Debug, Args)]

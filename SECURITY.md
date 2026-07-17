@@ -24,6 +24,11 @@ errors, failed verification, and terminal errors leave the existing file
 unchanged. `drag setup --from-env` is the non-interactive path and does not open
 a browser or initialize Ratatui. Avoid exposing its four credential environment
 variables through shell history, process diagnostics, CI logs, or debug output.
+Use `drag --output json setup --from-env --dry-run` to validate and inspect a
+secret-free unattended plan without network access or writes. Add `--verify`
+only when read-only remote checks are intended. Setup does not accept Jira or
+Tempo tokens in arguments or JSON. Missing, empty, non-Unicode, control-bearing,
+or unsafe Jira-site environment values are rejected before any write.
 
 On Unix, saved configuration is restricted to the current user. Tokens are
 excluded from human and JSON results, errors, diagnostics, and TUI review

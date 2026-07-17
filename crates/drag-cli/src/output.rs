@@ -149,14 +149,24 @@ pub(crate) fn emit_error(error: &CliError, mode: ResolvedOutputMode) {
     }
 }
 
-pub(crate) fn handle_parse_error(error: clap::Error, requested: OutputMode) -> ExitCode {
+pub(crate) fn handle_parse_error(
+    error: clap::Error,
+    requested: OutputMode,
+    args: &[OsString],
+) -> ExitCode {
     use clap::error::ErrorKind::{DisplayHelp, DisplayVersion};
     if matches!(error.kind(), DisplayHelp | DisplayVersion) {
         let _ = error.print();
         return ExitCode::SUCCESS;
     }
+    let setup_invocation = args.iter().any(|argument| argument == "setup");
     if resolve_mode(requested) == ResolvedOutputMode::Json {
-        let message = error.to_string();
+        let message = if setup_invocation {
+            "invalid setup arguments; unattended credentials must be supplied through environment variables"
+                .to_owned()
+        } else {
+            error.to_string()
+        };
         let body = Failure {
             ok: false,
             error: ErrorBody {
@@ -165,6 +175,10 @@ pub(crate) fn handle_parse_error(error: clap::Error, requested: OutputMode) -> E
             },
         };
         let _ = write_json(&mut io::stderr().lock(), &body);
+    } else if setup_invocation {
+        eprintln!(
+            "error: invalid setup arguments; unattended credentials must be supplied through environment variables"
+        );
     } else {
         let _ = error.print();
     }
