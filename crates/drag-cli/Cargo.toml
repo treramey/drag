@@ -28,7 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
 tachyonfx = { version = "0.25.1", default-features = false, features = ["sendable", "std-duration"] }
-drag = { version = "0.1.0", path = "../drag" }
+drag = { version = "0.2.0", path = "../drag" }
 thiserror.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 url = "2.5"

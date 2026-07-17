@@ -1,6 +1,6 @@
 {
   "name": "@treramey/drag",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A fast Tempo.io Cloud command-line client",
   "license": "MIT",
   "repository": {
@@ -19,14 +19,30 @@
     "node": ">=18"
   },
   "preferUnplugged": true,
-  "files": ["install.js", "platform.js", "run.js"],
+  "files": [
+    "install.js",
+    "platform.js",
+    "run.js"
+  ],
   "publishConfig": {
     "access": "public"
   },
   "supportedPlatforms": {
-    "x86_64-unknown-linux-gnu": { "artifact": "drag-x86_64-unknown-linux-gnu.tar.gz", "binary": "drag" },
-    "x86_64-apple-darwin": { "artifact": "drag-x86_64-apple-darwin.tar.gz", "binary": "drag" },
-    "aarch64-apple-darwin": { "artifact": "drag-aarch64-apple-darwin.tar.gz", "binary": "drag" },
-    "x86_64-pc-windows-msvc": { "artifact": "drag-x86_64-pc-windows-msvc.zip", "binary": "drag.exe" }
+    "x86_64-unknown-linux-gnu": {
+      "artifact": "drag-x86_64-unknown-linux-gnu.tar.gz",
+      "binary": "drag"
+    },
+    "x86_64-apple-darwin": {
+      "artifact": "drag-x86_64-apple-darwin.tar.gz",
+      "binary": "drag"
+    },
+    "aarch64-apple-darwin": {
+      "artifact": "drag-aarch64-apple-darwin.tar.gz",
+      "binary": "drag"
+    },
+    "x86_64-pc-windows-msvc": {
+      "artifact": "drag-x86_64-pc-windows-msvc.zip",
+      "binary": "drag.exe"
+    }
   }
 }
