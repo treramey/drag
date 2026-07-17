@@ -5,7 +5,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/treramey/drag.git"
+    "url": "git+https://github.com/treramey/drag.git"
   },
   "homepage": "https://github.com/treramey/drag",
   "bugs": "https://github.com/treramey/drag/issues",
@@ -21,8 +21,7 @@
   "preferUnplugged": true,
   "files": ["install.js", "platform.js", "run.js"],
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "supportedPlatforms": {
     "x86_64-unknown-linux-gnu": { "artifact": "drag-x86_64-unknown-linux-gnu.tar.gz", "binary": "drag" },
