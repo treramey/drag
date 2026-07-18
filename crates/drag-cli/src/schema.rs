@@ -416,7 +416,10 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "default": [],
                 "interactive": ["openFocusedJiraUrlInLocalDefaultBrowser"]
             }),
-            network_access: json!({"default": {"jira": "read", "tempo": "read"}}),
+            network_access: json!({
+                "default": {"jira": "read", "tempo": "read"},
+                "interactive": {"browser": "may-open", "jira": "read", "tempo": "read"}
+            }),
             dry_run: unsupported_dry_run(),
         },
         "delete" => CommandSemantics {
@@ -569,7 +572,7 @@ fn command_behavior(path: &str) -> Value {
                     "trigger": "explicitOpenFocusedJiraIssue",
                     "target": "resolvedJiraBrowseUrl",
                     "sideEffect": "openLocalDefaultBrowser",
-                    "additionalRemoteRequest": false,
+                    "additionalApiRequestByDrag": false,
                     "remoteMutation": false,
                     "failure": "recoverableRedactedStatus"
                 }

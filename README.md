@@ -205,18 +205,21 @@ drag alias:set lunch ABC-123
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
 without changing machine field-selection behavior. When standard input, output,
-and error are all terminals, human list output opens an interactive report on
-stderr after retrieval completes. If any stream is redirected, Drag falls back
-to the completed plain-text report. On wide terminals, one dashboard places the
+and error are all terminals, resolved human output opens an interactive report
+on stderr after retrieval completes. If any stream is redirected while human
+output is explicit, Drag falls back to the completed plain-text report. With
+the default `--output auto`, redirecting stdout selects JSON instead. On wide
+terminals, one dashboard places the
 selected-month calendar and month summary beside the selected date, focused
 worklog table, and day summary. The calendar highlights today and the selected
 date. Use `h`/`l` to
 load the previous/next date and Up/Down or `k`/`j`
 to navigate rows; overflowing tables scroll to keep the focused row visible.
 Press `o` to open that row's resolved Jira browse URL in the local default
-browser. This is an explicit local browser side effect: it does not make another
-Jira or Tempo request and does not mutate either service. Success or failure is
-reported without closing the report.
+browser. This is an explicit local browser side effect: Drag makes no additional
+Jira or Tempo API request and does not mutate either service, though the browser
+may access the Jira URL. Success or failure is reported without closing the
+report.
 Press `q`, Escape, or Ctrl-C to close it. `--verbose`
 shows the focused worklog's description and Jira URL below the responsive
 table. Bounded reports label partial totals and empty retrieved segments.

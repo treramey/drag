@@ -1017,7 +1017,12 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         interactive["browser"]["sideEffect"],
         "openLocalDefaultBrowser"
     );
+    assert_eq!(interactive["browser"]["additionalApiRequestByDrag"], false);
     assert_eq!(interactive["browser"]["remoteMutation"], false);
+    assert_eq!(
+        contract["commands"]["list"]["networkAccess"]["interactive"],
+        serde_json::json!({"browser": "may-open", "jira": "read", "tempo": "read"})
+    );
     assert_eq!(
         contract["commands"]["list"]["behavior"]["automation"],
         serde_json::json!({
