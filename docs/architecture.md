@@ -30,6 +30,8 @@ several peer submodules rather than a single implementation file.
 ## Modules
 
 - `drag::time`: duration/interval syntax, date selectors, DST behavior.
+- `drag::field_selection`: validated list masks and deterministic projection of
+  complete reports into stable structured shapes.
 - `drag::pagination`: deterministic bounded and exhaustive traversal plans.
 - `drag::schedule`: month/day required and logged totals.
 - `drag_cli::alias`: alias persistence and presentation.
@@ -62,6 +64,9 @@ several peer submodules rather than a single implementation file.
 - List retrieval defaults to 100 records and one page, exposes opaque
   continuations, and requires explicit all-pages traversal; even all-pages
   stops at 100 pages.
+- List field masks are validated before configuration or networking. Projection
+  is deterministic, occurs before the output envelope is serialized, and does
+  not change schedule calculations, pagination state, or human rendering.
 - URL path identifiers reject separators, query fragments, percent escapes,
   and control characters.
 - Human and TUI renderers visibly escape line breaks, tabs, controls,

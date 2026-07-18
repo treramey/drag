@@ -182,6 +182,7 @@ Jira or Tempo.
 # Worklogs
 drag list
 drag ls 2026-07-14 --verbose
+drag --output json list --fields 'worklogs.id,worklogs.issueKey,worklogs.duration,pagination.next'
 drag --output json list --limit 250 --page-limit 3
 drag --output json list 2026-07-14 --continue-from '<pagination.next>'
 drag --output json list --all-pages
@@ -202,14 +203,26 @@ drag alias:set lunch ABC-123
 
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
-to human output without changing the JSON data shape. Retrieval is bounded by
-default to at most 100 Tempo records and one page. Use `--limit` (1–1000) and
-`--page-limit` (1–100) to choose another bounded segment. JSON results include
-`pagination.next`; pass that exact, opaque value to `--continue-from` to
-retrieve the next segment deterministically, while repeating the result's
-`pagination.selectedDate` as `DATE`. Drag rejects continuations whose embedded
-month differs from the selected date and never rewrites the continuation URL.
-The token also restores its original record/page plan when those options are
+to human output without changing machine field-selection behavior.
+
+For automation, use `--fields` with a comma-delimited mask and request only the
+data needed for the task. Select `date`; a whole `worklogs`, `schedule`, or
+`pagination` subtree; or leaves such as `worklogs.id`,
+`worklogs.interval.startTime`, `worklogs.issueKey`,
+`schedule.dayLoggedDuration`, and `pagination.next`. Run
+`drag --output json schema` for the complete allowed-field list. Parent fields
+select their whole subtree. Duplicate fields, unknown paths, malformed paths,
+and masks that combine a parent with one of its descendants fail before network
+access. Omit `--fields` for the original complete JSON shape. Selected output
+always uses canonical field ordering, independent of mask order.
+
+Retrieval is bounded by default to at most 100 Tempo records and one page. Use
+`--limit` (1–1000) and `--page-limit` (1–100) to choose another bounded segment.
+When continuing, include `pagination.next` and `pagination.selectedDate` in a
+narrow mask; pass `next` unchanged to `--continue-from` and repeat
+`selectedDate` as `DATE`. Drag rejects continuations whose embedded month
+differs from the selected date and never rewrites the continuation URL. The
+token also restores its original record/page plan when those options are
 omitted; explicitly supplied `--limit`, `--page-limit`, or `--all-pages` values
 must match the token or fail before networking.
 
@@ -244,7 +257,7 @@ Output defaults to human text in a terminal and JSON when redirected. Pin the
 contract explicitly in automation:
 
 ```bash
-drag --output json list | jq
+drag --output json list --fields 'worklogs.issueKey,worklogs.duration,pagination.next' | jq
 drag --output json schema
 printf '%s' '{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}' \
   | drag --output json log --json - --dry-run

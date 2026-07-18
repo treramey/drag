@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Deterministic `list --fields` projection for worklog, schedule, and pagination
+  results, with pre-network validation and unchanged human rendering.
 - Bounded `list` retrieval with finite record/page defaults, deterministic
   continuation metadata bound to the selected date and effective pagination
   plan, and explicit all-pages traversal under a hard 100-page ceiling.

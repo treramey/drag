@@ -1,4 +1,5 @@
 use clap::{Arg, ArgAction, Command, CommandFactory};
+use drag::field_selection::ListField;
 use drag::models::{AddWorklogRequest, ListPagination, Worklog};
 use drag::schedule::ScheduleDetails;
 use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
@@ -91,6 +92,9 @@ fn command_contract(command: &Command, path: &str) -> Value {
         "failureDetails": command_failure_details(path),
         "behavior": command_behavior(path)
     });
+    if path == "list" {
+        contract["successWithFieldSelection"] = schema_ref("ProjectedListResult");
+    }
     if command.get_name() == "help" {
         contract["helpTargets"] = if path == "help" {
             let mut root = Cli::command();
@@ -246,6 +250,10 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
         contract["minimum"] = json!(minimum);
         contract["maximum"] = json!(maximum);
     }
+    if path == "list" && id == "fields" {
+        contract["separator"] = json!(",");
+        contract["allowedFields"] = json!(ListField::paths().collect::<Vec<_>>());
+    }
     if id == "json" {
         let input_schema = match path {
             "log" => Some(json_schema::<LogInput>()),
@@ -273,6 +281,8 @@ fn documented_default(path: &str, id: &str) -> Option<Value> {
 fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'static str {
     if is_switch(argument) {
         "boolean"
+    } else if path == "list" && argument.get_id() == "fields" {
+        "fieldMask"
     } else if (path == "delete" && argument.get_id() == "worklog_ids")
         || (path == "list" && matches!(argument.get_id().as_str(), "limit" | "page_limit"))
     {
@@ -536,6 +546,18 @@ fn command_behavior(path: &str) -> Value {
         "list" => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
             "verbose": "adds descriptions and Jira URLs to human output only",
+            "fieldSelection": {
+                "option": "fields",
+                "default": "allFields",
+                "recommendation": "requestOnlyFieldsNeededForTask",
+                "appliesTo": "structuredOutputOnly",
+                "projection": "beforeSerialization",
+                "ordering": "canonicalResultOrder",
+                "separator": ",",
+                "parentSelection": "selectsWholeSubtree",
+                "overlappingParentsAndDescendants": "rejected",
+                "allowedFields": ListField::paths().collect::<Vec<_>>()
+            },
             "pagination": {
                 "defaultRecordLimit": 100,
                 "defaultPageLimit": 1,
@@ -593,6 +615,19 @@ fn object_schema(required: &[&str], properties: Value) -> Value {
     })
 }
 
+fn projected_object_schema(properties: Value) -> Value {
+    json!({
+        "type": "object",
+        "minProperties": 1,
+        "properties": properties,
+        "additionalProperties": false
+    })
+}
+
+fn nullable_schema(schema: Value) -> Value {
+    json!({"anyOf": [schema, {"type": "null"}]})
+}
+
 fn json_schema<T: JsonSchema>() -> Value {
     json!(schema_for!(T))
 }
@@ -614,9 +649,68 @@ fn shared_definitions() -> Value {
     add_definition::<AddWorklogRequest>(&mut definitions, "AddWorklogRequest");
     add_definition::<ScheduleDetails>(&mut definitions, "ScheduleDetails");
     add_serialization_definition::<ListPagination>(&mut definitions, "ListPagination");
+    add_list_projection_definitions(&mut definitions);
     add_serialization_definition::<AliasSetResult>(&mut definitions, "AliasSetResult");
     add_serialization_definition::<AliasDeleteResult>(&mut definitions, "AliasDeleteResult");
     Value::Object(definitions)
+}
+
+fn add_list_projection_definitions(definitions: &mut Map<String, Value>) {
+    definitions.insert(
+        "ProjectedClockInterval".to_owned(),
+        projected_object_schema(json!({
+            "startTime": {"type": "string"},
+            "endTime": {"type": "string"}
+        })),
+    );
+    definitions.insert(
+        "ProjectedWorklog".to_owned(),
+        projected_object_schema(json!({
+            "id": {"type": "string"},
+            "interval": nullable_schema(schema_ref("ProjectedClockInterval")),
+            "issueId": {"type": "string"},
+            "issueKey": {"type": "string"},
+            "duration": {"type": "string"},
+            "description": {"type": "string"},
+            "link": {"type": "string"}
+        })),
+    );
+    definitions.insert(
+        "ProjectedScheduleDetails".to_owned(),
+        projected_object_schema(json!({
+            "monthRequiredDuration": {"type": "string"},
+            "monthLoggedDuration": {"type": "string"},
+            "monthCurrentPeriodDuration": {"type": "string"},
+            "dayRequiredDuration": {"type": "string"},
+            "dayLoggedDuration": {"type": "string"}
+        })),
+    );
+    definitions.insert(
+        "ProjectedListPagination".to_owned(),
+        projected_object_schema(json!({
+            "selectedDate": {"type": "string", "format": "date"},
+            "monthStart": {"type": "string", "format": "date"},
+            "monthEnd": {"type": "string", "format": "date"},
+            "limit": nullable_schema(json!({"type": "integer", "minimum": 1, "maximum": 1_000})),
+            "pageLimit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "allPages": {"type": "boolean"},
+            "pagesRetrieved": {"type": "integer", "minimum": 1, "maximum": 100},
+            "recordsRetrieved": {"type": "integer", "minimum": 0},
+            "recordsReturned": {"type": "integer", "minimum": 0},
+            "next": nullable_schema(json!({"type": "string"})),
+            "complete": {"type": "boolean"},
+            "totalsComplete": {"type": "boolean"}
+        })),
+    );
+    definitions.insert(
+        "ProjectedListResult".to_owned(),
+        projected_object_schema(json!({
+            "date": {"type": "string", "format": "date"},
+            "worklogs": {"type": "array", "items": schema_ref("ProjectedWorklog")},
+            "schedule": schema_ref("ProjectedScheduleDetails"),
+            "pagination": schema_ref("ProjectedListPagination")
+        })),
+    );
 }
 
 fn add_definition<T: JsonSchema>(definitions: &mut Map<String, Value>, name: &str) {

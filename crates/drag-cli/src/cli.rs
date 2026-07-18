@@ -152,6 +152,9 @@ pub struct ListArgs {
     /// Include descriptions and Jira URLs.
     #[arg(short, long)]
     pub verbose: bool,
+    /// Comma-delimited result fields to include in structured output.
+    #[arg(long, value_name = "MASK")]
+    pub fields: Option<String>,
     /// Maximum worklogs to retrieve and return (1-1000; default: 100).
     #[arg(
         long,
@@ -282,14 +285,22 @@ mod tests {
     #[test]
     fn list_and_ls_parse_to_the_same_command_arguments() -> Result<(), String> {
         for command in ["list", "ls"] {
-            let cli = Cli::try_parse_from(["drag", command, "yesterday", "--verbose"])
-                .map_err(|error| error.to_string())?;
+            let cli = Cli::try_parse_from([
+                "drag",
+                command,
+                "yesterday",
+                "--verbose",
+                "--fields",
+                "worklogs.id,pagination.next",
+            ])
+            .map_err(|error| error.to_string())?;
             let args = match cli.command {
                 Command::List(args) => args,
                 _ => return Err(format!("{command} did not dispatch to list")),
             };
             assert_eq!(args.when.as_deref(), Some("yesterday"));
             assert!(args.verbose);
+            assert_eq!(args.fields.as_deref(), Some("worklogs.id,pagination.next"));
         }
         Ok(())
     }
