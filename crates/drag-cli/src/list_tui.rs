@@ -18,6 +18,7 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
+use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::list::ListReport;
 use crate::output::escape_terminal_data;
 use crate::CliError;
@@ -30,17 +31,29 @@ pub(crate) trait ListReportSession: Send + Sync {
     fn run<'a>(&'a self, report: &'a ListReport) -> ListReportFuture<'a>;
 }
 
-pub(crate) struct RatatuiListReportSession;
+pub(crate) struct RatatuiListReportSession {
+    browser_launcher: Box<dyn BrowserLauncher>,
+}
+
+impl RatatuiListReportSession {
+    pub(crate) fn terminal() -> Self {
+        Self {
+            browser_launcher: Box::new(SystemBrowserLauncher),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Message {
     MoveUp,
     MoveDown,
+    Open,
 }
 
 struct ListReportModel<'a> {
     report: &'a ListReport,
     table_state: TableState,
+    status: Option<String>,
 }
 
 impl<'a> ListReportModel<'a> {
@@ -50,6 +63,7 @@ impl<'a> ListReportModel<'a> {
         Self {
             report,
             table_state,
+            status: None,
         }
     }
 
@@ -57,17 +71,35 @@ impl<'a> ListReportModel<'a> {
         self.table_state.selected()
     }
 
-    fn update(&mut self, message: Message) {
+    fn status(&self) -> Option<&str> {
+        self.status.as_deref()
+    }
+
+    fn update(&mut self, message: Message, browser_launcher: &dyn BrowserLauncher) {
         let Some(focused_row) = self.focused_row() else {
             return;
         };
+        if message == Message::Open {
+            let worklog = &self.report.worklogs()[focused_row];
+            self.status = Some(if browser_launcher.open(&worklog.link).is_ok() {
+                format!("Opened {}", escape_terminal_data(&worklog.issue_key))
+            } else {
+                format!(
+                    "Could not open {} in the browser",
+                    escape_terminal_data(&worklog.issue_key)
+                )
+            });
+            return;
+        }
         let next = match message {
             Message::MoveUp => focused_row.saturating_sub(1),
             Message::MoveDown => focused_row
                 .saturating_add(1)
                 .min(self.report.worklogs().len().saturating_sub(1)),
+            Message::Open => focused_row,
         };
         self.table_state.select(Some(next));
+        self.status = None;
     }
 }
 
@@ -77,7 +109,7 @@ impl ListReportSession for RatatuiListReportSession {
     }
 
     fn run<'a>(&'a self, report: &'a ListReport) -> ListReportFuture<'a> {
-        Box::pin(run_terminal(report))
+        Box::pin(run_terminal(report, self.browser_launcher.as_ref()))
     }
 }
 
@@ -135,7 +167,10 @@ impl Drop for StderrTerminal {
     }
 }
 
-async fn run_terminal(report: &ListReport) -> Result<(), CliError> {
+async fn run_terminal(
+    report: &ListReport,
+    browser_launcher: &dyn BrowserLauncher,
+) -> Result<(), CliError> {
     let mut terminal = StderrTerminal::new()?;
     let mut events = EventStream::new();
     let mut model = ListReportModel::new(report);
@@ -156,7 +191,7 @@ async fn run_terminal(report: &ListReport) -> Result<(), CliError> {
                 return Ok(());
             }
             if let Some(message) = message_for_key(key.code) {
-                model.update(message);
+                model.update(message, browser_launcher);
             }
         }
     }
@@ -166,6 +201,7 @@ fn message_for_key(code: KeyCode) -> Option<Message> {
     match code {
         KeyCode::Up | KeyCode::Char('k') => Some(Message::MoveUp),
         KeyCode::Down | KeyCode::Char('j') => Some(Message::MoveDown),
+        KeyCode::Char('o') => Some(Message::Open),
         _ => None,
     }
 }
@@ -206,7 +242,7 @@ fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
         day,
     );
     render_pagination_notice(frame, pagination, report);
-    render_footer(frame, footer);
+    render_footer(frame, footer, model);
 }
 
 fn focused_details_height(
@@ -265,13 +301,19 @@ fn render_focused_details(frame: &mut Frame<'_>, area: Rect, model: &ListReportM
     frame.render_widget(jira, jira_line);
 }
 
-fn render_footer(frame: &mut Frame<'_>, area: Rect) {
+fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>) {
+    if let Some(status) = model.status() {
+        frame.render_widget(Line::from(status.to_owned()), area);
+        return;
+    }
     let spans = if area.width >= 70 {
         vec![
             " ↑/k ".bold().cyan(),
             "up  ".dim(),
             "↓/j ".bold().cyan(),
             "down  ".dim(),
+            "o ".bold().cyan(),
+            "open  ".dim(),
             "q ".bold().cyan(),
             "quit".dim(),
             "   Esc ".bold().cyan(),
@@ -287,13 +329,17 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect) {
             "up  ".dim(),
             "↓/j ".bold().cyan(),
             "down".dim(),
+            "  o ".bold().cyan(),
+            "open".dim(),
         ]
     } else if area.width >= 24 {
         vec![
             " q ".bold().cyan(),
             "quit  ".dim(),
             "↑↓/jk ".bold().cyan(),
-            "move".dim(),
+            "move  ".dim(),
+            "o ".bold().cyan(),
+            "open".dim(),
         ]
     } else {
         vec![" q ".bold().cyan(), "quit".dim()]
@@ -392,6 +438,8 @@ fn render_worklogs(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportMode
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io;
+    use std::sync::{Arc, Mutex};
 
     use chrono::NaiveDate;
     use crossterm::event::{KeyCode, KeyModifiers};
@@ -400,7 +448,24 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::{message_for_key, render, should_quit, ListReportModel, Message};
+    use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
+
+    struct FakeBrowserLauncher {
+        opened: Arc<Mutex<Vec<String>>>,
+        failure: Option<&'static str>,
+    }
+
+    impl BrowserLauncher for FakeBrowserLauncher {
+        fn open(&self, url: &str) -> io::Result<()> {
+            self.opened
+                .lock()
+                .map_err(|_| io::Error::other("browser test lock poisoned"))?
+                .push(url.to_owned());
+            self.failure
+                .map_or(Ok(()), |message| Err(io::Error::other(message)))
+        }
+    }
 
     fn report(worklogs: Vec<Worklog>, totals_complete: bool) -> ListReport {
         report_with_verbose(worklogs, totals_complete, false)
@@ -548,13 +613,13 @@ mod tests {
         let mut model = ListReportModel::new(&report);
 
         assert_eq!(model.focused_row(), Some(0));
-        model.update(Message::MoveUp);
+        model.update(Message::MoveUp, &NoopBrowserLauncher);
         assert_eq!(model.focused_row(), Some(0));
-        model.update(Message::MoveDown);
-        model.update(Message::MoveDown);
-        model.update(Message::MoveDown);
+        model.update(Message::MoveDown, &NoopBrowserLauncher);
+        model.update(Message::MoveDown, &NoopBrowserLauncher);
+        model.update(Message::MoveDown, &NoopBrowserLauncher);
         assert_eq!(model.focused_row(), Some(2));
-        model.update(Message::MoveUp);
+        model.update(Message::MoveUp, &NoopBrowserLauncher);
         assert_eq!(model.focused_row(), Some(1));
     }
 
@@ -563,8 +628,8 @@ mod tests {
         let report = report(Vec::new(), true);
         let mut model = ListReportModel::new(&report);
 
-        model.update(Message::MoveDown);
-        model.update(Message::MoveUp);
+        model.update(Message::MoveDown, &NoopBrowserLauncher);
+        model.update(Message::MoveUp, &NoopBrowserLauncher);
 
         assert_eq!(model.focused_row(), None);
     }
@@ -578,6 +643,100 @@ mod tests {
             assert_eq!(message_for_key(code), Some(Message::MoveDown));
         }
         assert_eq!(message_for_key(KeyCode::Char('x')), None);
+    }
+
+    #[test]
+    fn open_uses_the_focused_worklogs_existing_jira_url() {
+        let report = report(
+            ["first", "second"]
+                .into_iter()
+                .map(|id| Worklog {
+                    id: id.to_owned(),
+                    interval: None,
+                    issue_id: id.to_owned(),
+                    issue_key: format!("OPS-{id}"),
+                    duration: "30m".to_owned(),
+                    description: String::new(),
+                    link: format!("https://jira.example/browse/OPS-{id}?source=drag"),
+                })
+                .collect(),
+            true,
+        );
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let launcher = FakeBrowserLauncher {
+            opened: Arc::clone(&opened),
+            failure: None,
+        };
+        let mut model = ListReportModel::new(&report);
+
+        model.update(Message::MoveDown, &launcher);
+        model.update(Message::Open, &launcher);
+
+        assert_eq!(
+            *opened.lock().unwrap_or_else(|error| error.into_inner()),
+            ["https://jira.example/browse/OPS-second?source=drag"]
+        );
+        assert_eq!(model.status(), Some("Opened OPS-second"));
+    }
+
+    #[test]
+    fn browser_failure_is_recoverable_and_does_not_expose_its_details() {
+        let report = report(
+            vec![Worklog {
+                id: "first".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://jira.example/browse/OPS-1".to_owned(),
+            }],
+            true,
+        );
+        let launcher = FakeBrowserLauncher {
+            opened: Arc::new(Mutex::new(Vec::new())),
+            failure: Some("secret browser configuration"),
+        };
+        let mut model = ListReportModel::new(&report);
+
+        model.update(Message::Open, &launcher);
+        assert_eq!(model.status(), Some("Could not open OPS-1 in the browser"));
+        let screen = screen_with_size(&mut model, 80, 20);
+        assert!(
+            screen.contains("Could not open OPS-1 in the browser"),
+            "{screen}"
+        );
+        assert!(!screen.contains("secret browser configuration"), "{screen}");
+        model.update(Message::MoveDown, &launcher);
+        assert_eq!(model.focused_row(), Some(0));
+        assert_eq!(model.status(), None);
+    }
+
+    #[test]
+    fn open_without_a_focused_worklog_is_a_no_op() {
+        let report = report(Vec::new(), true);
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let launcher = FakeBrowserLauncher {
+            opened: Arc::clone(&opened),
+            failure: None,
+        };
+        let mut model = ListReportModel::new(&report);
+
+        model.update(Message::Open, &launcher);
+
+        assert!(opened
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .is_empty());
+        assert_eq!(model.status(), None);
+    }
+
+    #[test]
+    fn open_key_and_footer_are_discoverable() {
+        assert_eq!(message_for_key(KeyCode::Char('o')), Some(Message::Open));
+        let report = report(Vec::new(), true);
+        let screen = screen(&report);
+        assert!(screen.contains("o open"), "{screen}");
     }
 
     #[test]
@@ -605,7 +764,7 @@ mod tests {
         assert!(initial.contains("▶ row-1"), "{initial}");
 
         for _ in 1..report.worklogs().len() {
-            model.update(Message::MoveDown);
+            model.update(Message::MoveDown, &NoopBrowserLauncher);
         }
         let scrolled = screen_with_size(&mut model, 70, 16);
 
@@ -648,7 +807,7 @@ mod tests {
             "{first}"
         );
 
-        model.update(Message::MoveDown);
+        model.update(Message::MoveDown, &NoopBrowserLauncher);
         let second = screen_with_size(&mut model, 100, 24);
         assert!(second.contains("Second description"), "{second}");
         assert!(

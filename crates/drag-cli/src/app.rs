@@ -80,7 +80,7 @@ impl App {
             connection_verifier: Box::new(RemoteConnectionVerifier),
             connection_environment: Box::new(ProcessConnectionEnvironment),
             onboarding_session: Box::new(RatatuiOnboardingSession::terminal()),
-            list_report_session: Box::new(RatatuiListReportSession),
+            list_report_session: Box::new(RatatuiListReportSession::terminal()),
         }
     }
 
@@ -99,7 +99,7 @@ impl App {
                 TerminalSetupPrompter,
                 NoopBrowserLauncher,
             )),
-            list_report_session: Box::new(RatatuiListReportSession),
+            list_report_session: Box::new(RatatuiListReportSession::terminal()),
         }
     }
 
@@ -120,7 +120,7 @@ impl App {
                 setup_prompter,
                 browser_launcher,
             )),
-            list_report_session: Box::new(RatatuiListReportSession),
+            list_report_session: Box::new(RatatuiListReportSession::terminal()),
         }
     }
 
@@ -137,7 +137,7 @@ impl App {
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
             onboarding_session: Box::new(onboarding_session),
-            list_report_session: Box::new(RatatuiListReportSession),
+            list_report_session: Box::new(RatatuiListReportSession::terminal()),
         }
     }
 

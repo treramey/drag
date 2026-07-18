@@ -1,14 +1,15 @@
 //! Setup workflow, verification boundaries, and terminal session contract.
 
 use std::future::Future;
-use std::io;
 #[cfg(test)]
-use std::io::{IsTerminal, Write};
+use std::io::{self, IsTerminal, Write};
 use std::pin::Pin;
-
 use url::Url;
 
 use crate::api::ApiClient;
+#[cfg(test)]
+pub(crate) use crate::browser::NoopBrowserLauncher;
+pub(crate) use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
 use crate::CliError;
 
@@ -83,28 +84,6 @@ impl TempoCredentials {
             atlassian_token: String::new(),
             hostname: String::new(),
         }
-    }
-}
-
-pub(crate) trait BrowserLauncher: Send + Sync {
-    fn open(&self, url: &Url) -> io::Result<()>;
-}
-
-pub(crate) struct SystemBrowserLauncher;
-
-impl BrowserLauncher for SystemBrowserLauncher {
-    fn open(&self, url: &Url) -> io::Result<()> {
-        webbrowser::open(url.as_str())
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct NoopBrowserLauncher;
-
-#[cfg(test)]
-impl BrowserLauncher for NoopBrowserLauncher {
-    fn open(&self, _url: &Url) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -311,7 +290,7 @@ impl LineOnboardingSession {
         self.prompter
             .message(&format!("{}\n{}", page.instruction, page.url))?;
         if page.open_browser {
-            if let Err(error) = self.browser_launcher.open(&page.url) {
+            if let Err(error) = self.browser_launcher.open(page.url.as_str()) {
                 self.prompter.message(&format!(
                     "Warning: could not open this page in your browser: {error}. Continue with the URL above."
                 ))?;

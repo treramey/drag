@@ -1,6 +1,7 @@
 mod alias;
 mod api;
 mod app;
+mod browser;
 mod cli;
 mod config;
 mod delete;

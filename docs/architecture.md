@@ -36,6 +36,7 @@ several peer submodules rather than a single implementation file.
 - `drag::pagination`: deterministic bounded and exhaustive traversal plans.
 - `drag::schedule`: month/day required and logged totals.
 - `drag_cli::alias`: alias persistence and presentation.
+- `drag_cli::browser`: shared boundary for local default-browser launches.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
 - `drag_cli::api`: authenticated Jira/Tempo requests, pagination, and response
   decoding.
@@ -50,7 +51,8 @@ several peer submodules rather than a single implementation file.
   are projections of that completed report.
 - `drag_cli::list_tui`: eligibility checks, focused row state, bounded keyboard
   navigation, responsive stderr Ratatui rendering, scrolling, verbose focused
-  details, quit-event handling, and restoration of terminal state for
+  details, recoverable opening of the focused worklog's resolved Jira URL,
+  quit-event handling, and restoration of terminal state for
   interactive list reports. Retrieval completes before this boundary is
   entered.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
@@ -89,6 +91,9 @@ several peer submodules rather than a single implementation file.
   bidirectional formatting, and zero-width characters inside remote data;
   generated labels remain outside those values, while JSON preserves source
   strings through normal serializer escaping.
+- Interactive list browser launches consume the already resolved Jira browse
+  URL and never perform another Jira or Tempo request. Launch failures remain
+  local, redacted status messages and do not terminate the report.
 - Only idempotent reads retry transient transport failures and retryable HTTP
   statuses; mutations are attempted once.
 - Mutating worklog and alias operations support `--dry-run`; structured and
