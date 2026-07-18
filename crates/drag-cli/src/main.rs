@@ -15,6 +15,7 @@ mod schema;
 mod setup;
 mod setup_tui;
 mod transport;
+mod tui_theme;
 
 use std::ffi::OsString;
 use std::io;

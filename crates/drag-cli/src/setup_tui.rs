@@ -30,6 +30,7 @@ use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher,
 };
+use crate::tui_theme::{Palette, MUTED_COLOR, PRIMARY_COLOR, SUCCESS_COLOR};
 use crate::CliError;
 
 const MIN_TERMINAL_WIDTH: u16 = 84;
@@ -46,10 +47,6 @@ const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 const ANIMATION_RNG_SEED: u32 = 0x4452_4147;
 const ENTRANCE_DURATION_MS: u32 = 240;
 const REDUCED_MOTION_DURATION_MS: u32 = 140;
-const PRIMARY_COLOR: Color = Color::Rgb(116, 39, 127);
-const MUTED_COLOR: Color = Color::Rgb(101, 92, 82);
-const SUCCESS_COLOR: Color = Color::Rgb(0, 121, 133);
-
 const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const REVIEW_CONNECTOR_FRAMES: [&str; 4] = ["•  ▶", "─• ▶", "──•▶", "──▶ "];
@@ -58,42 +55,6 @@ const STAGE_SEPARATOR: &str = " ─── ";
 const STAGE_SEPARATOR_WIDTH: u16 = 5;
 // Mirrors Exabind's selected-category perimeter pace without animating field content.
 const FOCUS_BORDER_CELLS_PER_SECOND: f32 = 30.0;
-
-struct Palette;
-
-impl Palette {
-    const fn primary() -> Style {
-        Style::new().fg(PRIMARY_COLOR)
-    }
-
-    const fn muted() -> Style {
-        Style::new().fg(MUTED_COLOR)
-    }
-
-    const fn focus() -> Style {
-        Self::primary()
-    }
-
-    const fn action_focus() -> Style {
-        Style::new().fg(Color::Rgb(243, 239, 230)).bg(PRIMARY_COLOR)
-    }
-
-    const fn pending() -> Style {
-        Style::new().fg(Color::Yellow)
-    }
-
-    const fn success() -> Style {
-        Style::new().fg(SUCCESS_COLOR)
-    }
-
-    const fn warning() -> Style {
-        Style::new().fg(Color::Yellow)
-    }
-
-    const fn error() -> Style {
-        Style::new().fg(Color::Red)
-    }
-}
 
 #[cfg(test)]
 const TEST_WIDTH: u16 = 100;

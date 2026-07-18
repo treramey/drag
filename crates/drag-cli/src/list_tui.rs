@@ -1,5 +1,6 @@
 //! Ratatui presentation for completed list reports.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::io::{self, IsTerminal};
 use std::pin::Pin;
@@ -14,8 +15,7 @@ use crossterm::terminal::{
 use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Stylize;
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::calendar::{CalendarEventStore, Monthly};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::list::ListReport;
 use crate::output::escape_terminal_data;
+use crate::tui_theme::Palette;
 use crate::CliError;
 
 pub(crate) type ListReportFuture<'a> =
@@ -275,8 +276,8 @@ fn dashboard_month_width(
     const MIN_REPORT_WIDTH: u16 = 47;
     let date = calendar_date(report.selected_date())?;
     let calendar = Monthly::new(date, CalendarEventStore::default())
-        .show_month_header(ratatui::style::Style::new())
-        .show_weekdays_header(ratatui::style::Style::new());
+        .show_month_header(Palette::primary())
+        .show_weekdays_header(Palette::muted());
     let month_width = calendar.width().saturating_add(2);
     let minimum_width = month_width
         .saturating_add(MIN_REPORT_WIDTH)
@@ -306,7 +307,8 @@ fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagina
     .areas(frame.area());
     render_month(frame, month, report);
     frame.render_widget(
-        Paragraph::new(report.selected_date().format("%A, %Y-%m-%d").to_string()).bold(),
+        Paragraph::new(report.selected_date().format("%A, %Y-%m-%d").to_string())
+            .style(Palette::primary().bold()),
         date,
     );
     render_worklogs(frame, worklogs, model, true);
@@ -317,7 +319,11 @@ fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagina
             "{} / {} · logged / required",
             schedule.day_logged_duration, schedule.day_required_duration
         ))
-        .block(Block::bordered().title("Day summary")),
+        .block(
+            Block::bordered()
+                .title(primary("Day summary"))
+                .border_style(Palette::muted()),
+        ),
         day,
     );
     render_pagination_notice(frame, pagination, report);
@@ -336,7 +342,7 @@ fn render_dashboard(
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let panel = Block::bordered();
+    let panel = Block::bordered().border_style(Palette::muted());
     let inner = panel.inner(dashboard);
     frame.render_widget(panel, dashboard);
     let [month, report] =
@@ -353,21 +359,20 @@ fn render_dashboard_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport
     };
     let mut events = CalendarEventStore::default();
     if let Some(today) = calendar_date(report.today()) {
-        events.add(today, ratatui::style::Style::new().cyan().bold());
+        events.add(today, Palette::primary().bold());
     }
-    events.add(
-        selected_date,
-        ratatui::style::Style::new().reversed().bold(),
-    );
+    events.add(selected_date, Palette::action_focus().bold());
     let calendar = Monthly::new(selected_date, events)
-        .show_month_header(ratatui::style::Style::new().cyan().bold())
-        .show_weekdays_header(ratatui::style::Style::new().dim())
-        .show_surrounding(ratatui::style::Style::new().dim());
+        .show_month_header(Palette::primary().bold())
+        .show_weekdays_header(Palette::muted().bold())
+        .show_surrounding(Palette::muted());
     let summary_height = 3.min(area.height);
     let [calendar_area, summary] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(summary_height)]).areas(area);
     frame.render_widget(calendar, calendar_area);
-    let summary_block = Block::new().borders(Borders::TOP);
+    let summary_block = Block::new()
+        .borders(Borders::TOP)
+        .border_style(Palette::muted());
     let summary_inner = summary_block.inner(summary);
     frame.render_widget(summary_block, summary);
     let schedule = report.schedule();
@@ -387,7 +392,9 @@ fn render_dashboard_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport
 }
 
 fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportModel<'_>) {
-    let divider = Block::new().borders(Borders::LEFT);
+    let divider = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Palette::muted());
     let inner = divider.inner(area);
     frame.render_widget(divider, area);
     let details_height =
@@ -411,12 +418,14 @@ fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListRe
                 .format("%A, %Y-%m-%d")
                 .to_string(),
         )
-        .bold(),
+        .style(Palette::primary().bold()),
         date,
     );
     render_worklogs(frame, worklogs, model, false);
     render_focused_details(frame, details, model);
-    let day_block = Block::new().borders(Borders::TOP);
+    let day_block = Block::new()
+        .borders(Borders::TOP)
+        .border_style(Palette::muted());
     let day_inner = day_block.inner(day);
     frame.render_widget(day_block, day);
     let schedule = model.report.schedule();
@@ -438,8 +447,8 @@ fn month_height(terminal_area: Rect, pagination_height: u16, report: &ListReport
         return COMPACT_MONTH_HEIGHT;
     };
     let calendar = Monthly::new(date, CalendarEventStore::default())
-        .show_month_header(ratatui::style::Style::new().cyan().bold())
-        .show_weekdays_header(ratatui::style::Style::new().dim());
+        .show_month_header(Palette::primary())
+        .show_weekdays_header(Palette::muted());
     let calendar_height = calendar.height().saturating_add(3);
     let calendar_width = calendar.width().saturating_add(2);
     if terminal_area.width >= calendar_width
@@ -484,7 +493,9 @@ fn render_focused_details(frame: &mut Frame<'_>, area: Rect, model: &ListReportM
         "Focused · {}",
         escape_terminal_data(&model.report.issue_label(worklog))
     );
-    let block = Block::bordered().title(title);
+    let block = Block::bordered()
+        .title(primary(title))
+        .border_style(Palette::muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.height == 0 {
@@ -515,58 +526,70 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
     }
     let spans = if area.width >= 70 {
         vec![
-            " h/l ".bold().cyan(),
-            "date  ".dim(),
-            " ↑/k ".bold().cyan(),
-            "up  ".dim(),
-            "↓/j ".bold().cyan(),
-            "down  ".dim(),
-            "o ".bold().cyan(),
-            "open  ".dim(),
-            "q ".bold().cyan(),
-            "quit".dim(),
-            "   Esc ".bold().cyan(),
-            "close   ".dim(),
-            "Ctrl-C ".bold().cyan(),
-            "exit".dim(),
+            primary(" h/l "),
+            muted("date  "),
+            primary(" ↑/k "),
+            muted("up  "),
+            primary("↓/j "),
+            muted("down  "),
+            primary("o "),
+            muted("open  "),
+            primary("q "),
+            muted("quit"),
+            muted_bold("   Esc "),
+            muted("close   "),
+            muted_bold("Ctrl-C "),
+            muted("exit"),
         ]
     } else if area.width >= 48 {
         vec![
-            " q ".bold().cyan(),
-            "quit  ".dim(),
-            "h/l ".bold().cyan(),
-            "date  ".dim(),
-            "↑/k ".bold().cyan(),
-            "up  ".dim(),
-            "↓/j ".bold().cyan(),
-            "down  ".dim(),
-            "o ".bold().cyan(),
-            "open".dim(),
+            primary(" q "),
+            muted("quit  "),
+            primary("h/l "),
+            muted("date  "),
+            primary("↑/k "),
+            muted("up  "),
+            primary("↓/j "),
+            muted("down  "),
+            primary("o "),
+            muted("open"),
         ]
     } else if area.width >= 32 {
         vec![
-            " q ".bold().cyan(),
-            "quit ".dim(),
-            "h/l ".bold().cyan(),
-            "date ".dim(),
-            "↑↓ ".bold().cyan(),
-            "move ".dim(),
-            "o ".bold().cyan(),
-            "open".dim(),
+            primary(" q "),
+            muted("quit "),
+            primary("h/l "),
+            muted("date "),
+            primary("↑↓ "),
+            muted("move "),
+            primary("o "),
+            muted("open"),
         ]
     } else if area.width >= 24 {
         vec![
-            " q ".bold().cyan(),
-            "quit  ".dim(),
-            "↑↓ ".bold().cyan(),
-            "move  ".dim(),
-            "o ".bold().cyan(),
-            "open".dim(),
+            primary(" q "),
+            muted("quit  "),
+            primary("↑↓ "),
+            muted("move  "),
+            primary("o "),
+            muted("open"),
         ]
     } else {
-        vec![" q ".bold().cyan(), "quit".dim()]
+        vec![primary(" q "), muted("quit")]
     };
     frame.render_widget(Line::from(spans), area);
+}
+
+fn primary<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::primary().bold())
+}
+
+fn muted<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::muted())
+}
+
+fn muted_bold<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::muted().bold())
 }
 
 fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -580,7 +603,10 @@ fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListRepo
         ));
     }
     lines.push(Line::from("Totals reflect this bounded segment."));
-    frame.render_widget(Paragraph::new(Text::from(lines)).yellow(), area);
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(Palette::warning()),
+        area,
+    );
 }
 
 fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -593,12 +619,16 @@ fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
                 schedule.month_required_duration,
                 schedule.month_current_period_duration
             ))
-            .block(Block::bordered().title(report.selected_date().format("%B %Y").to_string())),
+            .block(
+                Block::bordered()
+                    .title(primary(report.selected_date().format("%B %Y").to_string()))
+                    .border_style(Palette::muted()),
+            ),
             area,
         );
         return;
     }
-    let block = Block::bordered();
+    let block = Block::bordered().border_style(Palette::muted());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -609,16 +639,13 @@ fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
     };
     let mut events = CalendarEventStore::default();
     if let Some(today) = calendar_date(report.today()) {
-        events.add(today, ratatui::style::Style::new().cyan().bold());
+        events.add(today, Palette::focus().bold());
     }
-    events.add(
-        selected_date,
-        ratatui::style::Style::new().reversed().bold(),
-    );
+    events.add(selected_date, Palette::action_focus().bold());
     let calendar = Monthly::new(selected_date, events)
-        .show_month_header(ratatui::style::Style::new().cyan().bold())
-        .show_weekdays_header(ratatui::style::Style::new().dim())
-        .show_surrounding(ratatui::style::Style::new().dim());
+        .show_month_header(Palette::primary().bold())
+        .show_weekdays_header(Palette::muted().bold())
+        .show_surrounding(Palette::muted());
     frame.render_widget(calendar, calendar_area);
     frame.render_widget(
         Line::from(format!(
@@ -653,7 +680,14 @@ fn render_worklogs(
         })
         .centered();
         if bordered {
-            frame.render_widget(empty.block(Block::bordered().title("Worklogs")), area);
+            frame.render_widget(
+                empty.block(
+                    Block::bordered()
+                        .title(primary("Worklogs"))
+                        .border_style(Palette::muted()),
+                ),
+                area,
+            );
         } else {
             frame.render_widget(empty, area);
         }
@@ -694,11 +728,15 @@ fn render_worklogs(
         ]
     };
     let table = Table::new(rows, widths)
-        .header(Row::new(["ID", "Time", "Issue", "Duration"]).bold())
-        .row_highlight_style(ratatui::style::Style::new().reversed())
+        .header(Row::new(["ID", "Time", "Issue", "Duration"]).style(Palette::muted().bold()))
+        .row_highlight_style(Palette::action_focus().bold())
         .highlight_symbol("▶ ");
     let table = if bordered {
-        table.block(Block::bordered().title("Worklogs"))
+        table.block(
+            Block::bordered()
+                .title(primary("Worklogs"))
+                .border_style(Palette::muted()),
+        )
     } else {
         table
     };
@@ -724,6 +762,7 @@ mod tests {
     };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
+    use crate::tui_theme::Palette;
 
     struct FakeBrowserLauncher {
         opened: Arc<Mutex<Vec<String>>>,
@@ -980,15 +1019,11 @@ mod tests {
 
         assert_eq!(
             today_style,
-            Some(materialized_style(
-                ratatui::style::Style::new().cyan().bold()
-            ))
+            Some(materialized_style(Palette::focus().bold()))
         );
         assert_eq!(
             selected_style,
-            Some(materialized_style(
-                ratatui::style::Style::new().reversed().bold()
-            ))
+            Some(materialized_style(Palette::action_focus().bold()))
         );
         assert_ne!(today_style, selected_style);
     }
@@ -1000,9 +1035,7 @@ mod tests {
 
         assert_eq!(
             calendar_day_style(&report, "12 13 14 15 16 17 18", 2),
-            Some(materialized_style(
-                ratatui::style::Style::new().reversed().bold()
-            ))
+            Some(materialized_style(Palette::action_focus().bold()))
         );
     }
 
