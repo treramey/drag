@@ -61,6 +61,7 @@ impl Rendered {
 pub(crate) enum ResolvedOutputMode {
     Human,
     Json,
+    Ndjson,
 }
 
 #[derive(Serialize)]
@@ -99,6 +100,7 @@ pub(crate) fn resolve_mode(mode: OutputMode) -> ResolvedOutputMode {
         OutputMode::Human => ResolvedOutputMode::Human,
         OutputMode::Auto if io::stdout().is_terminal() => ResolvedOutputMode::Human,
         OutputMode::Auto | OutputMode::Json => ResolvedOutputMode::Json,
+        OutputMode::Ndjson => ResolvedOutputMode::Ndjson,
     }
 }
 
@@ -106,7 +108,7 @@ pub(crate) fn emit_result(result: Rendered, mode: ResolvedOutputMode) -> Result<
     if let Some(failure) = result.failure {
         match mode {
             ResolvedOutputMode::Human => eprintln!("{}", sanitize_for_terminal(&result.human)),
-            ResolvedOutputMode::Json => write_json(
+            ResolvedOutputMode::Json | ResolvedOutputMode::Ndjson => write_json(
                 &mut io::stderr().lock(),
                 &DiagnosticFailure {
                     ok: false,
@@ -122,7 +124,7 @@ pub(crate) fn emit_result(result: Rendered, mode: ResolvedOutputMode) -> Result<
     }
     match mode {
         ResolvedOutputMode::Human => println!("{}", sanitize_for_terminal(&result.human)),
-        ResolvedOutputMode::Json => write_json(
+        ResolvedOutputMode::Json | ResolvedOutputMode::Ndjson => write_json(
             &mut io::stdout().lock(),
             &Success {
                 ok: true,
@@ -134,7 +136,7 @@ pub(crate) fn emit_result(result: Rendered, mode: ResolvedOutputMode) -> Result<
 }
 
 pub(crate) fn emit_error(error: &CliError, mode: ResolvedOutputMode) {
-    if mode == ResolvedOutputMode::Json {
+    if matches!(mode, ResolvedOutputMode::Json | ResolvedOutputMode::Ndjson) {
         let message = error.to_string();
         let body = Failure {
             ok: false,
@@ -164,7 +166,10 @@ pub(crate) fn handle_parse_error(
         return ExitCode::SUCCESS;
     }
     let setup_invocation = args.iter().any(|argument| argument == "setup");
-    if resolve_mode(requested) == ResolvedOutputMode::Json {
+    if matches!(
+        resolve_mode(requested),
+        ResolvedOutputMode::Json | ResolvedOutputMode::Ndjson
+    ) {
         let message = if setup_invocation {
             "invalid setup arguments; unattended credentials must be supplied through environment variables"
                 .to_owned()
@@ -253,6 +258,7 @@ fn parse_output_mode(value: &str) -> Option<OutputMode> {
         "auto" => Some(OutputMode::Auto),
         "human" => Some(OutputMode::Human),
         "json" => Some(OutputMode::Json),
+        "ndjson" => Some(OutputMode::Ndjson),
         _ => None,
     }
 }

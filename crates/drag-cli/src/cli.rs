@@ -13,7 +13,7 @@ use serde::Deserialize;
     propagate_version = true
 )]
 pub struct Cli {
-    /// Output mode. Auto uses text in a terminal and JSON when redirected.
+    /// Output mode. Auto uses text in a terminal and JSON when redirected; NDJSON is list-only.
     #[arg(long, global = true, value_enum, default_value_t = OutputMode::Auto)]
     pub output: OutputMode,
 
@@ -38,6 +38,7 @@ pub enum OutputMode {
     Auto,
     Human,
     Json,
+    Ndjson,
 }
 
 #[derive(Debug, Subcommand)]

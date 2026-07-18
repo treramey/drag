@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -290,6 +291,21 @@ impl App {
         list::run(&self.path, self.now(), args, |credentials| {
             Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?))
         })
+        .await
+    }
+
+    pub async fn list_stream(
+        &self,
+        args: ListArgs,
+        writer: &mut impl Write,
+    ) -> Result<(), CliError> {
+        list::run_stream(
+            &self.path,
+            self.now(),
+            args,
+            |credentials| Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?)),
+            writer,
+        )
         .await
     }
 
