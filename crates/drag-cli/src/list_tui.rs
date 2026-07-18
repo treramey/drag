@@ -54,6 +54,16 @@ impl RatatuiListReportSession {
             terminal: Mutex::new(None),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn terminal_with_browser_launcher(
+        browser_launcher: impl BrowserLauncher + 'static,
+    ) -> Self {
+        Self {
+            browser_launcher: Box::new(browser_launcher),
+            terminal: Mutex::new(None),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

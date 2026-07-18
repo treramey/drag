@@ -412,7 +412,10 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 }),
             ),
             error_codes: [remote_errors, vec!["invalid_date"]].concat(),
-            side_effects: json!({"default": []}),
+            side_effects: json!({
+                "default": [],
+                "interactive": ["openFocusedJiraUrlInLocalDefaultBrowser"]
+            }),
             network_access: json!({"default": {"jira": "read", "tempo": "read"}}),
             dry_run: unsupported_dry_run(),
         },
@@ -547,6 +550,36 @@ fn command_behavior(path: &str) -> Value {
         "list" => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
             "verbose": "adds descriptions and Jira URLs to human output only",
+            "interactive": {
+                "outputMode": "human",
+                "terminalRequirements": ["stdin", "stdout", "stderr"],
+                "allTerminalsRequired": true,
+                "entry": "afterCompletedRetrieval",
+                "renderStream": "stderr",
+                "fallback": "completedPlainTextReport",
+                "controls": {
+                    "previousDate": "h",
+                    "nextDate": "l",
+                    "moveUp": ["up", "k"],
+                    "moveDown": ["down", "j"],
+                    "openFocusedJiraIssue": "o",
+                    "quit": ["q", "escape", "ctrl-c"]
+                },
+                "browser": {
+                    "trigger": "explicitOpenFocusedJiraIssue",
+                    "target": "resolvedJiraBrowseUrl",
+                    "sideEffect": "openLocalDefaultBrowser",
+                    "additionalRemoteRequest": false,
+                    "remoteMutation": false,
+                    "failure": "recoverableRedactedStatus"
+                }
+            },
+            "automation": {
+                "recommendation": "useExplicitJsonOutput",
+                "arguments": ["--output", "json"],
+                "interactive": false,
+                "successContract": "unchangedListJsonContract"
+            },
             "fieldSelection": {
                 "option": "fields",
                 "default": "allFields",

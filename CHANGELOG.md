@@ -12,8 +12,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
   keyboard navigation and scrolling, selected-month calendar context with
   distinct today and selected-date highlights, previous/next date browsing,
   a cohesive wide calendar-and-worklog dashboard, responsive columns, verbose
-  focused details, opening the focused Jira issue
-  with recoverable status feedback, and clean quit keys.
+  focused details, opening the focused Jira issue in the local default browser
+  with recoverable status feedback, a machine-readable interaction contract,
+  deterministic terminal restoration coverage, and clean quit keys.
 - Explicit NDJSON list streaming with discriminated worklog, schedule summary,
   and terminal pagination events; page-wise bounded retrieval; field-aware Jira
   enrichment; and structured mid-stream failures that preserve prior lines.

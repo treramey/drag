@@ -205,19 +205,27 @@ drag alias:set lunch ABC-123
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
 without changing machine field-selection behavior. When standard input, output,
-and error are terminals, human list output opens an interactive report after
-retrieval. On wide terminals, one dashboard places the selected-month calendar
-and month summary beside the selected date, focused worklog table, and day
-summary. The calendar highlights today and the selected date. Use `h`/`l` to
+and error are all terminals, human list output opens an interactive report on
+stderr after retrieval completes. If any stream is redirected, Drag falls back
+to the completed plain-text report. On wide terminals, one dashboard places the
+selected-month calendar and month summary beside the selected date, focused
+worklog table, and day summary. The calendar highlights today and the selected
+date. Use `h`/`l` to
 load the previous/next date and Up/Down or `k`/`j`
 to navigate rows; overflowing tables scroll to keep the focused row visible.
-Press `o` to open that row's resolved Jira browse URL in
-the default browser; success or failure is reported without closing the report.
+Press `o` to open that row's resolved Jira browse URL in the local default
+browser. This is an explicit local browser side effect: it does not make another
+Jira or Tempo request and does not mutate either service. Success or failure is
+reported without closing the report.
 Press `q`, Escape, or Ctrl-C to close it. `--verbose`
 shows the focused worklog's description and Jira URL below the responsive
 table. Bounded reports label partial totals and empty retrieved segments.
 Redirected human output, explicit JSON, and NDJSON remain non-interactive so
 their existing fields and payloads are preserved.
+
+For automation, pass `--output json` explicitly. This bypasses the interactive
+report and preserves the existing list JSON contract regardless of terminal
+attachment.
 
 For automation, use `--fields` with a comma-delimited mask and request only the
 data needed for the task. Select `date`; a whole `worklogs`, `schedule`, or

@@ -997,6 +997,40 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(selection["appliesTo"], "structuredOutputOnly");
     assert_eq!(selection["projection"], "beforeSerialization");
     assert_eq!(selection["ordering"], "canonicalResultOrder");
+    let interactive = &contract["commands"]["list"]["behavior"]["interactive"];
+    assert_eq!(interactive["outputMode"], "human");
+    assert_eq!(
+        interactive["terminalRequirements"],
+        serde_json::json!(["stdin", "stdout", "stderr"])
+    );
+    assert_eq!(interactive["allTerminalsRequired"], true);
+    assert_eq!(interactive["renderStream"], "stderr");
+    assert_eq!(interactive["fallback"], "completedPlainTextReport");
+    assert_eq!(interactive["controls"]["previousDate"], "h");
+    assert_eq!(interactive["controls"]["nextDate"], "l");
+    assert_eq!(interactive["controls"]["openFocusedJiraIssue"], "o");
+    assert_eq!(
+        interactive["controls"]["quit"],
+        serde_json::json!(["q", "escape", "ctrl-c"])
+    );
+    assert_eq!(
+        interactive["browser"]["sideEffect"],
+        "openLocalDefaultBrowser"
+    );
+    assert_eq!(interactive["browser"]["remoteMutation"], false);
+    assert_eq!(
+        contract["commands"]["list"]["behavior"]["automation"],
+        serde_json::json!({
+            "recommendation": "useExplicitJsonOutput",
+            "arguments": ["--output", "json"],
+            "interactive": false,
+            "successContract": "unchangedListJsonContract"
+        })
+    );
+    assert_eq!(
+        contract["commands"]["list"]["sideEffects"]["interactive"],
+        serde_json::json!(["openFocusedJiraUrlInLocalDefaultBrowser"])
+    );
     assert_eq!(
         contract["commands"]["setup"]["behavior"]["interactive"]["renderStream"],
         "stderr"
@@ -1075,6 +1109,11 @@ fn list_help_documents_read_only_date_and_verbose_behavior(
     assert!(stdout.contains("[DATE]"));
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("descriptions and Jira URLs"));
+    assert!(stdout.contains("stdin, stdout, and stderr are all"));
+    assert!(stdout.contains("interactive stderr report"));
+    assert!(stdout.contains("local default browser"));
+    assert!(stdout.contains("without changing Jira or Tempo"));
+    assert!(stdout.contains("--output json explicitly"));
     assert!(stdout.contains("--fields"));
     assert!(stdout.contains("Comma-delimited result fields"));
     assert!(stdout.contains("--limit"));

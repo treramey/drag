@@ -57,7 +57,12 @@ pub enum Command {
     ///
     /// DATE defaults to today in the configured local time zone and accepts
     /// YYYY-MM-DD, y, yesterday, t±N, or today±N. Add --verbose to include
-    /// descriptions and Jira URLs in human output.
+    /// descriptions and Jira URLs in human output. Human output becomes an
+    /// interactive stderr report only when stdin, stdout, and stderr are all
+    /// terminals; otherwise it falls back to plain text. Use h/l for adjacent
+    /// dates, Up/Down or j/k for rows, and o to open the focused Jira URL in
+    /// the local default browser without changing Jira or Tempo. Quit with q,
+    /// Escape, or Ctrl-C. Automation should pass --output json explicitly.
     #[command(visible_alias = "ls")]
     List(ListArgs),
     /// Delete one or more worklogs.

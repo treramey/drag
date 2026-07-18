@@ -733,6 +733,33 @@ fn spawn_setup_pty(
 }
 
 #[cfg(unix)]
+fn spawn_list_pty() -> Result<OsSession, Box<dyn std::error::Error>> {
+    let executable = std::env::current_exe()?;
+    let mut command = Command::new(executable);
+    command.args([
+        "--exact",
+        "app::tests::pty_list_report_helper",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    for variable in [
+        "TEMPO_TOKEN",
+        "TEMPO_ACCOUNT_ID",
+        "ATLASSIAN_EMAIL",
+        "ATLASSIAN_TOKEN",
+        "ATLASSIAN_HOST",
+        "BROWSER",
+    ] {
+        command.env_remove(variable);
+    }
+    let mut session = Session::spawn(command)?;
+    session.get_process_mut().set_window_size(100, 24)?;
+    session.set_expect_timeout(Some(Duration::from_secs(10)));
+    Ok(session)
+}
+
+#[cfg(unix)]
 fn pty_output_path(config_path: &std::path::Path) -> PathBuf {
     config_path.with_extension("stdout.json")
 }
@@ -786,6 +813,16 @@ fn expect_terminal_restoration(
     let paste = session.expect("\u{1b}[?2004l")?;
     let output = paste.before().to_vec();
     session.expect("\u{1b}[?1049l")?;
+    session.expect("\u{1b}[?25h")?;
+    Ok(output)
+}
+
+#[cfg(unix)]
+fn expect_list_terminal_restoration(
+    session: &mut OsSession,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let alternate_screen = session.expect("\u{1b}[?1049l")?;
+    let output = alternate_screen.before().to_vec();
     session.expect("\u{1b}[?25h")?;
     Ok(output)
 }
@@ -862,6 +899,46 @@ async fn pty_setup_helper() -> Result<(), Box<dyn std::error::Error>> {
         Ok(result) => crate::emit_result(result, ResolvedOutputMode::Json)?,
         Err(error) => crate::emit_error(&error, ResolvedOutputMode::Json),
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[ignore = "PTY child process invoked by the interactive list report test"]
+async fn pty_list_report_helper() -> Result<(), Box<dyn std::error::Error>> {
+    let report = empty_list_report(false);
+    let session = crate::list_tui::RatatuiListReportSession::terminal_with_browser_launcher(
+        NoopBrowserLauncher,
+    );
+    assert!(session.is_eligible());
+    assert_eq!(session.run(&report).await?, ListReportAction::Close);
+    assert!(!crossterm::terminal::is_raw_mode_enabled()?);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn pty_list_report_starts_quits_and_restores_the_terminal() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut session = spawn_list_pty()?;
+
+    session
+        .expect("July 2026")
+        .map_err(|error| format!("waiting for list calendar: {error}"))?;
+    session
+        .expect("Tuesday, 2026-07-14")
+        .map_err(|error| format!("waiting for selected list date: {error}"))?;
+    session.send("q")?;
+    let restored = expect_list_terminal_restoration(&mut session)
+        .map_err(|error| format!("waiting for list terminal restoration: {error}"))?;
+    session
+        .expect("ok")
+        .map_err(|error| format!("waiting for successful list helper exit: {error}"))?;
+    session
+        .expect(Eof)
+        .map_err(|error| format!("waiting for list helper EOF: {error}"))?;
+
+    assert!(!restored.is_empty());
     Ok(())
 }
 
