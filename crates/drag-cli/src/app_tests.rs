@@ -223,12 +223,12 @@ impl super::ConnectionEnvironment for FakeConnectionEnvironment {
 }
 
 impl BrowserLauncher for FakeBrowserLauncher {
-    fn open(&self, url: &url::Url) -> std::io::Result<()> {
+    fn open(&self, url: &str) -> std::io::Result<()> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| std::io::Error::other("test browser lock poisoned"))?;
-        state.browser_urls.push(url.as_str().to_owned());
+        state.browser_urls.push(url.to_owned());
         state.events.push(format!("browser:{url}"));
         match &state.browser_failure {
             Some(message) => Err(std::io::Error::other(message.clone())),

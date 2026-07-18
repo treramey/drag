@@ -208,7 +208,9 @@ without changing machine field-selection behavior. When standard input, output,
 and error are terminals, human list output opens an interactive report after
 retrieval. It shows month and day schedule summaries and a focused worklog
 table. Use Up/Down or `k`/`j` to navigate; overflowing tables scroll to keep the
-focused row visible. Press `q`, Escape, or Ctrl-C to close it. `--verbose`
+focused row visible. Press `o` to open that row's resolved Jira browse URL in
+the default browser; success or failure is reported without closing the report.
+Press `q`, Escape, or Ctrl-C to close it. `--verbose`
 shows the focused worklog's description and Jira URL below the responsive
 table. Bounded reports label partial totals and empty retrieved segments.
 Redirected human output, explicit JSON, and NDJSON remain non-interactive so

@@ -1249,7 +1249,7 @@ fn present_page(
     page: &crate::setup::TokenPage,
 ) {
     if page.open_browser {
-        if let Err(error) = browser_launcher.open(&page.url) {
+        if let Err(error) = browser_launcher.open(page.url.as_str()) {
             model.warning = Some(format!(
                 "Could not open token settings: {}. Use the URL shown below.",
                 escape_terminal_data(&error.to_string())
