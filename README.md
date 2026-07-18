@@ -206,9 +206,11 @@ drag alias:set lunch ABC-123
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
 without changing machine field-selection behavior. When standard input, output,
 and error are terminals, human list output opens an interactive report after
-retrieval. It shows month and day schedule summaries and a focused worklog
-table. Use Up/Down or `k`/`j` to navigate; overflowing tables scroll to keep the
-focused row visible. Press `o` to open that row's resolved Jira browse URL in
+retrieval. It shows the selected month as a calendar, highlights today and the
+selected date, and keeps month and day schedule summaries beside a focused
+worklog table. Use `h`/`l` to load the previous/next date and Up/Down or `k`/`j`
+to navigate rows; overflowing tables scroll to keep the focused row visible.
+Press `o` to open that row's resolved Jira browse URL in
 the default browser; success or failure is reported without closing the report.
 Press `q`, Escape, or Ctrl-C to close it. `--verbose`
 shows the focused worklog's description and Jira URL below the responsive

@@ -145,7 +145,7 @@ pub struct LogInput {
     pub remaining_estimate: Option<String>,
 }
 
-#[derive(Debug, Args, Default)]
+#[derive(Debug, Clone, Args, Default)]
 pub struct ListArgs {
     /// Optional date (defaults to today): YYYY-MM-DD, y, yesterday, t±N, or today±N.
     #[arg(value_name = "DATE")]

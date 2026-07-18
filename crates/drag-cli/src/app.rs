@@ -2,7 +2,7 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Days, Utc};
 use chrono_tz::Tz;
 use serde_json::json;
 
@@ -14,7 +14,7 @@ use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
 use crate::delete::{self, ApiDeleteGateway};
 use crate::list::{self, ApiListDataSource};
-use crate::list_tui::{ListReportSession, RatatuiListReportSession};
+use crate::list_tui::{ListReportAction, ListReportSession, RatatuiListReportSession};
 use crate::log::{self, ApiLogGateway};
 #[cfg(test)]
 use crate::setup::LineOnboardingSession;
@@ -304,16 +304,46 @@ impl App {
 
     pub async fn list(
         &self,
-        args: ListArgs,
+        mut args: ListArgs,
         interactive: bool,
     ) -> Result<Option<Rendered>, CliError> {
-        let report = list::run_report(&self.path, self.now(), args, |credentials| {
-            Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?))
-        })
-        .await?;
-        self.finish_list(report, interactive).await
+        loop {
+            let report = list::run_report(&self.path, self.now(), args.clone(), |credentials| {
+                Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?))
+            })
+            .await?;
+            if !interactive || !self.list_report_session.is_eligible() {
+                return Ok(Some(report.rendered()));
+            }
+            let selected_date = report.selected_date();
+            match self.list_report_session.run(&report).await? {
+                ListReportAction::Close => return Ok(None),
+                ListReportAction::PreviousDate => {
+                    args.when = Some(
+                        selected_date
+                            .checked_sub_days(Days::new(1))
+                            .ok_or_else(|| {
+                                CliError::InvalidInput("date is out of range".to_owned())
+                            })?
+                            .to_string(),
+                    );
+                }
+                ListReportAction::NextDate => {
+                    args.when = Some(
+                        selected_date
+                            .checked_add_days(Days::new(1))
+                            .ok_or_else(|| {
+                                CliError::InvalidInput("date is out of range".to_owned())
+                            })?
+                            .to_string(),
+                    );
+                }
+            }
+            args.continue_from = None;
+        }
     }
 
+    #[cfg(test)]
     async fn finish_list(
         &self,
         report: list::ListReport,

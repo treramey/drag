@@ -169,6 +169,7 @@ impl ListDataSource for ApiListDataSource {
 struct PreparedList {
     fields: Option<ListFieldMask>,
     selected_date: NaiveDate,
+    today: NaiveDate,
     details: ScheduleDetails,
     pagination: ListPagination,
     selected_entities: Vec<WorklogEntity>,
@@ -181,6 +182,7 @@ struct PreparedList {
 #[derive(Debug, Clone)]
 pub(crate) struct ListReport {
     selected_date: NaiveDate,
+    today: NaiveDate,
     worklogs: Vec<Worklog>,
     details: ScheduleDetails,
     pagination: ListPagination,
@@ -200,6 +202,7 @@ impl ListReport {
     ) -> Self {
         Self {
             selected_date,
+            today: selected_date,
             worklogs,
             details,
             pagination,
@@ -214,12 +217,21 @@ impl ListReport {
         self
     }
 
+    pub(crate) fn with_today(mut self, today: NaiveDate) -> Self {
+        self.today = today;
+        self
+    }
+
     pub(crate) fn worklogs(&self) -> &[Worklog] {
         &self.worklogs
     }
 
     pub(crate) fn selected_date(&self) -> NaiveDate {
         self.selected_date
+    }
+
+    pub(crate) fn today(&self) -> NaiveDate {
+        self.today
     }
 
     pub(crate) fn schedule(&self) -> &ScheduleDetails {
@@ -406,6 +418,7 @@ async fn prepare(
     Ok(PreparedList {
         fields: selection.fields,
         selected_date: selection.selected_date,
+        today: now.date_naive(),
         details,
         pagination,
         selected_entities,
@@ -463,6 +476,7 @@ pub(crate) async fn run_report(
         prepared.aliases,
         args.verbose,
     )
+    .with_today(prepared.today)
     .with_fields(prepared.fields))
 }
 
@@ -1603,6 +1617,44 @@ mod tests {
         );
         assert_eq!(requests.schedules, requests.worklogs);
         assert!(requests.issues.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completed_report_keeps_today_from_the_application_clock() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let fake = FakeListDataSource {
+            worklogs: Vec::new(),
+            schedule: Vec::new(),
+            requests: Arc::new(Mutex::new(Requests::default())),
+            failing_issues: Vec::new(),
+            pagination_result: None,
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 3, 23, 30, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let report = run_report(
+            &path,
+            now,
+            ListArgs {
+                when: Some("2026-07-14".to_owned()),
+                ..ListArgs::default()
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await?;
+
+        assert_eq!(
+            report.today(),
+            NaiveDate::from_ymd_opt(2026, 7, 3).unwrap_or(NaiveDate::MIN)
+        );
+        assert_eq!(
+            report.selected_date(),
+            NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN)
+        );
         Ok(())
     }
 

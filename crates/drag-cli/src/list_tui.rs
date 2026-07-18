@@ -4,6 +4,7 @@ use std::future::Future;
 use std::io::{self, IsTerminal};
 use std::pin::Pin;
 
+use chrono::Datelike;
 use crossterm::cursor::Show;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
@@ -15,8 +16,10 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Text};
+use ratatui::widgets::calendar::{CalendarEventStore, Monthly};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
+use tokio::sync::Mutex;
 
 use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::list::ListReport;
@@ -24,7 +27,14 @@ use crate::output::escape_terminal_data;
 use crate::CliError;
 
 pub(crate) type ListReportFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<(), CliError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<ListReportAction, CliError>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListReportAction {
+    Close,
+    PreviousDate,
+    NextDate,
+}
 
 pub(crate) trait ListReportSession: Send + Sync {
     fn is_eligible(&self) -> bool;
@@ -33,12 +43,14 @@ pub(crate) trait ListReportSession: Send + Sync {
 
 pub(crate) struct RatatuiListReportSession {
     browser_launcher: Box<dyn BrowserLauncher>,
+    terminal: Mutex<Option<StderrTerminal>>,
 }
 
 impl RatatuiListReportSession {
     pub(crate) fn terminal() -> Self {
         Self {
             browser_launcher: Box::new(SystemBrowserLauncher),
+            terminal: Mutex::new(None),
         }
     }
 }
@@ -109,7 +121,11 @@ impl ListReportSession for RatatuiListReportSession {
     }
 
     fn run<'a>(&'a self, report: &'a ListReport) -> ListReportFuture<'a> {
-        Box::pin(run_terminal(report, self.browser_launcher.as_ref()))
+        Box::pin(run_terminal(
+            report,
+            self.browser_launcher.as_ref(),
+            &self.terminal,
+        ))
     }
 }
 
@@ -170,8 +186,15 @@ impl Drop for StderrTerminal {
 async fn run_terminal(
     report: &ListReport,
     browser_launcher: &dyn BrowserLauncher,
-) -> Result<(), CliError> {
-    let mut terminal = StderrTerminal::new()?;
+    terminal_state: &Mutex<Option<StderrTerminal>>,
+) -> Result<ListReportAction, CliError> {
+    let mut terminal_state = terminal_state.lock().await;
+    if terminal_state.is_none() {
+        *terminal_state = Some(StderrTerminal::new()?);
+    }
+    let terminal = terminal_state
+        .as_mut()
+        .ok_or_else(|| CliError::Io(io::Error::other("list terminal was not initialized")))?;
     let mut events = EventStream::new();
     let mut model = ListReportModel::new(report);
     loop {
@@ -188,12 +211,27 @@ async fn run_terminal(
             }
             if should_quit(key.code, key.modifiers) {
                 terminal.restore()?;
-                return Ok(());
+                *terminal_state = None;
+                return Ok(ListReportAction::Close);
+            }
+            if let Some(action) = date_action_for_key_event(key.code, key.kind) {
+                return Ok(action);
             }
             if let Some(message) = message_for_key_event(key.code, key.kind) {
                 model.update(message, browser_launcher);
             }
         }
+    }
+}
+
+fn date_action_for_key_event(code: KeyCode, kind: KeyEventKind) -> Option<ListReportAction> {
+    if kind != KeyEventKind::Press {
+        return None;
+    }
+    match code {
+        KeyCode::Char('h') => Some(ListReportAction::PreviousDate),
+        KeyCode::Char('l') => Some(ListReportAction::NextDate),
+        _ => None,
     }
 }
 
@@ -222,9 +260,11 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
 fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
     let report = model.report;
     let pagination_height = u16::from(!report.pagination().totals_complete) * 2;
-    let details_height = focused_details_height(frame.area().height, pagination_height, model);
+    let month_height = month_height(frame.area(), pagination_height, report);
+    let details_height =
+        focused_details_height(frame.area().height, month_height, pagination_height, model);
     let [month, date, worklogs, details, day, pagination, footer] = Layout::vertical([
-        Constraint::Length(3),
+        Constraint::Length(month_height),
         Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(details_height),
@@ -253,8 +293,31 @@ fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
     render_footer(frame, footer, model);
 }
 
+fn month_height(terminal_area: Rect, pagination_height: u16, report: &ListReport) -> u16 {
+    const COMPACT_MONTH_HEIGHT: u16 = 3;
+    // Date heading, one bordered table row with its header, day summary, and
+    // footer remain visible before the month summary expands into a calendar.
+    const PRIMARY_REPORT_HEIGHT: u16 = 9;
+    let Some(date) = calendar_date(report.selected_date()) else {
+        return COMPACT_MONTH_HEIGHT;
+    };
+    let calendar = Monthly::new(date, CalendarEventStore::default())
+        .show_month_header(ratatui::style::Style::new().cyan().bold())
+        .show_weekdays_header(ratatui::style::Style::new().dim());
+    let calendar_height = calendar.height().saturating_add(3);
+    let calendar_width = calendar.width().saturating_add(2);
+    if terminal_area.width >= calendar_width
+        && terminal_area.height >= calendar_height + PRIMARY_REPORT_HEIGHT + pagination_height
+    {
+        calendar_height
+    } else {
+        COMPACT_MONTH_HEIGHT
+    }
+}
+
 fn focused_details_height(
     terminal_height: u16,
+    month_height: u16,
     pagination_height: u16,
     model: &ListReportModel<'_>,
 ) -> u16 {
@@ -263,7 +326,7 @@ fn focused_details_height(
     }
     // Month, date, day summary, footer, pagination, and a bordered table with
     // one visible row take priority over secondary verbose details.
-    let available = terminal_height.saturating_sub(12 + pagination_height);
+    let available = terminal_height.saturating_sub(month_height + 9 + pagination_height);
     match available {
         5.. => 5,
         3..=4 => 3,
@@ -316,6 +379,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
     }
     let spans = if area.width >= 70 {
         vec![
+            " h/l ".bold().cyan(),
+            "date  ".dim(),
             " ↑/k ".bold().cyan(),
             "up  ".dim(),
             "↓/j ".bold().cyan(),
@@ -333,6 +398,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
         vec![
             " q ".bold().cyan(),
             "quit  ".dim(),
+            "h/l ".bold().cyan(),
+            "date  ".dim(),
             "↑/k ".bold().cyan(),
             "up  ".dim(),
             "↓/j ".bold().cyan(),
@@ -343,9 +410,11 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
     } else if area.width >= 32 {
         vec![
             " q ".bold().cyan(),
-            "quit  ".dim(),
-            "↑↓/jk ".bold().cyan(),
-            "move  ".dim(),
+            "quit ".dim(),
+            "h/l ".bold().cyan(),
+            "date ".dim(),
+            "↑↓ ".bold().cyan(),
+            "move ".dim(),
             "o ".bold().cyan(),
             "open".dim(),
         ]
@@ -380,16 +449,54 @@ fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListRepo
 
 fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
     let schedule = report.schedule();
+    if area.height <= 3 {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{} / {} logged · {} current period",
+                schedule.month_logged_duration,
+                schedule.month_required_duration,
+                schedule.month_current_period_duration
+            ))
+            .block(Block::bordered().title(report.selected_date().format("%B %Y").to_string())),
+            area,
+        );
+        return;
+    }
+    let block = Block::bordered();
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [calendar_area, summary_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
+    let Some(selected_date) = calendar_date(report.selected_date()) else {
+        return;
+    };
+    let mut events = CalendarEventStore::default();
+    if let Some(today) = calendar_date(report.today()) {
+        events.add(today, ratatui::style::Style::new().cyan().bold());
+    }
+    events.add(
+        selected_date,
+        ratatui::style::Style::new().reversed().bold(),
+    );
+    let calendar = Monthly::new(selected_date, events)
+        .show_month_header(ratatui::style::Style::new().cyan().bold())
+        .show_weekdays_header(ratatui::style::Style::new().dim())
+        .show_surrounding(ratatui::style::Style::new().dim());
+    frame.render_widget(calendar, calendar_area);
     frame.render_widget(
-        Paragraph::new(format!(
+        Line::from(format!(
             "{} / {} logged · {} current period",
             schedule.month_logged_duration,
             schedule.month_required_duration,
             schedule.month_current_period_duration
-        ))
-        .block(Block::bordered().title(report.selected_date().format("%B %Y").to_string())),
-        area,
+        )),
+        summary_area,
     );
+}
+
+fn calendar_date(date: chrono::NaiveDate) -> Option<time::Date> {
+    time::Date::from_ordinal_date(date.year(), u16::try_from(date.ordinal()).ok()?).ok()
 }
 
 fn render_worklogs(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportModel<'_>) {
@@ -458,14 +565,16 @@ mod tests {
     use std::io;
     use std::sync::{Arc, Mutex};
 
-    use chrono::NaiveDate;
+    use chrono::{Datelike, NaiveDate};
     use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     use drag::models::{ClockInterval, ListPagination, Worklog};
     use drag::schedule::ScheduleDetails;
+    use ratatui::style::{Color, Modifier, Style};
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::{
-        message_for_key, message_for_key_event, render, should_quit, ListReportModel, Message,
+        date_action_for_key_event, message_for_key, message_for_key_event, render, should_quit,
+        ListReportAction, ListReportModel, Message,
     };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
@@ -495,8 +604,25 @@ mod tests {
         totals_complete: bool,
         verbose: bool,
     ) -> ListReport {
+        let selected_date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        report_with_dates(
+            worklogs,
+            totals_complete,
+            verbose,
+            selected_date,
+            selected_date,
+        )
+    }
+
+    fn report_with_dates(
+        worklogs: Vec<Worklog>,
+        totals_complete: bool,
+        verbose: bool,
+        selected_date: NaiveDate,
+        today: NaiveDate,
+    ) -> ListReport {
         ListReport::new(
-            NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN),
+            selected_date,
             worklogs,
             ScheduleDetails {
                 month_required_duration: "160h".to_owned(),
@@ -506,9 +632,12 @@ mod tests {
                 day_logged_duration: "1h 30m".to_owned(),
             },
             ListPagination {
-                selected_date: "2026-07-14".to_owned(),
-                month_start: "2026-07-01".to_owned(),
-                month_end: "2026-07-31".to_owned(),
+                selected_date: selected_date.to_string(),
+                month_start: selected_date
+                    .with_day(1)
+                    .unwrap_or(selected_date)
+                    .to_string(),
+                month_end: selected_date.to_string(),
                 limit: Some(100),
                 page_limit: 1,
                 all_pages: false,
@@ -522,6 +651,7 @@ mod tests {
             BTreeMap::from([("standup".to_owned(), "OPS-42".to_owned())]),
             verbose,
         )
+        .with_today(today)
     }
 
     fn screen(report: &ListReport) -> String {
@@ -546,6 +676,41 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    fn calendar_day_style(
+        report: &ListReport,
+        row: &str,
+        day_index: usize,
+    ) -> Option<(Color, Color, Modifier)> {
+        let mut model = ListReportModel::new(report);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).ok()?;
+        terminal.draw(|frame| render(frame, &mut model)).ok()?;
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 {
+            let line: String = (0..100)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect();
+            if let Some(row_byte) = line.find(row) {
+                let row_x = line[..row_byte].chars().count();
+                let entry_x = day_index.checked_mul(3)?;
+                let digit_offset = usize::from(row.as_bytes().get(entry_x) == Some(&b' '));
+                let day_x = row_x + entry_x + digit_offset;
+                return buffer
+                    .cell((u16::try_from(day_x).ok()?, y))
+                    .map(|cell| (cell.fg, cell.bg, cell.modifier));
+            }
+        }
+        None
+    }
+
+    fn materialized_style(style: Style) -> (Color, Color, Modifier) {
+        (
+            style.fg.unwrap_or(Color::Reset),
+            style.bg.unwrap_or(Color::Reset),
+            style.add_modifier,
+        )
     }
 
     #[test]
@@ -577,9 +742,84 @@ mod tests {
             "09:00–10:30",
             "(standup) OPS-42",
             "1h 30m / 8h",
+            "h/l date",
             "q quit",
             "Esc close",
             "Ctrl-C exit",
+        ] {
+            assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
+        }
+    }
+
+    #[test]
+    fn calendar_shows_the_selected_month_with_surrounding_dates() {
+        let selected_date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 3).unwrap_or(NaiveDate::MIN);
+        let report = report_with_dates(Vec::new(), true, false, selected_date, today);
+
+        let screen = screen(&report);
+
+        for expected in [
+            "Su Mo Tu We Th Fr Sa",
+            "28 29 30  1  2  3  4",
+            " 5  6  7  8  9 10 11",
+            "12 13 14 15 16 17 18",
+            "26 27 28 29 30 31  1",
+        ] {
+            assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
+        }
+    }
+
+    #[test]
+    fn calendar_distinguishes_today_from_the_selected_date() {
+        let selected_date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 3).unwrap_or(NaiveDate::MIN);
+        let report = report_with_dates(Vec::new(), true, false, selected_date, today);
+
+        let today_style = calendar_day_style(&report, "28 29 30  1  2  3  4", 5);
+        let selected_style = calendar_day_style(&report, "12 13 14 15 16 17 18", 2);
+
+        assert_eq!(
+            today_style,
+            Some(materialized_style(
+                ratatui::style::Style::new().cyan().bold()
+            ))
+        );
+        assert_eq!(
+            selected_style,
+            Some(materialized_style(
+                ratatui::style::Style::new().reversed().bold()
+            ))
+        );
+        assert_ne!(today_style, selected_style);
+    }
+
+    #[test]
+    fn selected_date_style_takes_precedence_when_it_is_today() {
+        let selected_date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_dates(Vec::new(), true, false, selected_date, selected_date);
+
+        assert_eq!(
+            calendar_day_style(&report, "12 13 14 15 16 17 18", 2),
+            Some(materialized_style(
+                ratatui::style::Style::new().reversed().bold()
+            ))
+        );
+    }
+
+    #[test]
+    fn calendar_and_heading_follow_a_selected_date_across_a_month_boundary() {
+        let selected_date = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 31).unwrap_or(NaiveDate::MIN);
+        let report = report_with_dates(Vec::new(), true, false, selected_date, today);
+
+        let screen = screen(&report);
+
+        for expected in [
+            "August 2026",
+            "Saturday, 2026-08-01",
+            "26 27 28 29 30 31  1",
+            "30 31  1  2  3  4  5",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
@@ -662,6 +902,22 @@ mod tests {
             assert_eq!(message_for_key(code), Some(Message::MoveDown));
         }
         assert_eq!(message_for_key(KeyCode::Char('x')), None);
+    }
+
+    #[test]
+    fn h_and_l_change_dates_only_on_key_press() {
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Char('h'), KeyEventKind::Press),
+            Some(ListReportAction::PreviousDate)
+        );
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Char('l'), KeyEventKind::Press),
+            Some(ListReportAction::NextDate)
+        );
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Char('l'), KeyEventKind::Repeat),
+            None
+        );
     }
 
     #[test]

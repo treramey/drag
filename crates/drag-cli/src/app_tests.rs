@@ -30,7 +30,7 @@ use super::{
 };
 use crate::cli::{DoctorArgs, SetupArgs};
 use crate::list::ListReport;
-use crate::list_tui::ListReportSession;
+use crate::list_tui::{ListReportAction, ListReportSession};
 use crate::CliError;
 #[cfg(unix)]
 use crate::ResolvedOutputMode;
@@ -83,7 +83,7 @@ impl ListReportSession for FakeListReportSession {
                 .lock()
                 .map_err(|_| CliError::Io(std::io::Error::other("list session lock poisoned")))?
                 .push(report.selected_date());
-            Ok(())
+            Ok(ListReportAction::Close)
         })
     }
 }
