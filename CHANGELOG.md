@@ -7,6 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Interactive Ratatui list reports for fully attached non-verbose human
+  terminals, with qualified partial totals, populated and empty worklog views,
+  and clean quit keys.
 - Explicit NDJSON list streaming with discriminated worklog, schedule summary,
   and terminal pagination events; page-wise bounded retrieval; field-aware Jira
   enrichment; and structured mid-stream failures that preserve prior lines.

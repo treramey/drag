@@ -48,6 +48,10 @@ several peer submodules rather than a single implementation file.
   containing the selected date, worklogs, schedule and pagination details,
   alias-aware issue labels, and verbose state. Plain text and structured JSON
   are projections of that completed report.
+- `drag_cli::list_tui`: eligibility checks, stderr Ratatui rendering,
+  quit-event handling, and restoration of terminal state for interactive list
+  reports. Retrieval completes before this boundary is entered; verbose reports
+  stay in plain text until the interactive details view is available.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
   metadata and schemars schemas for shared serde input and result models.
 - `drag_cli::setup`: setup state and connection verification.

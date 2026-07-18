@@ -186,10 +186,11 @@ pub(crate) struct ListReport {
     pagination: ListPagination,
     aliases: BTreeMap<String, String>,
     verbose: bool,
+    fields: Option<ListFieldMask>,
 }
 
 impl ListReport {
-    fn new(
+    pub(crate) fn new(
         selected_date: NaiveDate,
         worklogs: Vec<Worklog>,
         details: ScheduleDetails,
@@ -204,7 +205,13 @@ impl ListReport {
             pagination,
             aliases,
             verbose,
+            fields: None,
         }
+    }
+
+    fn with_fields(mut self, fields: Option<ListFieldMask>) -> Self {
+        self.fields = fields;
+        self
     }
 
     pub(crate) fn worklogs(&self) -> &[Worklog] {
@@ -263,6 +270,13 @@ impl ListReport {
                     mask,
                 )
             },
+        )
+    }
+
+    pub(crate) fn rendered(&self) -> Rendered {
+        Rendered::new(
+            self.structured_data(self.fields.as_ref()),
+            self.plain_text(),
         )
     }
 }
@@ -401,12 +415,24 @@ async fn prepare(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn run(
     config_path: &Path,
     now: DateTime<Tz>,
     args: ListArgs,
     make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
 ) -> Result<Rendered, CliError> {
+    Ok(run_report(config_path, now, args, make_source)
+        .await?
+        .rendered())
+}
+
+pub(crate) async fn run_report(
+    config_path: &Path,
+    now: DateTime<Tz>,
+    args: ListArgs,
+    make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
+) -> Result<ListReport, CliError> {
     let prepared = prepare(config_path, now, &args, make_source).await?;
     let issue_ids: BTreeSet<_> = prepared
         .selected_entities
@@ -429,18 +455,15 @@ pub(crate) async fn run(
             to_worklog(entity, issue_key, prepared.timezone)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let report = ListReport::new(
+    Ok(ListReport::new(
         prepared.selected_date,
         worklogs,
         prepared.details,
         prepared.pagination,
         prepared.aliases,
         args.verbose,
-    );
-    Ok(Rendered::new(
-        report.structured_data(prepared.fields.as_ref()),
-        report.plain_text(),
-    ))
+    )
+    .with_fields(prepared.fields))
 }
 
 pub(crate) async fn run_stream(
