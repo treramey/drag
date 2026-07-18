@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::pin::Pin;
 
@@ -8,10 +8,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
-use drag::field_selection::{project_list_result, ListFieldMask};
+use drag::field_selection::{project_list_result, ListField, ListFieldMask};
 use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
 use drag::pagination::{PaginationPlan, DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
-use drag::schedule::{create_schedule_details, ScheduleDetails};
+use drag::schedule::{create_schedule_details, ScheduleAccumulator, ScheduleDetails};
 use drag::time::{clock_interval, format_duration, month_bounds, select_date};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -108,6 +108,14 @@ pub(crate) trait ListDataSource: Send + Sync {
         plan: PaginationPlan,
         continue_from: Option<&'a str>,
     ) -> ListFuture<'a, WorklogPage>;
+    fn worklog_page<'a>(
+        &'a self,
+        from: &'a str,
+        to: &'a str,
+        plan: PaginationPlan,
+        continue_from: Option<&'a str>,
+        _records_retrieved: usize,
+    ) -> ListFuture<'a, WorklogPage>;
     fn schedule<'a>(&'a self, from: &'a str, to: &'a str) -> ListFuture<'a, Vec<ScheduleEntity>>;
     fn issue_key<'a>(&'a self, issue_id: &'a str) -> ListFuture<'a, String>;
 }
@@ -135,6 +143,20 @@ impl ListDataSource for ApiListDataSource {
         Box::pin(self.api.get_worklogs_bounded(from, to, plan, continue_from))
     }
 
+    fn worklog_page<'a>(
+        &'a self,
+        from: &'a str,
+        to: &'a str,
+        plan: PaginationPlan,
+        continue_from: Option<&'a str>,
+        records_retrieved: usize,
+    ) -> ListFuture<'a, WorklogPage> {
+        Box::pin(
+            self.api
+                .get_worklog_page(from, to, plan, continue_from, records_retrieved),
+        )
+    }
+
     fn schedule<'a>(&'a self, from: &'a str, to: &'a str) -> ListFuture<'a, Vec<ScheduleEntity>> {
         Box::pin(self.api.get_schedule(from, to))
     }
@@ -155,12 +177,16 @@ struct PreparedList {
     timezone: Tz,
 }
 
-async fn prepare(
-    config_path: &Path,
-    now: DateTime<Tz>,
-    args: &ListArgs,
-    make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
-) -> Result<PreparedList, CliError> {
+struct ListSelection {
+    fields: Option<ListFieldMask>,
+    selected_date: NaiveDate,
+    month_start: String,
+    month_end: String,
+    continuation: Option<ListContinuation>,
+    plan: PaginationPlan,
+}
+
+fn list_selection(now: DateTime<Tz>, args: &ListArgs) -> Result<ListSelection, CliError> {
     let fields = args
         .fields
         .as_deref()
@@ -188,18 +214,38 @@ async fn prepare(
         }
         validate_tempo_continuation_input(&continuation.url, &month_start, &month_end, plan)?;
     }
+    Ok(ListSelection {
+        fields,
+        selected_date: selected.date,
+        month_start,
+        month_end,
+        continuation,
+        plan,
+    })
+}
+
+async fn prepare(
+    config_path: &Path,
+    now: DateTime<Tz>,
+    args: &ListArgs,
+    make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
+) -> Result<PreparedList, CliError> {
+    let selection = list_selection(now, args)?;
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
     let aliases = config.aliases;
     let source = make_source(credentials.clone())?;
     let (page, schedule) = tokio::try_join!(
         source.worklogs(
-            &month_start,
-            &month_end,
-            plan,
-            continuation.as_ref().map(|value| value.url.as_str())
+            &selection.month_start,
+            &selection.month_end,
+            selection.plan,
+            selection
+                .continuation
+                .as_ref()
+                .map(|value| value.url.as_str())
         ),
-        source.schedule(&month_start, &month_end)
+        source.schedule(&selection.month_start, &selection.month_end)
     )?;
     let WorklogPage {
         results: entities,
@@ -209,11 +255,11 @@ async fn prepare(
     let details = create_schedule_details(
         &entities,
         &schedule,
-        selected.date,
+        selection.selected_date,
         now.date_naive(),
         &credentials.account_id,
     );
-    let selected_date = selected.date.to_string();
+    let selected_date = selection.selected_date.to_string();
     let records_retrieved = entities.len();
     let selected_entities: Vec<_> = entities
         .into_iter()
@@ -222,29 +268,29 @@ async fn prepare(
         })
         .collect();
     let complete = next.is_none();
-    let totals_complete = continuation.is_none() && complete;
+    let totals_complete = selection.continuation.is_none() && complete;
     let records_returned = selected_entities.len();
     let next = next
         .map(|url| {
             encode_continuation(&ListContinuation {
                 version: 1,
-                selected_date: selected.date.to_string(),
-                month_start: month_start.clone(),
-                month_end: month_end.clone(),
+                selected_date: selection.selected_date.to_string(),
+                month_start: selection.month_start.clone(),
+                month_end: selection.month_end.clone(),
                 url,
-                limit: plan.record_limit(),
-                page_limit: plan.page_limit(),
-                all_pages: plan.is_all_pages(),
+                limit: selection.plan.record_limit(),
+                page_limit: selection.plan.page_limit(),
+                all_pages: selection.plan.is_all_pages(),
             })
         })
         .transpose()?;
     let pagination = ListPagination {
-        selected_date: selected.date.to_string(),
-        month_start,
-        month_end,
-        limit: plan.record_limit(),
-        page_limit: plan.page_limit(),
-        all_pages: plan.is_all_pages(),
+        selected_date: selection.selected_date.to_string(),
+        month_start: selection.month_start,
+        month_end: selection.month_end,
+        limit: selection.plan.record_limit(),
+        page_limit: selection.plan.page_limit(),
+        all_pages: selection.plan.is_all_pages(),
         pages_retrieved,
         records_retrieved,
         records_returned,
@@ -254,8 +300,8 @@ async fn prepare(
     };
 
     Ok(PreparedList {
-        fields,
-        selected_date: selected.date,
+        fields: selection.fields,
+        selected_date: selection.selected_date,
         details,
         pagination,
         selected_entities,
@@ -333,47 +379,112 @@ pub(crate) async fn run_stream(
     make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
     writer: &mut impl Write,
 ) -> Result<(), CliError> {
-    let prepared = prepare(config_path, now, &args, make_source).await?;
-
+    let selection = list_selection(now, &args)?;
+    let config = Config::load(config_path)?;
+    let credentials = config.credentials()?;
+    let source = make_source(credentials.clone())?;
+    let schedule = source
+        .schedule(&selection.month_start, &selection.month_end)
+        .await?;
+    let mut schedule_totals = ScheduleAccumulator::new(
+        &schedule,
+        selection.selected_date,
+        now.date_naive(),
+        &credentials.account_id,
+    );
+    let selected_date = selection.selected_date.to_string();
+    let mut continuation = selection
+        .continuation
+        .as_ref()
+        .map(|value| value.url.clone());
+    let mut pages_retrieved = 0_u16;
+    let mut records_retrieved = 0_usize;
+    let mut records_returned = 0_usize;
     let mut issue_keys: BTreeMap<String, String> = BTreeMap::new();
-    for entity in prepared.selected_entities {
-        let issue_id = entity.issue.id.as_str();
-        let issue_key = if let Some(issue_key) = issue_keys.get(issue_id) {
-            issue_key.clone()
-        } else {
-            let issue_key = prepared.source.issue_key(issue_id).await?;
-            issue_keys.insert(issue_id.to_owned(), issue_key.clone());
-            issue_key
-        };
-        let worklog = to_worklog(entity, issue_key, prepared.timezone)?;
-        let projected = prepared.fields.as_ref().map_or_else(
-            || Some(json!(worklog)),
-            |mask| {
-                project_list_result(
-                    prepared.selected_date,
-                    std::slice::from_ref(&worklog),
-                    &prepared.details,
-                    &prepared.pagination,
-                    mask,
-                )["worklogs"]
-                    .as_array()
-                    .and_then(|worklogs| worklogs.first().cloned())
-            },
-        );
-        if let Some(worklog) = projected {
-            write_stream_event(writer, &json!({"kind": "worklog", "worklog": worklog}))?;
-        }
-    }
+    let (next, complete) = loop {
+        let page = source
+            .worklog_page(
+                &selection.month_start,
+                &selection.month_end,
+                selection.plan,
+                continuation.as_deref(),
+                records_retrieved,
+            )
+            .await?;
+        pages_retrieved += page.pages_retrieved;
+        records_retrieved += page.results.len();
+        schedule_totals.add_worklogs(&page.results);
 
-    let projected = prepared.fields.as_ref().map(|mask| {
-        project_list_result(
-            prepared.selected_date,
-            &[],
-            &prepared.details,
-            &prepared.pagination,
-            mask,
-        )
-    });
+        for entity in page.results.into_iter().filter(|entity| {
+            entity.author.account_id == credentials.account_id && entity.start_date == selected_date
+        }) {
+            records_returned += 1;
+            if let Some(worklog) = stream_worklog_value(
+                entity,
+                selection.fields.as_ref(),
+                now.timezone(),
+                source.as_ref(),
+                &mut issue_keys,
+            )
+            .await?
+            {
+                if !write_stream_event(writer, &json!({"kind": "worklog", "worklog": worklog}))? {
+                    return Ok(());
+                }
+            }
+        }
+
+        let Some(next) = page.next else {
+            break (None, true);
+        };
+        if !selection
+            .plan
+            .should_follow(pages_retrieved, records_retrieved)
+        {
+            if selection.plan.is_all_pages() && pages_retrieved == HARD_PAGE_LIMIT {
+                return Err(CliError::Api(
+                    "Tempo pagination exceeded the 100-page safety limit".to_owned(),
+                ));
+            }
+            break (Some(next), false);
+        }
+        continuation = Some(next);
+    };
+
+    let totals_complete = selection.continuation.is_none() && complete;
+    let next = next
+        .map(|url| {
+            encode_continuation(&ListContinuation {
+                version: 1,
+                selected_date: selection.selected_date.to_string(),
+                month_start: selection.month_start.clone(),
+                month_end: selection.month_end.clone(),
+                url,
+                limit: selection.plan.record_limit(),
+                page_limit: selection.plan.page_limit(),
+                all_pages: selection.plan.is_all_pages(),
+            })
+        })
+        .transpose()?;
+    let details = schedule_totals.finish();
+    let pagination = ListPagination {
+        selected_date: selection.selected_date.to_string(),
+        month_start: selection.month_start,
+        month_end: selection.month_end,
+        limit: selection.plan.record_limit(),
+        page_limit: selection.plan.page_limit(),
+        all_pages: selection.plan.is_all_pages(),
+        pages_retrieved,
+        records_retrieved,
+        records_returned,
+        next,
+        complete,
+        totals_complete,
+    };
+    let projected = selection
+        .fields
+        .as_ref()
+        .map(|mask| project_list_result(selection.selected_date, &[], &details, &pagination, mask));
     let mut summary = serde_json::Map::from_iter([("kind".to_owned(), json!("summary"))]);
     if let Some(projected) = &projected {
         if let Some(date) = projected.get("date") {
@@ -383,10 +494,12 @@ pub(crate) async fn run_stream(
             summary.insert("schedule".to_owned(), schedule.clone());
         }
     } else {
-        summary.insert("date".to_owned(), json!(prepared.selected_date));
-        summary.insert("schedule".to_owned(), json!(prepared.details));
+        summary.insert("date".to_owned(), json!(selection.selected_date));
+        summary.insert("schedule".to_owned(), json!(details));
     }
-    write_stream_event(writer, &serde_json::Value::Object(summary))?;
+    if !write_stream_event(writer, &serde_json::Value::Object(summary))? {
+        return Ok(());
+    }
 
     let mut terminal = serde_json::Map::from_iter([("kind".to_owned(), json!("pagination"))]);
     if let Some(projected) = &projected {
@@ -394,38 +507,149 @@ pub(crate) async fn run_stream(
             terminal.insert("pagination".to_owned(), pagination.clone());
         }
     } else {
-        terminal.insert("pagination".to_owned(), json!(prepared.pagination));
+        terminal.insert("pagination".to_owned(), json!(pagination));
     }
-    write_stream_event(writer, &serde_json::Value::Object(terminal))?;
+    let _ = write_stream_event(writer, &serde_json::Value::Object(terminal))?;
     Ok(())
 }
 
-fn write_stream_event(writer: &mut impl Write, event: &serde_json::Value) -> Result<(), CliError> {
-    serde_json::to_writer(&mut *writer, event)?;
-    writeln!(writer)?;
-    writer.flush()?;
-    Ok(())
+async fn stream_worklog_value(
+    entity: WorklogEntity,
+    fields: Option<&ListFieldMask>,
+    timezone: Tz,
+    source: &dyn ListDataSource,
+    issue_keys: &mut BTreeMap<String, String>,
+) -> Result<Option<serde_json::Value>, CliError> {
+    let Some(fields) = fields else {
+        let issue_key = resolved_issue_key(source, issue_keys, &entity.issue.id).await?;
+        return Ok(Some(json!(to_worklog(entity, issue_key, timezone)?)));
+    };
+    if !fields.selects_worklogs() {
+        return Ok(None);
+    }
+
+    let needs_issue_key =
+        fields.includes(ListField::WorklogIssueKey) || fields.includes(ListField::WorklogLink);
+    let issue_key = if needs_issue_key {
+        Some(resolved_issue_key(source, issue_keys, &entity.issue.id).await?)
+    } else {
+        None
+    };
+    let needs_interval = fields.includes(ListField::WorklogIntervalStartTime)
+        || fields.includes(ListField::WorklogIntervalEndTime);
+    let interval = needs_interval
+        .then(|| worklog_interval(&entity, timezone))
+        .transpose()?;
+    let link = if fields.includes(ListField::WorklogLink) {
+        Some(worklog_link(
+            &entity,
+            issue_key
+                .as_deref()
+                .ok_or_else(|| CliError::Api("Atlassian did not return an issue key".to_owned()))?,
+        )?)
+    } else {
+        None
+    };
+
+    let mut worklog = serde_json::Map::new();
+    if fields.includes(ListField::WorklogId) {
+        worklog.insert("id".to_owned(), json!(entity.tempo_worklog_id));
+    }
+    if let Some(interval) = interval {
+        let interval = interval.map_or(serde_json::Value::Null, |interval| {
+            let mut projected = serde_json::Map::new();
+            if fields.includes(ListField::WorklogIntervalStartTime) {
+                projected.insert("startTime".to_owned(), json!(interval.start_time));
+            }
+            if fields.includes(ListField::WorklogIntervalEndTime) {
+                projected.insert("endTime".to_owned(), json!(interval.end_time));
+            }
+            serde_json::Value::Object(projected)
+        });
+        worklog.insert("interval".to_owned(), interval);
+    }
+    if fields.includes(ListField::WorklogIssueId) {
+        worklog.insert("issueId".to_owned(), json!(entity.issue.id));
+    }
+    if fields.includes(ListField::WorklogIssueKey) {
+        worklog.insert("issueKey".to_owned(), json!(issue_key));
+    }
+    if fields.includes(ListField::WorklogDuration) {
+        worklog.insert(
+            "duration".to_owned(),
+            json!(format_duration(entity.time_spent_seconds, false)),
+        );
+    }
+    if fields.includes(ListField::WorklogDescription) {
+        worklog.insert("description".to_owned(), json!(entity.description));
+    }
+    if let Some(link) = link {
+        worklog.insert("link".to_owned(), json!(link));
+    }
+    Ok(Some(serde_json::Value::Object(worklog)))
 }
 
-fn to_worklog(entity: WorklogEntity, issue_key: String, timezone: Tz) -> Result<Worklog, CliError> {
+async fn resolved_issue_key(
+    source: &dyn ListDataSource,
+    issue_keys: &mut BTreeMap<String, String>,
+    issue_id: &str,
+) -> Result<String, CliError> {
+    if let Some(issue_key) = issue_keys.get(issue_id) {
+        return Ok(issue_key.clone());
+    }
+    let issue_key = source.issue_key(issue_id).await?;
+    issue_keys.insert(issue_id.to_owned(), issue_key.clone());
+    Ok(issue_key)
+}
+
+fn write_stream_event(
+    writer: &mut impl Write,
+    event: &serde_json::Value,
+) -> Result<bool, CliError> {
+    let mut line = serde_json::to_vec(event)?;
+    line.push(b'\n');
+    for result in [writer.write_all(&line), writer.flush()] {
+        match result {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(true)
+}
+
+fn worklog_interval(
+    entity: &WorklogEntity,
+    timezone: Tz,
+) -> Result<Option<drag::models::ClockInterval>, CliError> {
     let date = NaiveDate::parse_from_str(&entity.start_date, "%Y-%m-%d")
         .map_err(|_| CliError::Api("Tempo returned an invalid start date".to_owned()))?;
+    Ok(clock_interval(
+        entity.time_spent_seconds,
+        &entity.start_time,
+        date,
+        timezone,
+    ))
+}
+
+fn worklog_link(entity: &WorklogEntity, issue_key: &str) -> Result<String, CliError> {
     let hostname = Url::parse(&entity.issue.self_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .ok_or_else(|| CliError::Api("Tempo returned an invalid issue URL".to_owned()))?;
+    Ok(format!("https://{hostname}/browse/{issue_key}"))
+}
+
+fn to_worklog(entity: WorklogEntity, issue_key: String, timezone: Tz) -> Result<Worklog, CliError> {
+    let interval = worklog_interval(&entity, timezone)?;
+    let link = worklog_link(&entity, &issue_key)?;
     Ok(Worklog {
         id: entity.tempo_worklog_id,
-        interval: clock_interval(
-            entity.time_spent_seconds,
-            &entity.start_time,
-            date,
-            timezone,
-        ),
+        interval,
         issue_id: entity.issue.id,
         duration: format_duration(entity.time_spent_seconds, false),
         description: entity.description,
-        link: format!("https://{hostname}/browse/{issue_key}"),
+        link,
         issue_key,
     })
 }
@@ -511,6 +735,8 @@ fn issue_with_aliases(issue_key: &str, aliases: &BTreeMap<String, String>) -> St
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::io;
     use std::sync::{Arc, Mutex};
 
     use chrono::TimeZone;
@@ -533,6 +759,95 @@ mod tests {
         requests: Arc<Mutex<Requests>>,
         failing_issues: Vec<String>,
         pagination_result: Option<(Option<String>, u16)>,
+    }
+
+    struct PagedListDataSource {
+        pages: Mutex<VecDeque<Result<WorklogPage, CliError>>>,
+        schedule: Vec<ScheduleEntity>,
+        requests: Arc<Mutex<Requests>>,
+    }
+
+    impl ListDataSource for PagedListDataSource {
+        fn worklogs<'a>(
+            &'a self,
+            _from: &'a str,
+            _to: &'a str,
+            _plan: PaginationPlan,
+            _continue_from: Option<&'a str>,
+        ) -> ListFuture<'a, WorklogPage> {
+            Box::pin(async {
+                Err(CliError::Api(
+                    "paged test source was called through aggregate retrieval".to_owned(),
+                ))
+            })
+        }
+
+        fn worklog_page<'a>(
+            &'a self,
+            from: &'a str,
+            to: &'a str,
+            plan: PaginationPlan,
+            continue_from: Option<&'a str>,
+            _records_retrieved: usize,
+        ) -> ListFuture<'a, WorklogPage> {
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.worklogs.push((from.to_owned(), to.to_owned()));
+                requests
+                    .pagination
+                    .push((plan, continue_from.map(str::to_owned)));
+            }
+            let page = self
+                .pages
+                .lock()
+                .map_err(|_| CliError::Api("test page lock was poisoned".to_owned()))
+                .and_then(|mut pages| {
+                    pages.pop_front().ok_or_else(|| {
+                        CliError::Api("paged test source ran out of responses".to_owned())
+                    })
+                })
+                .and_then(|page| page);
+            Box::pin(async move { page })
+        }
+
+        fn schedule<'a>(
+            &'a self,
+            from: &'a str,
+            to: &'a str,
+        ) -> ListFuture<'a, Vec<ScheduleEntity>> {
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.schedules.push((from.to_owned(), to.to_owned()));
+            }
+            let schedule = self.schedule.clone();
+            Box::pin(async move { Ok(schedule) })
+        }
+
+        fn issue_key<'a>(&'a self, issue_id: &'a str) -> ListFuture<'a, String> {
+            if let Ok(mut requests) = self.requests.lock() {
+                requests.issues.push(issue_id.to_owned());
+            }
+            Box::pin(async move { Ok(format!("KEY-{issue_id}")) })
+        }
+    }
+
+    #[derive(Default)]
+    struct BreakAfterFirstLine {
+        bytes: Vec<u8>,
+        lines: usize,
+    }
+
+    impl Write for BreakAfterFirstLine {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if self.lines >= 1 {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "reader closed"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            self.lines += bytes.iter().filter(|byte| **byte == b'\n').count();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 
     impl ListDataSource for FakeListDataSource {
@@ -561,6 +876,17 @@ mod tests {
                     pages_retrieved,
                 })
             })
+        }
+
+        fn worklog_page<'a>(
+            &'a self,
+            from: &'a str,
+            to: &'a str,
+            plan: PaginationPlan,
+            continue_from: Option<&'a str>,
+            _records_retrieved: usize,
+        ) -> ListFuture<'a, WorklogPage> {
+            self.worklogs(from, to, plan, continue_from)
         }
 
         fn schedule<'a>(
@@ -660,26 +986,32 @@ mod tests {
         let directory = TempDir::new()?;
         let path = configured_file(&directory)?;
         let requests = Arc::new(Mutex::new(Requests::default()));
-        let fake = FakeListDataSource {
-            worklogs: vec![
-                worklog("first", "2026-07-14", "me", "10"),
-                other_day_worklog(),
-                worklog("second", "2026-07-14", "me", "20"),
-            ],
+        let first_next =
+            "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=2&limit=3";
+        let second_next =
+            "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=3&limit=3";
+        let fake = PagedListDataSource {
+            pages: Mutex::new(VecDeque::from([
+                Ok(WorklogPage {
+                    results: vec![
+                        worklog("first", "2026-07-14", "me", "10"),
+                        other_day_worklog(),
+                    ],
+                    next: Some(first_next.to_owned()),
+                    pages_retrieved: 1,
+                }),
+                Ok(WorklogPage {
+                    results: vec![worklog("second", "2026-07-14", "me", "20")],
+                    next: Some(second_next.to_owned()),
+                    pages_retrieved: 1,
+                }),
+            ])),
             schedule: vec![ScheduleEntity {
                 date: "2026-07-14".to_owned(),
                 required_seconds: 28_800,
                 kind: "WORKING_DAY".to_owned(),
             }],
             requests: Arc::clone(&requests),
-            failing_issues: Vec::new(),
-            pagination_result: Some((
-                Some(
-                    "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=3&limit=3"
-                        .to_owned(),
-                ),
-                2,
-            )),
         };
         let now = chrono_tz::UTC
             .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
@@ -720,7 +1052,10 @@ mod tests {
             .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
         assert_eq!(
             requests.pagination,
-            [(PaginationPlan::bounded(3, 2)?, None)]
+            [
+                (PaginationPlan::bounded(3, 2)?, None),
+                (PaginationPlan::bounded(3, 2)?, Some(first_next.to_owned()))
+            ]
         );
         Ok(())
     }
@@ -826,6 +1161,167 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["kind"], "worklog");
         assert_eq!(events[0]["worklog"]["id"], "emitted");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ndjson_stream_emits_completed_pages_before_a_later_page_fails() -> Result<(), CliError>
+    {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let requests = Arc::new(Mutex::new(Requests::default()));
+        let next =
+            "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1&limit=100";
+        let fake = PagedListDataSource {
+            pages: Mutex::new(VecDeque::from([
+                Ok(WorklogPage {
+                    results: vec![worklog("emitted", "2026-07-14", "me", "10")],
+                    next: Some(next.to_owned()),
+                    pages_retrieved: 1,
+                }),
+                Err(CliError::Api("second Tempo page failed".to_owned())),
+            ])),
+            schedule: Vec::new(),
+            requests: Arc::clone(&requests),
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+        let mut output = Vec::new();
+
+        let error = run_stream(
+            &path,
+            now,
+            ListArgs {
+                all_pages: true,
+                ..ListArgs::default()
+            },
+            |_| Ok(Box::new(fake)),
+            &mut output,
+        )
+        .await
+        .err()
+        .ok_or_else(|| CliError::Api("failing second page unexpectedly succeeded".to_owned()))?;
+
+        assert_eq!(error.code(), "api_error");
+        assert_eq!(
+            ndjson_lines(&output)?,
+            [json!({
+                "kind": "worklog",
+                "worklog": {
+                    "id": "emitted",
+                    "interval": {"startTime": "09:15", "endTime": "10:15"},
+                    "issueId": "10",
+                    "issueKey": "KEY-10",
+                    "duration": "1h",
+                    "description": "description emitted",
+                    "link": "https://example.atlassian.net/browse/KEY-10"
+                }
+            })]
+        );
+        let requests = requests
+            .lock()
+            .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
+        assert_eq!(requests.pagination.len(), 2);
+        assert_eq!(requests.pagination[1].1.as_deref(), Some(next));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ndjson_field_masks_skip_unrequested_jira_enrichment_and_conversion(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        for (mask, expected) in [
+            (
+                "pagination.next",
+                vec![
+                    json!({"kind": "summary"}),
+                    json!({"kind": "pagination", "pagination": {"next": null}}),
+                ],
+            ),
+            (
+                "worklogs.id",
+                vec![
+                    json!({"kind": "worklog", "worklog": {"id": "visible"}}),
+                    json!({"kind": "summary"}),
+                    json!({"kind": "pagination"}),
+                ],
+            ),
+        ] {
+            let requests = Arc::new(Mutex::new(Requests::default()));
+            let mut entity = worklog("visible", "not-a-date", "me", "blocked");
+            entity.start_date = "2026-07-14".to_owned();
+            entity.start_time = "not-a-time".to_owned();
+            entity.issue.self_url = "not a Jira URL".to_owned();
+            let fake = FakeListDataSource {
+                worklogs: vec![entity],
+                schedule: Vec::new(),
+                requests: Arc::clone(&requests),
+                failing_issues: vec!["blocked".to_owned()],
+                pagination_result: None,
+            };
+            let mut output = Vec::new();
+
+            run_stream(
+                &path,
+                now,
+                ListArgs {
+                    fields: Some(mask.to_owned()),
+                    ..ListArgs::default()
+                },
+                |_| Ok(Box::new(fake)),
+                &mut output,
+            )
+            .await?;
+
+            assert_eq!(ndjson_lines(&output)?, expected);
+            let requests = requests
+                .lock()
+                .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
+            assert!(requests.issues.is_empty());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ndjson_broken_pipe_is_a_clean_early_termination() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let fake = FakeListDataSource {
+            worklogs: vec![
+                worklog("first", "2026-07-14", "me", "10"),
+                worklog("second", "2026-07-14", "me", "20"),
+            ],
+            schedule: Vec::new(),
+            requests: Arc::new(Mutex::new(Requests::default())),
+            failing_issues: Vec::new(),
+            pagination_result: None,
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+        let mut writer = BreakAfterFirstLine::default();
+
+        run_stream(
+            &path,
+            now,
+            ListArgs::default(),
+            |_| Ok(Box::new(fake)),
+            &mut writer,
+        )
+        .await?;
+
+        let events = ndjson_lines(&writer.bytes)?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["worklog"]["id"], "first");
         Ok(())
     }
 

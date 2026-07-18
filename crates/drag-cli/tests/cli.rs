@@ -960,6 +960,11 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     );
     assert_eq!(stream["terminalEvent"], "pagination");
     assert_eq!(stream["failureStream"], "stderrErrorEnvelope");
+    assert_eq!(
+        stream["pageEmission"],
+        "worklog events are flushed before requesting the next Tempo page"
+    );
+    assert_eq!(stream["brokenPipe"], "clean successful termination");
     let projected = &contract["$defs"]["ProjectedListResult"];
     assert_eq!(projected["minProperties"], 1);
     assert_eq!(projected["additionalProperties"], false);

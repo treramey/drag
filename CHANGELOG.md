@@ -8,8 +8,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 ### Added
 
 - Explicit NDJSON list streaming with discriminated worklog, schedule summary,
-  and terminal pagination events; per-event field projection; bounded traversal;
-  and structured mid-stream failures that preserve prior lines.
+  and terminal pagination events; page-wise bounded retrieval; field-aware Jira
+  enrichment; and structured mid-stream failures that preserve prior lines.
 - Deterministic `list --fields` projection for worklog, schedule, and pagination
   results, with pre-network validation and unchanged human rendering.
 - Bounded `list` retrieval with finite record/page defaults, deterministic

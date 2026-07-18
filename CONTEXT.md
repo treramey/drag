@@ -14,8 +14,9 @@
   mask only when the complete list report is required.
 - In NDJSON list output, parse each line independently by `kind`: zero or more
   `worklog` events are followed by `summary` and terminal `pagination` events.
-  A failed stream has no terminal event; retain prior lines and read the
-  structured failure from stderr.
+  Worklogs are emitted page-by-page. A network or enrichment failure has no
+  summary or terminal event; retain prior lines and read the structured failure
+  from stderr.
 - Keep `list` bounded: start with its 100-record/one-page defaults, then pass
   `pagination.next` unchanged to `--continue-from` and reuse
   `pagination.selectedDate` as `DATE`. Omit pagination flags to restore the

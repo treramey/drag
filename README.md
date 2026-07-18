@@ -255,13 +255,16 @@ drag --output ndjson list --fields \
 
 The complete event schemas are available through `drag --output json schema`.
 `--fields` projects each event payload while retaining `kind`; if no worklog
-field is selected, no worklog events are emitted. Empty results still emit the
-summary and pagination events. Every line is flushed independently, so records
-already written remain valid if a later Jira enrichment fails. On failure Drag
-stops without a terminal pagination event, writes the normal structured error
-envelope to stderr, and exits non-zero. NDJSON is explicit, supported only by
-`list`, and preserves the same record/page limits, all-pages ceiling,
-continuation validation, and field-selection rules as regular JSON.
+field is selected, no worklog events or Jira lookups are performed. Tempo-only
+fields such as `worklogs.id` also avoid unrelated Jira enrichment. Empty
+results still emit the summary and pagination events. Pages are fetched and
+records are flushed incrementally, so records already written remain valid if
+a later Tempo page or Jira enrichment fails. On failure Drag stops without a
+terminal pagination event, writes the normal structured error envelope to
+stderr, and exits non-zero. A consumer closing stdout early is treated as a
+successful end to the stream. NDJSON is explicit, supported only by `list`,
+and preserves the same record/page limits, all-pages ceiling, continuation
+validation, and field-selection rules as regular JSON.
 
 `delete` accepts ordered numeric IDs either positionally or in a camel-case
 JSON object through `--json`, with `-` reading from stdin. JSON payloads use

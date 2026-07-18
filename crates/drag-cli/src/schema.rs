@@ -707,11 +707,13 @@ fn list_stream_contract() -> Value {
             "summary": schema_ref("ListSummaryEvent"),
             "pagination": schema_ref("ListPaginationEvent")
         },
-        "fieldSelection": "projects each event payload before serialization; kind is always present; worklog events are omitted when no worklog fields are selected",
+        "fieldSelection": "projects each event payload before serialization; kind is always present; worklog events and Jira enrichment are omitted when no worklog fields are selected; Tempo-only fields avoid Jira enrichment",
+        "pageEmission": "worklog events are flushed before requesting the next Tempo page",
         "emptyResult": ["summary", "pagination"],
         "terminalEvent": "pagination",
         "failureStream": "stderrErrorEnvelope",
-        "midStreamFailure": "stops without a terminal event; prior stdout lines remain valid"
+        "midStreamFailure": "network or enrichment failure stops without summary or terminal events; prior stdout lines remain valid",
+        "brokenPipe": "clean successful termination"
     })
 }
 
