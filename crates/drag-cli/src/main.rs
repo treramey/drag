@@ -7,6 +7,7 @@ mod delete;
 mod doctor;
 mod error;
 mod list;
+mod list_tui;
 mod log;
 mod output;
 mod schema;
@@ -80,7 +81,10 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
             app.list_stream(args, &mut io::stdout().lock()).await?;
             return Ok(RunResult::Streamed);
         }
-        Command::List(args) => app.list(args).await?,
+        Command::List(args) => match app.list(args, mode == ResolvedOutputMode::Human).await? {
+            Some(rendered) => rendered,
+            None => return Ok(RunResult::Streamed),
+        },
         Command::Delete(args) => app.delete(args).await?,
         Command::Setup(args) => app.setup(args).await?,
         Command::Alias { command } => match command {

@@ -14,6 +14,7 @@ use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
 use crate::delete::{self, ApiDeleteGateway};
 use crate::list::{self, ApiListDataSource};
+use crate::list_tui::{ListReportSession, RatatuiListReportSession};
 use crate::log::{self, ApiLogGateway};
 #[cfg(test)]
 use crate::setup::LineOnboardingSession;
@@ -36,6 +37,7 @@ pub struct App {
     connection_verifier: Box<dyn ConnectionVerifier>,
     connection_environment: Box<dyn ConnectionEnvironment>,
     onboarding_session: Box<dyn OnboardingSession>,
+    list_report_session: Box<dyn ListReportSession>,
 }
 
 pub(crate) trait ConnectionEnvironment: Send + Sync {
@@ -78,6 +80,7 @@ impl App {
             connection_verifier: Box::new(RemoteConnectionVerifier),
             connection_environment: Box::new(ProcessConnectionEnvironment),
             onboarding_session: Box::new(RatatuiOnboardingSession::terminal()),
+            list_report_session: Box::new(RatatuiListReportSession),
         }
     }
 
@@ -96,6 +99,7 @@ impl App {
                 TerminalSetupPrompter,
                 NoopBrowserLauncher,
             )),
+            list_report_session: Box::new(RatatuiListReportSession),
         }
     }
 
@@ -116,6 +120,7 @@ impl App {
                 setup_prompter,
                 browser_launcher,
             )),
+            list_report_session: Box::new(RatatuiListReportSession),
         }
     }
 
@@ -132,7 +137,17 @@ impl App {
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
             onboarding_session: Box::new(onboarding_session),
+            list_report_session: Box::new(RatatuiListReportSession),
         }
+    }
+
+    #[cfg(test)]
+    fn with_list_report_session(
+        mut self,
+        list_report_session: impl ListReportSession + 'static,
+    ) -> Self {
+        self.list_report_session = Box::new(list_report_session);
+        self
     }
 
     pub async fn setup(&self, args: SetupArgs) -> Result<Rendered, CliError> {
@@ -287,11 +302,29 @@ impl App {
         .await
     }
 
-    pub async fn list(&self, args: ListArgs) -> Result<Rendered, CliError> {
-        list::run(&self.path, self.now(), args, |credentials| {
+    pub async fn list(
+        &self,
+        args: ListArgs,
+        interactive: bool,
+    ) -> Result<Option<Rendered>, CliError> {
+        let report = list::run_report(&self.path, self.now(), args, |credentials| {
             Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?))
         })
-        .await
+        .await?;
+        self.finish_list(report, interactive).await
+    }
+
+    async fn finish_list(
+        &self,
+        report: list::ListReport,
+        interactive: bool,
+    ) -> Result<Option<Rendered>, CliError> {
+        if interactive && self.list_report_session.is_eligible() {
+            self.list_report_session.run(&report).await?;
+            Ok(None)
+        } else {
+            Ok(Some(report.rendered()))
+        }
     }
 
     pub async fn list_stream(

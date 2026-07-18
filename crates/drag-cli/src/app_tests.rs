@@ -10,7 +10,10 @@ use std::process::Command;
 #[cfg(unix)]
 use std::time::Duration;
 
+use chrono::NaiveDate;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use drag::models::ListPagination;
+use drag::schedule::ScheduleDetails;
 #[cfg(unix)]
 use expectrl::session::OsSession;
 #[cfg(unix)]
@@ -26,6 +29,8 @@ use super::{
     SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::cli::{DoctorArgs, SetupArgs};
+use crate::list::ListReport;
+use crate::list_tui::ListReportSession;
 use crate::CliError;
 #[cfg(unix)]
 use crate::ResolvedOutputMode;
@@ -60,6 +65,119 @@ struct FakeBrowserLauncher {
 
 struct FakeConnectionEnvironment {
     values: BTreeMap<String, String>,
+}
+
+struct FakeListReportSession {
+    eligible: bool,
+    selected_dates: Arc<Mutex<Vec<NaiveDate>>>,
+}
+
+impl ListReportSession for FakeListReportSession {
+    fn is_eligible(&self) -> bool {
+        self.eligible
+    }
+
+    fn run<'a>(&'a self, report: &'a ListReport) -> crate::list_tui::ListReportFuture<'a> {
+        Box::pin(async move {
+            self.selected_dates
+                .lock()
+                .map_err(|_| CliError::Io(std::io::Error::other("list session lock poisoned")))?
+                .push(report.selected_date());
+            Ok(())
+        })
+    }
+}
+
+fn empty_list_report() -> ListReport {
+    ListReport::new(
+        NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN),
+        Vec::new(),
+        ScheduleDetails {
+            month_required_duration: "160h".to_owned(),
+            month_logged_duration: "72h".to_owned(),
+            month_current_period_duration: "+4h".to_owned(),
+            day_required_duration: "8h".to_owned(),
+            day_logged_duration: "0h".to_owned(),
+        },
+        ListPagination {
+            selected_date: "2026-07-14".to_owned(),
+            month_start: "2026-07-01".to_owned(),
+            month_end: "2026-07-31".to_owned(),
+            limit: Some(100),
+            page_limit: 1,
+            all_pages: false,
+            pages_retrieved: 1,
+            records_retrieved: 0,
+            records_returned: 0,
+            next: None,
+            complete: true,
+            totals_complete: true,
+        },
+        BTreeMap::new(),
+        false,
+    )
+}
+
+#[tokio::test]
+async fn eligible_human_list_is_presented_by_the_injected_report_session() -> Result<(), CliError> {
+    let temp = TempDir::new()?;
+    let selected_dates = Arc::new(Mutex::new(Vec::new()));
+    let app = App::with_connection_verifier(
+        temp.path().join("config.json"),
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+            config_update: None,
+        },
+    )
+    .with_list_report_session(FakeListReportSession {
+        eligible: true,
+        selected_dates: Arc::clone(&selected_dates),
+    });
+
+    let rendered = app.finish_list(empty_list_report(), true).await?;
+
+    assert!(rendered.is_none());
+    let dates = selected_dates
+        .lock()
+        .map_err(|_| CliError::Io(std::io::Error::other("selected dates lock poisoned")))?;
+    assert_eq!(
+        *dates,
+        [NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN)]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_json_or_ineligible_human_list_remains_non_interactive() -> Result<(), CliError> {
+    for (interactive, eligible) in [(false, true), (true, false)] {
+        let temp = TempDir::new()?;
+        let selected_dates = Arc::new(Mutex::new(Vec::new()));
+        let app = App::with_connection_verifier(
+            temp.path().join("config.json"),
+            FakeVerifier {
+                jira_error: None,
+                tempo_error: None,
+                tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+                config_update: None,
+            },
+        )
+        .with_list_report_session(FakeListReportSession {
+            eligible,
+            selected_dates: Arc::clone(&selected_dates),
+        });
+
+        let rendered = app.finish_list(empty_list_report(), interactive).await?;
+
+        let rendered = rendered.ok_or_else(|| CliError::Api("missing plain result".to_owned()))?;
+        assert_eq!(rendered.data["date"], "2026-07-14");
+        assert!(selected_dates
+            .lock()
+            .map_err(|_| CliError::Io(std::io::Error::other("selected dates lock poisoned")))?
+            .is_empty());
+    }
+    Ok(())
 }
 
 impl super::ConnectionEnvironment for FakeConnectionEnvironment {

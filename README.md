@@ -204,7 +204,12 @@ drag alias:set lunch ABC-123
 
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
-to human output without changing machine field-selection behavior.
+to human output without changing machine field-selection behavior. When
+standard input, output, and error are terminals, human list output opens an
+interactive report after retrieval. It shows month and day schedule summaries
+and the selected day's worklogs; press `q`, Escape, or Ctrl-C to close it.
+Redirected human output remains plain text, and explicit JSON or NDJSON never
+opens the report.
 
 For automation, use `--fields` with a comma-delimited mask and request only the
 data needed for the task. Select `date`; a whole `worklogs`, `schedule`, or
