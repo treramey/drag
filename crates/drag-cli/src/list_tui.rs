@@ -15,7 +15,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 
 use crate::list::ListReport;
@@ -31,6 +31,45 @@ pub(crate) trait ListReportSession: Send + Sync {
 }
 
 pub(crate) struct RatatuiListReportSession;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Message {
+    MoveUp,
+    MoveDown,
+}
+
+struct ListReportModel<'a> {
+    report: &'a ListReport,
+    table_state: TableState,
+}
+
+impl<'a> ListReportModel<'a> {
+    fn new(report: &'a ListReport) -> Self {
+        let mut table_state = TableState::default();
+        table_state.select((!report.worklogs().is_empty()).then_some(0));
+        Self {
+            report,
+            table_state,
+        }
+    }
+
+    fn focused_row(&self) -> Option<usize> {
+        self.table_state.selected()
+    }
+
+    fn update(&mut self, message: Message) {
+        let Some(focused_row) = self.focused_row() else {
+            return;
+        };
+        let next = match message {
+            Message::MoveUp => focused_row.saturating_sub(1),
+            Message::MoveDown => focused_row
+                .saturating_add(1)
+                .min(self.report.worklogs().len().saturating_sub(1)),
+        };
+        self.table_state.select(Some(next));
+    }
+}
 
 impl ListReportSession for RatatuiListReportSession {
     fn is_eligible(&self) -> bool {
@@ -99,8 +138,9 @@ impl Drop for StderrTerminal {
 async fn run_terminal(report: &ListReport) -> Result<(), CliError> {
     let mut terminal = StderrTerminal::new()?;
     let mut events = EventStream::new();
+    let mut model = ListReportModel::new(report);
     loop {
-        terminal.terminal.draw(|frame| render(frame, report))?;
+        terminal.terminal.draw(|frame| render(frame, &mut model))?;
         let event = events.next().await.ok_or_else(|| {
             CliError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -115,7 +155,18 @@ async fn run_terminal(report: &ListReport) -> Result<(), CliError> {
                 terminal.restore()?;
                 return Ok(());
             }
+            if let Some(message) = message_for_key(key.code) {
+                model.update(message);
+            }
         }
+    }
+}
+
+fn message_for_key(code: KeyCode) -> Option<Message> {
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => Some(Message::MoveUp),
+        KeyCode::Down | KeyCode::Char('j') => Some(Message::MoveDown),
+        _ => None,
     }
 }
 
@@ -124,13 +175,17 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
         || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
 }
 
-fn render(frame: &mut Frame<'_>, report: &ListReport) {
-    let [month, date, worklogs, day, pagination, footer] = Layout::vertical([
+fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
+    let report = model.report;
+    let pagination_height = u16::from(!report.pagination().totals_complete) * 2;
+    let details_height = focused_details_height(frame.area().height, pagination_height, model);
+    let [month, date, worklogs, details, day, pagination, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
+        Constraint::Length(details_height),
         Constraint::Length(3),
-        Constraint::Length(2),
+        Constraint::Length(pagination_height),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -139,7 +194,8 @@ fn render(frame: &mut Frame<'_>, report: &ListReport) {
         Paragraph::new(report.selected_date().format("%A, %Y-%m-%d").to_string()).bold(),
         date,
     );
-    render_worklogs(frame, worklogs, report);
+    render_worklogs(frame, worklogs, model);
+    render_focused_details(frame, details, model);
     let schedule = report.schedule();
     frame.render_widget(
         Paragraph::new(format!(
@@ -150,17 +206,73 @@ fn render(frame: &mut Frame<'_>, report: &ListReport) {
         day,
     );
     render_pagination_notice(frame, pagination, report);
+    render_footer(frame, footer);
+}
+
+fn focused_details_height(
+    terminal_height: u16,
+    pagination_height: u16,
+    model: &ListReportModel<'_>,
+) -> u16 {
+    if !model.report.verbose() || model.focused_row().is_none() {
+        return 0;
+    }
+    // Month, date, day summary, footer, pagination, and a bordered table with
+    // one visible row take priority over secondary verbose details.
+    let available = terminal_height.saturating_sub(13 + pagination_height);
+    match available {
+        5.. => 5,
+        3..=4 => 3,
+        _ => 0,
+    }
+}
+
+fn render_focused_details(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>) {
+    if area.height == 0 || !model.report.verbose() {
+        return;
+    }
+    let Some(worklog) = model
+        .focused_row()
+        .and_then(|index| model.report.worklogs().get(index))
+    else {
+        return;
+    };
+    let title = format!(
+        "Focused · {}",
+        escape_terminal_data(&model.report.issue_label(worklog))
+    );
     frame.render_widget(
-        Line::from(vec![
-            " q ".bold().cyan(),
-            "quit   ".dim(),
-            "Esc ".bold().cyan(),
+        Paragraph::new(Text::from(vec![
+            Line::from(format!(
+                "Description: {}",
+                escape_terminal_data(&worklog.description)
+            )),
+            Line::from(format!("Jira: {}", escape_terminal_data(&worklog.link))),
+        ]))
+        .wrap(Wrap { trim: false })
+        .block(Block::bordered().title(title)),
+        area,
+    );
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect) {
+    let mut spans = vec![
+        " ↑/k ".bold().cyan(),
+        "up  ".dim(),
+        "↓/j ".bold().cyan(),
+        "down  ".dim(),
+        "q ".bold().cyan(),
+        "quit".dim(),
+    ];
+    if area.width >= 70 {
+        spans.extend([
+            "   Esc ".bold().cyan(),
             "close   ".dim(),
             "Ctrl-C ".bold().cyan(),
             "exit".dim(),
-        ]),
-        footer,
-    );
+        ]);
+    }
+    frame.render_widget(Line::from(spans), area);
 }
 
 fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -191,7 +303,8 @@ fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
     );
 }
 
-fn render_worklogs(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
+fn render_worklogs(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportModel<'_>) {
+    let report = model.report;
     if report.worklogs().is_empty() {
         frame.render_widget(
             Paragraph::new(if report.pagination().totals_complete {
@@ -220,18 +333,27 @@ fn render_worklogs(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
             Cell::from(escape_terminal_data(&worklog.duration)),
         ])
     });
-    let table = Table::new(
-        rows,
+    let widths = if area.width >= 72 {
         [
             Constraint::Length(12),
-            Constraint::Length(18),
+            Constraint::Length(13),
             Constraint::Fill(1),
-            Constraint::Length(12),
-        ],
-    )
-    .header(Row::new(["ID", "Time", "Issue", "Duration"]).bold())
-    .block(Block::bordered().title("Worklogs"));
-    frame.render_widget(table, area);
+            Constraint::Length(10),
+        ]
+    } else {
+        [
+            Constraint::Length(8),
+            Constraint::Length(11),
+            Constraint::Fill(1),
+            Constraint::Length(8),
+        ]
+    };
+    let table = Table::new(rows, widths)
+        .header(Row::new(["ID", "Time", "Issue", "Duration"]).bold())
+        .row_highlight_style(ratatui::style::Style::new().reversed())
+        .highlight_symbol("▶ ")
+        .block(Block::bordered().title("Worklogs"));
+    frame.render_stateful_widget(table, area, &mut model.table_state);
 }
 
 #[cfg(test)]
@@ -244,10 +366,18 @@ mod tests {
     use drag::schedule::ScheduleDetails;
     use ratatui::{backend::TestBackend, Terminal};
 
-    use super::{render, should_quit};
+    use super::{message_for_key, render, should_quit, ListReportModel, Message};
     use crate::list::ListReport;
 
     fn report(worklogs: Vec<Worklog>, totals_complete: bool) -> ListReport {
+        report_with_verbose(worklogs, totals_complete, false)
+    }
+
+    fn report_with_verbose(
+        worklogs: Vec<Worklog>,
+        totals_complete: bool,
+        verbose: bool,
+    ) -> ListReport {
         ListReport::new(
             NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN),
             worklogs,
@@ -273,17 +403,22 @@ mod tests {
                 totals_complete,
             },
             BTreeMap::from([("standup".to_owned(), "OPS-42".to_owned())]),
-            false,
+            verbose,
         )
     }
 
     fn screen(report: &ListReport) -> String {
-        let backend = TestBackend::new(100, 24);
+        let mut model = ListReportModel::new(report);
+        screen_with_size(&mut model, 100, 24)
+    }
+
+    fn screen_with_size(model: &mut ListReportModel<'_>, width: u16, height: u16) -> String {
+        let backend = TestBackend::new(width, height);
         let mut terminal = match Terminal::new(backend) {
             Ok(terminal) => terminal,
             Err(error) => match error {},
         };
-        match terminal.draw(|frame| render(frame, report)) {
+        match terminal.draw(|frame| render(frame, model)) {
             Ok(_) => {}
             Err(error) => match error {},
         }
@@ -358,5 +493,192 @@ mod tests {
         assert!(should_quit(KeyCode::Esc, KeyModifiers::NONE));
         assert!(should_quit(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!should_quit(KeyCode::Char('c'), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn focus_starts_on_the_first_worklog_and_navigation_stays_bounded() {
+        let report = report(
+            ["first", "second", "third"]
+                .into_iter()
+                .map(|id| Worklog {
+                    id: id.to_owned(),
+                    interval: None,
+                    issue_id: id.to_owned(),
+                    issue_key: format!("OPS-{id}"),
+                    duration: "30m".to_owned(),
+                    description: String::new(),
+                    link: format!("https://example.atlassian.net/browse/OPS-{id}"),
+                })
+                .collect(),
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        assert_eq!(model.focused_row(), Some(0));
+        model.update(Message::MoveUp);
+        assert_eq!(model.focused_row(), Some(0));
+        model.update(Message::MoveDown);
+        model.update(Message::MoveDown);
+        model.update(Message::MoveDown);
+        assert_eq!(model.focused_row(), Some(2));
+        model.update(Message::MoveUp);
+        assert_eq!(model.focused_row(), Some(1));
+    }
+
+    #[test]
+    fn empty_report_has_no_focus_and_navigation_is_a_no_op() {
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+
+        model.update(Message::MoveDown);
+        model.update(Message::MoveUp);
+
+        assert_eq!(model.focused_row(), None);
+    }
+
+    #[test]
+    fn arrow_and_vim_keys_map_to_row_navigation() {
+        for code in [KeyCode::Up, KeyCode::Char('k')] {
+            assert_eq!(message_for_key(code), Some(Message::MoveUp));
+        }
+        for code in [KeyCode::Down, KeyCode::Char('j')] {
+            assert_eq!(message_for_key(code), Some(Message::MoveDown));
+        }
+        assert_eq!(message_for_key(KeyCode::Char('x')), None);
+    }
+
+    #[test]
+    fn focused_row_is_visible_and_scrolling_keeps_the_last_row_on_screen() {
+        let report = report(
+            (1..=8)
+                .map(|index| Worklog {
+                    id: format!("row-{index}"),
+                    interval: Some(ClockInterval {
+                        start_time: "09:00".to_owned(),
+                        end_time: "09:30".to_owned(),
+                    }),
+                    issue_id: index.to_string(),
+                    issue_key: format!("OPS-{index}"),
+                    duration: "30m".to_owned(),
+                    description: format!("description {index}"),
+                    link: format!("https://example.atlassian.net/browse/OPS-{index}"),
+                })
+                .collect(),
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let initial = screen_with_size(&mut model, 70, 16);
+        assert!(initial.contains("▶ row-1"), "{initial}");
+
+        for _ in 1..report.worklogs().len() {
+            model.update(Message::MoveDown);
+        }
+        let scrolled = screen_with_size(&mut model, 70, 16);
+
+        assert!(scrolled.contains("▶ row-8"), "{scrolled}");
+        assert!(!scrolled.contains("row-1"), "{scrolled}");
+    }
+
+    #[test]
+    fn verbose_report_shows_details_for_the_focused_worklog() {
+        let report = report_with_verbose(
+            vec![
+                Worklog {
+                    id: "first".to_owned(),
+                    interval: None,
+                    issue_id: "1".to_owned(),
+                    issue_key: "OPS-1".to_owned(),
+                    duration: "30m".to_owned(),
+                    description: "First description".to_owned(),
+                    link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+                },
+                Worklog {
+                    id: "second".to_owned(),
+                    interval: None,
+                    issue_id: "2".to_owned(),
+                    issue_key: "OPS-2".to_owned(),
+                    duration: "45m".to_owned(),
+                    description: "Second description".to_owned(),
+                    link: "https://example.atlassian.net/browse/OPS-2".to_owned(),
+                },
+            ],
+            true,
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let first = screen_with_size(&mut model, 100, 24);
+        assert!(first.contains("First description"), "{first}");
+        assert!(
+            first.contains("https://example.atlassian.net/browse/OPS-1"),
+            "{first}"
+        );
+
+        model.update(Message::MoveDown);
+        let second = screen_with_size(&mut model, 100, 24);
+        assert!(second.contains("Second description"), "{second}");
+        assert!(
+            second.contains("https://example.atlassian.net/browse/OPS-2"),
+            "{second}"
+        );
+        assert!(!second.contains("First description"), "{second}");
+    }
+
+    #[test]
+    fn narrow_report_keeps_primary_fields_alias_and_navigation_hints() {
+        let report = report(
+            vec![Worklog {
+                id: "751393".to_owned(),
+                interval: Some(ClockInterval {
+                    start_time: "09:00".to_owned(),
+                    end_time: "10:30".to_owned(),
+                }),
+                issue_id: "42".to_owned(),
+                issue_key: "OPS-42".to_owned(),
+                duration: "1h 30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-42".to_owned(),
+            }],
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let narrow = screen_with_size(&mut model, 52, 20);
+
+        for expected in [
+            "751393",
+            "09:00–10:30",
+            "(standup)",
+            "1h 30m",
+            "↑/k",
+            "↓/j",
+            "q quit",
+        ] {
+            assert!(narrow.contains(expected), "missing {expected:?}\n{narrow}");
+        }
+    }
+
+    #[test]
+    fn short_verbose_report_prioritizes_the_focused_worklog_table() {
+        let report = report_with_verbose(
+            vec![Worklog {
+                id: "first".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: "Verbose detail".to_owned(),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            true,
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let short = screen_with_size(&mut model, 80, 14);
+
+        assert!(short.contains("▶ first"), "{short}");
+        assert!(short.contains("q quit"), "{short}");
     }
 }

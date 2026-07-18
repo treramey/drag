@@ -183,8 +183,7 @@ async fn explicit_json_or_ineligible_human_list_remains_non_interactive() -> Res
 }
 
 #[tokio::test]
-async fn verbose_human_list_stays_plain_until_the_tui_can_show_verbose_details(
-) -> Result<(), CliError> {
+async fn eligible_verbose_human_list_is_presented_by_the_report_session() -> Result<(), CliError> {
     let temp = TempDir::new()?;
     let selected_dates = Arc::new(Mutex::new(Vec::new()));
     let app = App::with_connection_verifier(
@@ -201,16 +200,15 @@ async fn verbose_human_list_stays_plain_until_the_tui_can_show_verbose_details(
         selected_dates: Arc::clone(&selected_dates),
     });
 
-    let rendered = app
-        .finish_list(empty_list_report(true), true)
-        .await?
-        .ok_or_else(|| CliError::Api("missing verbose plain result".to_owned()))?;
+    let rendered = app.finish_list(empty_list_report(true), true).await?;
 
-    assert!(rendered.human.contains("No worklogs"));
-    assert!(selected_dates
-        .lock()
-        .map_err(|_| CliError::Io(std::io::Error::other("selected dates lock poisoned")))?
-        .is_empty());
+    assert!(rendered.is_none());
+    assert_eq!(
+        *selected_dates
+            .lock()
+            .map_err(|_| CliError::Io(std::io::Error::other("selected dates lock poisoned")))?,
+        [NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN)]
+    );
     Ok(())
 }
 
