@@ -319,7 +319,7 @@ impl App {
         report: list::ListReport,
         interactive: bool,
     ) -> Result<Option<Rendered>, CliError> {
-        if interactive && !report.verbose() && self.list_report_session.is_eligible() {
+        if interactive && self.list_report_session.is_eligible() {
             self.list_report_session.run(&report).await?;
             Ok(None)
         } else {

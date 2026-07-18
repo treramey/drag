@@ -204,13 +204,15 @@ drag alias:set lunch ABC-123
 
 `list` and its `ls` alias are read-only. With no date they select today in
 Drag's configured local time zone; `--verbose` adds descriptions and Jira URLs
-to human output without changing machine field-selection behavior. When
-standard input, output, and error are terminals, non-verbose human list output
-opens an interactive report after retrieval. It shows month and day schedule
-summaries and the selected day's worklogs; press `q`, Escape, or Ctrl-C to close
-it. Bounded reports label partial totals and empty retrieved segments.
-`--verbose`, redirected human output, explicit JSON, and NDJSON remain
-non-interactive so their existing fields and payloads are preserved.
+without changing machine field-selection behavior. When standard input, output,
+and error are terminals, human list output opens an interactive report after
+retrieval. It shows month and day schedule summaries and a focused worklog
+table. Use Up/Down or `k`/`j` to navigate; overflowing tables scroll to keep the
+focused row visible. Press `q`, Escape, or Ctrl-C to close it. `--verbose`
+shows the focused worklog's description and Jira URL below the responsive
+table. Bounded reports label partial totals and empty retrieved segments.
+Redirected human output, explicit JSON, and NDJSON remain non-interactive so
+their existing fields and payloads are preserved.
 
 For automation, use `--fields` with a comma-delimited mask and request only the
 data needed for the task. Select `date`; a whole `worklogs`, `schedule`, or
