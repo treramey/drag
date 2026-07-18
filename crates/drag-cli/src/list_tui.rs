@@ -73,7 +73,6 @@ impl StderrTerminal {
         if self.restored {
             return Ok(());
         }
-        self.restored = true;
         let mut first_error = self.terminal.show_cursor().err();
         if let Err(error) = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show) {
             first_error.get_or_insert(error);
@@ -81,7 +80,13 @@ impl StderrTerminal {
         if let Err(error) = disable_raw_mode() {
             first_error.get_or_insert(error);
         }
-        first_error.map_or(Ok(()), Err)
+        match first_error {
+            Some(error) => Err(error),
+            None => {
+                self.restored = true;
+                Ok(())
+            }
+        }
     }
 }
 
