@@ -15,6 +15,7 @@ mod setup_tui;
 mod transport;
 
 use std::ffi::OsString;
+use std::io;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
@@ -40,7 +41,7 @@ async fn main() -> ExitCode {
     };
     let mode = resolve_mode(cli.output);
     match run(cli, mode).await {
-        Ok(result) => {
+        Ok(RunResult::Rendered(result)) => {
             let exit_code = result.exit_code();
             match emit_result(result, mode) {
                 Ok(()) => ExitCode::from(exit_code),
@@ -50,6 +51,7 @@ async fn main() -> ExitCode {
                 }
             }
         }
+        Ok(RunResult::Streamed) => ExitCode::SUCCESS,
         Err(error) => {
             emit_error(&error, mode);
             ExitCode::from(error.exit_code())
@@ -57,37 +59,52 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<Rendered, CliError> {
+enum RunResult {
+    Rendered(Rendered),
+    Streamed,
+}
+
+async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> {
+    if mode == ResolvedOutputMode::Ndjson && !matches!(&cli.command, Command::List(_)) {
+        return Err(CliError::InvalidInput(
+            "NDJSON output is supported only for list".to_owned(),
+        ));
+    }
     let timezone = default_timezone(cli.timezone.as_deref())?;
     let path = cli.config.unwrap_or(config::config_path()?);
     let debug = request_debug_enabled(cli.debug, mode);
     let app = App::new(path.clone(), timezone, debug);
-    match cli.command {
-        Command::Log(args) => app.log(args).await,
-        Command::List(args) => app.list(args).await,
-        Command::Delete(args) => app.delete(args).await,
-        Command::Setup(args) => app.setup(args).await,
+    let rendered = match cli.command {
+        Command::Log(args) => app.log(args).await?,
+        Command::List(args) if mode == ResolvedOutputMode::Ndjson => {
+            app.list_stream(args, &mut io::stdout().lock()).await?;
+            return Ok(RunResult::Streamed);
+        }
+        Command::List(args) => app.list(args).await?,
+        Command::Delete(args) => app.delete(args).await?,
+        Command::Setup(args) => app.setup(args).await?,
         Command::Alias { command } => match command {
-            AliasCommand::Set(args) => app.alias_set(args),
-            AliasCommand::List => app.alias_list(),
-            AliasCommand::Delete(args) => app.alias_delete(args),
+            AliasCommand::Set(args) => app.alias_set(args)?,
+            AliasCommand::List => app.alias_list()?,
+            AliasCommand::Delete(args) => app.alias_delete(args)?,
         },
-        Command::LegacyAliasSet(args) => app.alias_set(args),
-        Command::LegacyAliasList => app.alias_list(),
-        Command::LegacyAliasDelete(args) => app.alias_delete(args),
+        Command::LegacyAliasSet(args) => app.alias_set(args)?,
+        Command::LegacyAliasList => app.alias_list()?,
+        Command::LegacyAliasDelete(args) => app.alias_delete(args)?,
         Command::Completions { shell } => {
             let shell = shell.unwrap_or_else(detect_shell);
             let mut bytes = Vec::new();
             generate(shell, &mut Cli::command(), "drag", &mut bytes);
             let script = String::from_utf8(bytes)?;
-            Ok(Rendered::new(
+            Rendered::new(
                 json!({"shell": shell.to_string(), "script": script}),
                 script,
-            ))
+            )
         }
-        Command::Doctor(args) => app.doctor(args).await,
-        Command::Schema => Ok(schema()),
-    }
+        Command::Doctor(args) => app.doctor(args).await?,
+        Command::Schema => schema(),
+    };
+    Ok(RunResult::Rendered(rendered))
 }
 
 fn request_debug_enabled(requested: bool, mode: ResolvedOutputMode) -> bool {
@@ -118,6 +135,7 @@ mod tests {
     fn request_diagnostics_are_enabled_only_for_human_output() {
         assert!(request_debug_enabled(true, ResolvedOutputMode::Human));
         assert!(!request_debug_enabled(true, ResolvedOutputMode::Json));
+        assert!(!request_debug_enabled(true, ResolvedOutputMode::Ndjson));
         assert!(!request_debug_enabled(false, ResolvedOutputMode::Human));
     }
 }

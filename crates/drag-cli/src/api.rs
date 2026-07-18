@@ -124,46 +124,24 @@ impl ApiClient {
         plan: PaginationPlan,
         continue_from: Option<&str>,
     ) -> Result<WorklogPage, CliError> {
-        let account = safe_segment(&self.credentials.account_id)?;
-        let mut url = match continue_from {
-            Some(continuation) => self.valid_tempo_continuation(continuation, from, to, plan)?,
-            None => self
-                .tempo_base
-                .join(&format!("worklogs/user/{account}"))
-                .map_err(CliError::Url)?,
-        };
         let mut results = Vec::new();
         let mut pages_retrieved = 0_u16;
+        let mut continuation = continue_from.map(str::to_owned);
 
         loop {
-            let request_limit = plan.request_limit(results.len());
-            let request = self.tempo(Method::GET, url);
-            let request = if pages_retrieved == 0 && continue_from.is_none() {
-                request.query(&[
-                    ("from", from),
-                    ("to", to),
-                    ("limit", request_limit.to_string().as_str()),
-                ])
-            } else {
-                request
-            };
-            let mut page: Page<WorklogEntity> = self.json(request).await?;
-            if page.results.len() > request_limit {
-                return Err(CliError::Api(
-                    "Tempo returned more worklogs than the requested record limit".to_owned(),
-                ));
-            }
+            let mut page = self
+                .get_worklog_page(from, to, plan, continuation.as_deref(), results.len())
+                .await?;
             results.append(&mut page.results);
-            pages_retrieved += 1;
+            pages_retrieved += page.pages_retrieved;
 
-            let Some(next) = page.metadata.next else {
+            let Some(next) = page.next else {
                 return Ok(WorklogPage {
                     results,
                     next: None,
                     pages_retrieved,
                 });
             };
-            let next_url = self.valid_tempo_continuation(&next, from, to, plan)?;
             if !plan.should_follow(pages_retrieved, results.len()) {
                 if plan.is_all_pages() && pages_retrieved == HARD_PAGE_LIMIT {
                     return Err(CliError::Api(
@@ -176,8 +154,48 @@ impl ApiClient {
                     pages_retrieved,
                 });
             }
-            url = next_url;
+            continuation = Some(next);
         }
+    }
+
+    pub(crate) async fn get_worklog_page(
+        &self,
+        from: &str,
+        to: &str,
+        plan: PaginationPlan,
+        continue_from: Option<&str>,
+        records_retrieved: usize,
+    ) -> Result<WorklogPage, CliError> {
+        let account = safe_segment(&self.credentials.account_id)?;
+        let url = match continue_from {
+            Some(continuation) => self.valid_tempo_continuation(continuation, from, to, plan)?,
+            None => self
+                .tempo_base
+                .join(&format!("worklogs/user/{account}"))
+                .map_err(CliError::Url)?,
+        };
+        let request_limit = plan.request_limit(records_retrieved);
+        let request = self.tempo(Method::GET, url);
+        let request = if continue_from.is_none() {
+            let request_limit = request_limit.to_string();
+            request.query(&[("from", from), ("to", to), ("limit", &request_limit)])
+        } else {
+            request
+        };
+        let page: Page<WorklogEntity> = self.json(request).await?;
+        if page.results.len() > request_limit {
+            return Err(CliError::Api(
+                "Tempo returned more worklogs than the requested record limit".to_owned(),
+            ));
+        }
+        if let Some(next) = &page.metadata.next {
+            self.valid_tempo_continuation(next, from, to, plan)?;
+        }
+        Ok(WorklogPage {
+            results: page.results,
+            next: page.metadata.next,
+            pages_retrieved: 1,
+        })
     }
 
     fn valid_tempo_continuation(
@@ -727,6 +745,50 @@ mod tests {
 
         assert!(matches!(&error, CliError::Http(source) if source.is_timeout()));
         assert_eq!(error.exit_code(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn worklog_page_fetches_exactly_one_validated_page(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        let next = format!(
+            "{}/4/worklogs?page=2&from=2026-07-01&to=2026-07-31&limit=100",
+            server.uri()
+        );
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs/user/account-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                format!(
+                    r#"{{"results":[{}],"metadata":{{"next":"{next}"}}}}"#,
+                    worklog("1")
+                ),
+                "application/json",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/4/worklogs"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let page = api
+            .get_worklog_page(
+                "2026-07-01",
+                "2026-07-31",
+                PaginationPlan::all_pages(),
+                None,
+                0,
+            )
+            .await?;
+
+        assert_eq!(page.results[0].tempo_worklog_id, "1");
+        assert_eq!(page.pages_retrieved, 1);
+        assert_eq!(page.next.as_deref(), Some(next.as_str()));
         Ok(())
     }
 

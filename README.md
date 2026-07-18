@@ -186,6 +186,7 @@ drag --output json list --fields 'worklogs.id,worklogs.issueKey,worklogs.duratio
 drag --output json list --limit 250 --page-limit 3
 drag --output json list 2026-07-14 --continue-from '<pagination.next>'
 drag --output json list --all-pages
+drag --output ndjson list --limit 250 --page-limit 3
 drag delete 123456 123457
 drag delete --json '{"worklogIds":[123456,123457]}' --dry-run
 printf '%s' '{"worklogIds":[123456,123457]}' | drag delete --json -
@@ -236,6 +237,35 @@ segment. `totalsComplete` is true only when the command started at the first
 page and reached the terminal page; otherwise human output marks totals as
 partial even when a resumed segment has no further continuation.
 
+Use `--output ndjson` when records should be processed incrementally. Each
+stdout line is one compact JSON object with a `kind` discriminator. Successful
+streams contain zero or more `worklog` events, followed by one `summary` event
+and one terminal `pagination` event:
+
+```bash
+drag --output ndjson list --fields \
+  'worklogs.id,worklogs.issueKey,schedule.dayLoggedDuration,pagination.next,pagination.complete'
+```
+
+```jsonl
+{"kind":"worklog","worklog":{"id":"123","issueKey":"ABC-1"}}
+{"kind":"summary","date":"2026-07-14","schedule":{"dayLoggedDuration":"1h"}}
+{"kind":"pagination","pagination":{"next":null,"complete":true}}
+```
+
+The complete event schemas are available through `drag --output json schema`.
+`--fields` projects each event payload while retaining `kind`; if no worklog
+field is selected, no worklog events or Jira lookups are performed. Tempo-only
+fields such as `worklogs.id` also avoid unrelated Jira enrichment. Empty
+results still emit the summary and pagination events. Pages are fetched and
+records are flushed incrementally, so records already written remain valid if
+a later Tempo page or Jira enrichment fails. On failure Drag stops without a
+terminal pagination event, writes the normal structured error envelope to
+stderr, and exits non-zero. A consumer closing stdout early is treated as a
+successful end to the stream. NDJSON is explicit, supported only by `list`,
+and preserves the same record/page limits, all-pages ceiling, continuation
+validation, and field-selection rules as regular JSON.
+
 `delete` accepts ordered numeric IDs either positionally or in a camel-case
 JSON object through `--json`, with `-` reading from stdin. JSON payloads use
 `worklogIds`, for example `{"worklogIds":[123456,123457]}`. It processes IDs
@@ -258,6 +288,7 @@ contract explicitly in automation:
 
 ```bash
 drag --output json list --fields 'worklogs.issueKey,worklogs.duration,pagination.next' | jq
+drag --output ndjson list --fields 'worklogs.issueKey,worklogs.duration,pagination.next'
 drag --output json schema
 printf '%s' '{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}' \
   | drag --output json log --json - --dry-run
@@ -272,7 +303,7 @@ the same unknown-field and convenience-argument conflict rules.
 Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `{"ok":false,"error":{"code":"...","message":"..."}}`.
 `--debug` writes redacted request diagnostics only in human output mode; JSON
-output stays machine-readable.
+and NDJSON output stay machine-readable.
 
 `drag --output json schema` emits the versioned CLI contract. Schema version 2
 includes the installed CLI version and every command, nested subcommand,

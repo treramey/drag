@@ -25,7 +25,8 @@ several peer submodules rather than a single implementation file.
 4. Environment credentials override stored credentials.
 5. Core functions validate dates, times, and durations.
 6. The API adapter calls Atlassian API v3 and Tempo API v4.
-7. Results become human text or a stable JSON envelope.
+7. Results become human text, a stable JSON envelope, or explicit NDJSON list
+   events written and flushed one line at a time.
 
 ## Modules
 
@@ -67,6 +68,12 @@ several peer submodules rather than a single implementation file.
 - List field masks are validated before configuration or networking. Projection
   is deterministic, occurs before the output envelope is serialized, and does
   not change schedule calculations, pagination state, or human rendering.
+- NDJSON list output fetches one validated Tempo page at a time, incrementally
+  accumulates schedule totals, and emits field-aware `worklog` events before
+  requesting the next page. A network or enrichment failure leaves prior
+  stdout lines valid, omits the `summary` and terminal `pagination` events, and
+  uses the normal stderr error envelope; an intentional stdout broken pipe is
+  success.
 - URL path identifiers reject separators, query fragments, percent escapes,
   and control characters.
 - Human and TUI renderers visibly escape line breaks, tabs, controls,

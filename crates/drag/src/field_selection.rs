@@ -194,6 +194,25 @@ impl ListFieldMask {
         }
         false
     }
+
+    /// Whether the mask selects any worklog field.
+    #[must_use]
+    pub fn selects_worklogs(&self) -> bool {
+        [
+            ListField::Worklogs,
+            ListField::WorklogId,
+            ListField::WorklogInterval,
+            ListField::WorklogIntervalStartTime,
+            ListField::WorklogIntervalEndTime,
+            ListField::WorklogIssueId,
+            ListField::WorklogIssueKey,
+            ListField::WorklogDuration,
+            ListField::WorklogDescription,
+            ListField::WorklogLink,
+        ]
+        .into_iter()
+        .any(|field| self.includes(field))
+    }
 }
 
 /// Invalid structured result field selection.
@@ -224,7 +243,7 @@ pub fn project_list_result(
     if mask.includes(ListField::Date) {
         result.insert("date".to_owned(), json!(date));
     }
-    if selects_worklogs(mask) {
+    if mask.selects_worklogs() {
         result.insert(
             "worklogs".to_owned(),
             serde_json::Value::Array(
@@ -245,23 +264,6 @@ pub fn project_list_result(
         );
     }
     serde_json::Value::Object(result)
-}
-
-fn selects_worklogs(mask: &ListFieldMask) -> bool {
-    [
-        ListField::Worklogs,
-        ListField::WorklogId,
-        ListField::WorklogInterval,
-        ListField::WorklogIntervalStartTime,
-        ListField::WorklogIntervalEndTime,
-        ListField::WorklogIssueId,
-        ListField::WorklogIssueKey,
-        ListField::WorklogDuration,
-        ListField::WorklogDescription,
-        ListField::WorklogLink,
-    ]
-    .into_iter()
-    .any(|field| mask.includes(field))
 }
 
 fn project_worklog(worklog: &Worklog, mask: &ListFieldMask) -> serde_json::Value {

@@ -94,6 +94,7 @@ fn command_contract(command: &Command, path: &str) -> Value {
     });
     if path == "list" {
         contract["successWithFieldSelection"] = schema_ref("ProjectedListResult");
+        contract["ndjson"] = list_stream_contract();
     }
     if command.get_name() == "help" {
         contract["helpTargets"] = if path == "help" {
@@ -566,6 +567,11 @@ fn command_behavior(path: &str) -> Value {
                 "allPagesSafetyCeiling": 100,
                 "boundedTotals": "schedule calculations use the retrieved segment; totalsComplete reports whether they cover the whole month",
                 "selectionBinding": "continueFrom is an opaque token bound to the selected date, month range, and effective pagination plan; omitted bounds are restored and explicit mismatches fail before networking"
+            },
+            "streaming": {
+                "outputMode": "ndjson",
+                "eventDiscriminator": "kind",
+                "terminalEvent": "pagination"
             }
         }),
         "setup" => json!({
@@ -650,9 +656,65 @@ fn shared_definitions() -> Value {
     add_definition::<ScheduleDetails>(&mut definitions, "ScheduleDetails");
     add_serialization_definition::<ListPagination>(&mut definitions, "ListPagination");
     add_list_projection_definitions(&mut definitions);
+    add_list_stream_definitions(&mut definitions);
     add_serialization_definition::<AliasSetResult>(&mut definitions, "AliasSetResult");
     add_serialization_definition::<AliasDeleteResult>(&mut definitions, "AliasDeleteResult");
     Value::Object(definitions)
+}
+
+fn add_list_stream_definitions(definitions: &mut Map<String, Value>) {
+    definitions.insert(
+        "ListWorklogEvent".to_owned(),
+        object_schema(
+            &["kind", "worklog"],
+            json!({
+                "kind": {"const": "worklog"},
+                "worklog": schema_ref("ProjectedWorklog")
+            }),
+        ),
+    );
+    definitions.insert(
+        "ListSummaryEvent".to_owned(),
+        object_schema(
+            &["kind"],
+            json!({
+                "kind": {"const": "summary"},
+                "date": {"type": "string", "format": "date"},
+                "schedule": schema_ref("ProjectedScheduleDetails")
+            }),
+        ),
+    );
+    definitions.insert(
+        "ListPaginationEvent".to_owned(),
+        object_schema(
+            &["kind"],
+            json!({
+                "kind": {"const": "pagination"},
+                "pagination": schema_ref("ProjectedListPagination")
+            }),
+        ),
+    );
+}
+
+fn list_stream_contract() -> Value {
+    json!({
+        "outputMode": "ndjson",
+        "mediaType": "application/x-ndjson",
+        "discriminator": "kind",
+        "eventOrder": ["zeroOrMoreWorklog", "summary", "pagination"],
+        "events": {
+            "worklog": schema_ref("ListWorklogEvent"),
+            "summary": schema_ref("ListSummaryEvent"),
+            "pagination": schema_ref("ListPaginationEvent")
+        },
+        "fieldSelection": "projects each event payload before serialization; kind is always present; worklog events and Jira enrichment are omitted when no worklog fields are selected; Tempo-only fields avoid Jira enrichment",
+        "pageEmission": "worklog events are flushed before requesting the next Tempo page",
+        "emptyResult": ["summary", "pagination"],
+        "terminalEvent": "pagination",
+        "failureStream": "stderrErrorEnvelope",
+        "midStreamFailure": "network or enrichment failure stops without summary or terminal events; prior stdout lines remain valid",
+        "brokenPipe": "clean successful termination"
+    })
 }
 
 fn add_list_projection_definitions(definitions: &mut Map<String, Value>) {
@@ -860,7 +922,14 @@ fn output_contract() -> Value {
         "modes": {
             "auto": "human on a stdout TTY; otherwise json",
             "human": "human-readable text",
-            "json": "one JSON document"
+            "json": "one JSON document",
+            "ndjson": "newline-delimited list events"
+        },
+        "modeConstraints": {
+            "ndjson": {
+                "commands": ["list"],
+                "otherwise": {"errorCode": "invalid_input", "exitCode": 2}
+            }
         },
         "successStream": "stdout",
         "errorStream": "stderr",
@@ -1208,7 +1277,10 @@ mod tests {
             .as_array()
             .and_then(|arguments| arguments.iter().find(|argument| argument["id"] == "output"))
             .ok_or_else(|| "missing output option".to_owned())?;
-        assert_eq!(output["enum"], serde_json::json!(["auto", "human", "json"]));
+        assert_eq!(
+            output["enum"],
+            serde_json::json!(["auto", "human", "json", "ndjson"])
+        );
         assert_eq!(output["default"], "auto");
         assert!(Cli::try_parse_from(["drag", "--output", "xml", "schema"]).is_err());
         Ok(())

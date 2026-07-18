@@ -102,6 +102,37 @@ fn reports_version() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn ndjson_output_is_explicit_and_reserved_for_list() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+
+    let list = Command::cargo_bin("drag")?
+        .args([
+            "--config",
+            missing
+                .to_str()
+                .ok_or("temporary config path is not UTF-8")?,
+            "--output",
+            "ndjson",
+            "list",
+        ])
+        .output()?;
+    assert_eq!(list.status.code(), Some(2));
+    assert!(list.stdout.is_empty());
+    let list_error: Value = serde_json::from_slice(&list.stderr)?;
+    assert_eq!(list_error["error"]["code"], "not_configured");
+
+    let schema = Command::cargo_bin("drag")?
+        .args(["--output", "ndjson", "schema"])
+        .output()?;
+    assert_eq!(schema.status.code(), Some(2));
+    assert!(schema.stdout.is_empty());
+    let schema_error: Value = serde_json::from_slice(&schema.stderr)?;
+    assert_eq!(schema_error["error"]["code"], "invalid_input");
+    Ok(())
+}
+
+#[test]
 fn delete_json_rejects_invalid_batches_before_configuration_or_network_access(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
@@ -677,6 +708,18 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(contract["output"]["errorStream"], "stderr");
     assert_eq!(contract["errors"]["codes"]["usage"], 2);
     assert_eq!(contract["errors"]["codes"]["api_error"], 1);
+    assert_eq!(
+        contract["output"]["modes"]["ndjson"],
+        "newline-delimited list events"
+    );
+    assert_eq!(
+        contract["output"]["modeConstraints"]["ndjson"]["commands"],
+        serde_json::json!(["list"])
+    );
+    assert_eq!(
+        contract["output"]["modeConstraints"]["ndjson"]["otherwise"]["errorCode"],
+        "invalid_input"
+    );
 
     for name in [
         "log",
@@ -896,6 +939,32 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         contract["commands"]["list"]["successWithFieldSelection"]["$ref"],
         "#/$defs/ProjectedListResult"
     );
+    let stream = &contract["commands"]["list"]["ndjson"];
+    assert_eq!(stream["outputMode"], "ndjson");
+    assert_eq!(stream["discriminator"], "kind");
+    assert_eq!(
+        stream["eventOrder"],
+        serde_json::json!(["zeroOrMoreWorklog", "summary", "pagination"])
+    );
+    assert_eq!(
+        stream["events"]["worklog"]["$ref"],
+        "#/$defs/ListWorklogEvent"
+    );
+    assert_eq!(
+        stream["events"]["summary"]["$ref"],
+        "#/$defs/ListSummaryEvent"
+    );
+    assert_eq!(
+        stream["events"]["pagination"]["$ref"],
+        "#/$defs/ListPaginationEvent"
+    );
+    assert_eq!(stream["terminalEvent"], "pagination");
+    assert_eq!(stream["failureStream"], "stderrErrorEnvelope");
+    assert_eq!(
+        stream["pageEmission"],
+        "worklog events are flushed before requesting the next Tempo page"
+    );
+    assert_eq!(stream["brokenPipe"], "clean successful termination");
     let projected = &contract["$defs"]["ProjectedListResult"];
     assert_eq!(projected["minProperties"], 1);
     assert_eq!(projected["additionalProperties"], false);
