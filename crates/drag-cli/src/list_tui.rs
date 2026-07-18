@@ -181,7 +181,7 @@ fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
     let details_height = focused_details_height(frame.area().height, pagination_height, model);
     let [month, date, worklogs, details, day, pagination, footer] = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Fill(1),
         Constraint::Length(details_height),
         Constraint::Length(3),
@@ -219,7 +219,7 @@ fn focused_details_height(
     }
     // Month, date, day summary, footer, pagination, and a bordered table with
     // one visible row take priority over secondary verbose details.
-    let available = terminal_height.saturating_sub(13 + pagination_height);
+    let available = terminal_height.saturating_sub(12 + pagination_height);
     match available {
         5.. => 5,
         3..=4 => 3,
@@ -241,37 +241,63 @@ fn render_focused_details(frame: &mut Frame<'_>, area: Rect, model: &ListReportM
         "Focused · {}",
         escape_terminal_data(&model.report.issue_label(worklog))
     );
+    let block = Block::bordered().title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+    let jira = Line::from(format!("Jira: {}", escape_terminal_data(&worklog.link)));
+    if inner.height == 1 {
+        frame.render_widget(jira, inner);
+        return;
+    }
+    let [description, jira_line] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
     frame.render_widget(
-        Paragraph::new(Text::from(vec![
-            Line::from(format!(
-                "Description: {}",
-                escape_terminal_data(&worklog.description)
-            )),
-            Line::from(format!("Jira: {}", escape_terminal_data(&worklog.link))),
-        ]))
-        .wrap(Wrap { trim: false })
-        .block(Block::bordered().title(title)),
-        area,
+        Paragraph::new(format!(
+            "Description: {}",
+            escape_terminal_data(&worklog.description)
+        ))
+        .wrap(Wrap { trim: false }),
+        description,
     );
+    frame.render_widget(jira, jira_line);
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect) {
-    let mut spans = vec![
-        " ↑/k ".bold().cyan(),
-        "up  ".dim(),
-        "↓/j ".bold().cyan(),
-        "down  ".dim(),
-        "q ".bold().cyan(),
-        "quit".dim(),
-    ];
-    if area.width >= 70 {
-        spans.extend([
+    let spans = if area.width >= 70 {
+        vec![
+            " ↑/k ".bold().cyan(),
+            "up  ".dim(),
+            "↓/j ".bold().cyan(),
+            "down  ".dim(),
+            "q ".bold().cyan(),
+            "quit".dim(),
             "   Esc ".bold().cyan(),
             "close   ".dim(),
             "Ctrl-C ".bold().cyan(),
             "exit".dim(),
-        ]);
-    }
+        ]
+    } else if area.width >= 32 {
+        vec![
+            " q ".bold().cyan(),
+            "quit  ".dim(),
+            "↑/k ".bold().cyan(),
+            "up  ".dim(),
+            "↓/j ".bold().cyan(),
+            "down".dim(),
+        ]
+    } else if area.width >= 24 {
+        vec![
+            " q ".bold().cyan(),
+            "quit  ".dim(),
+            "↑↓/jk ".bold().cyan(),
+            "move".dim(),
+        ]
+    } else {
+        vec![" q ".bold().cyan(), "quit".dim()]
+    };
     frame.render_widget(Line::from(spans), area);
 }
 
@@ -339,6 +365,13 @@ fn render_worklogs(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportMode
             Constraint::Length(13),
             Constraint::Fill(1),
             Constraint::Length(10),
+        ]
+    } else if area.width >= 48 {
+        [
+            Constraint::Length(12),
+            Constraint::Length(11),
+            Constraint::Fill(1),
+            Constraint::Length(8),
         ]
     } else {
         [
@@ -626,6 +659,31 @@ mod tests {
     }
 
     #[test]
+    fn verbose_details_reserve_a_visible_line_for_the_jira_url() {
+        let report = report_with_verbose(
+            vec![Worklog {
+                id: "first".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: "A long description that wraps across every available description line and must not displace the Jira URL. ".repeat(4),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            true,
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let screen = screen_with_size(&mut model, 80, 24);
+
+        assert!(
+            screen.contains("Jira: https://example.atlassian.net/browse/OPS-1"),
+            "{screen}"
+        );
+    }
+
+    #[test]
     fn narrow_report_keeps_primary_fields_alias_and_navigation_hints() {
         let report = report(
             vec![Worklog {
@@ -660,6 +718,27 @@ mod tests {
     }
 
     #[test]
+    fn medium_width_report_preserves_a_twelve_character_worklog_id() {
+        let report = report(
+            vec![Worklog {
+                id: "123456789012".to_owned(),
+                interval: None,
+                issue_id: "42".to_owned(),
+                issue_key: "OPS-42".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-42".to_owned(),
+            }],
+            true,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let screen = screen_with_size(&mut model, 60, 20);
+
+        assert!(screen.contains("123456789012"), "{screen}");
+    }
+
+    #[test]
     fn short_verbose_report_prioritizes_the_focused_worklog_table() {
         let report = report_with_verbose(
             vec![Worklog {
@@ -680,5 +759,36 @@ mod tests {
 
         assert!(short.contains("▶ first"), "{short}");
         assert!(short.contains("q quit"), "{short}");
+    }
+
+    #[test]
+    fn short_incomplete_report_keeps_a_focused_worklog_visible() {
+        let report = report(
+            vec![Worklog {
+                id: "first".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            false,
+        );
+        let mut model = ListReportModel::new(&report);
+
+        let short = screen_with_size(&mut model, 80, 14);
+
+        assert!(short.contains("▶ first"), "{short}");
+    }
+
+    #[test]
+    fn very_narrow_footer_prioritizes_the_quit_hint() {
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+
+        let narrow = screen_with_size(&mut model, 20, 14);
+
+        assert!(narrow.contains("q quit"), "{narrow}");
     }
 }
