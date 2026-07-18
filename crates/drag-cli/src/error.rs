@@ -132,3 +132,9 @@ impl From<drag::pagination::PaginationError> for CliError {
         Self::InvalidInput(error.to_string())
     }
 }
+
+impl From<drag::field_selection::FieldSelectionError> for CliError {
+    fn from(error: drag::field_selection::FieldSelectionError) -> Self {
+        Self::InvalidInput(error.to_string())
+    }
+}

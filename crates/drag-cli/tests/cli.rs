@@ -874,6 +874,13 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(page_limit["default"], 1);
     assert_eq!(page_limit["minimum"], 1);
     assert_eq!(page_limit["maximum"], 100);
+    let fields = list_argument("fields").ok_or("missing list --fields")?;
+    assert_eq!(fields["type"], "fieldMask");
+    assert_eq!(fields["separator"], ",");
+    assert!(fields["allowedFields"].as_array().is_some_and(|paths| paths
+        .contains(&Value::String("worklogs.interval.startTime".to_owned()))
+        && paths.contains(&Value::String("schedule.dayLoggedDuration".to_owned()))
+        && paths.contains(&Value::String("pagination.next".to_owned()))));
     assert!(list_argument("continue_from").is_some());
     let all_pages = list_argument("all_pages").ok_or("missing list --all-pages")?;
     assert_eq!(
@@ -884,6 +891,18 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         contract["commands"]["list"]["success"]["properties"]["pagination"]["$ref"],
         "#/$defs/ListPagination"
+    );
+    assert_eq!(
+        contract["commands"]["list"]["successWithFieldSelection"]["$ref"],
+        "#/$defs/ProjectedListResult"
+    );
+    let projected = &contract["$defs"]["ProjectedListResult"];
+    assert_eq!(projected["minProperties"], 1);
+    assert_eq!(projected["additionalProperties"], false);
+    assert!(projected["required"].is_null());
+    assert_eq!(
+        projected["properties"]["worklogs"]["items"]["$ref"],
+        "#/$defs/ProjectedWorklog"
     );
     assert_eq!(pagination["additionalProperties"], false);
     assert_eq!(pagination["properties"]["pageLimit"]["maximum"], 100);
@@ -899,6 +918,16 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         contract["commands"]["list"]["behavior"]["pagination"]["defaultPageLimit"],
         1
     );
+    let selection = &contract["commands"]["list"]["behavior"]["fieldSelection"];
+    assert_eq!(selection["option"], "fields");
+    assert_eq!(selection["default"], "allFields");
+    assert_eq!(
+        selection["recommendation"],
+        "requestOnlyFieldsNeededForTask"
+    );
+    assert_eq!(selection["appliesTo"], "structuredOutputOnly");
+    assert_eq!(selection["projection"], "beforeSerialization");
+    assert_eq!(selection["ordering"], "canonicalResultOrder");
     assert_eq!(
         contract["commands"]["setup"]["behavior"]["interactive"]["renderStream"],
         "stderr"
@@ -977,6 +1006,8 @@ fn list_help_documents_read_only_date_and_verbose_behavior(
     assert!(stdout.contains("[DATE]"));
     assert!(stdout.contains("--verbose"));
     assert!(stdout.contains("descriptions and Jira URLs"));
+    assert!(stdout.contains("--fields"));
+    assert!(stdout.contains("Comma-delimited result fields"));
     assert!(stdout.contains("--limit"));
     assert!(stdout.contains("default: 100"));
     assert!(stdout.contains("--page-limit"));
@@ -1010,6 +1041,32 @@ fn invalid_list_bounds_and_incompatible_all_pages_fail_before_configuration(
         assert_eq!(error["ok"], false, "{arguments:?}");
         assert_eq!(error["error"]["code"], "usage", "{arguments:?}");
         assert_ne!(error["error"]["code"], "config_error", "{arguments:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn invalid_list_field_masks_fail_before_configuration_or_networking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing = directory.path().join("missing.json");
+
+    for mask in [
+        "",
+        "worklogs.id,worklogs.id",
+        "worklogs,worklogs.id",
+        "worklogs.interval.unknown",
+        "request.issueId",
+    ] {
+        let output = command(&missing)?
+            .args(["list", "--fields", mask])
+            .output()?;
+
+        assert_eq!(output.status.code(), Some(2), "{mask:?}");
+        assert!(output.stdout.is_empty(), "{mask:?}");
+        let error: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(error["error"]["code"], "invalid_input", "{mask:?}");
+        assert!(!missing.exists(), "{mask:?}");
     }
     Ok(())
 }

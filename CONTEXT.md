@@ -8,6 +8,9 @@
 - Exit `2` means the request must be corrected; exit `1` means config,
   network, server, or local I/O failed.
 - Use `--verbose` only when descriptions and issue URLs are needed.
+- Use `list --fields` in automation and request only needed result leaves. For
+  traversal, include `pagination.next` and `pagination.selectedDate`; omit the
+  mask only when the complete list report is required.
 - Keep `list` bounded: start with its 100-record/one-page defaults, then pass
   `pagination.next` unchanged to `--continue-from` and reuse
   `pagination.selectedDate` as `DATE`. Omit pagination flags to restore the

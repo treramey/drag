@@ -7,6 +7,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
+use drag::field_selection::{project_list_result, ListFieldMask};
 use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
 use drag::pagination::{PaginationPlan, DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
 use drag::schedule::{create_schedule_details, ScheduleDetails};
@@ -148,6 +149,11 @@ pub(crate) async fn run(
     args: ListArgs,
     make_source: impl FnOnce(Credentials) -> Result<Box<dyn ListDataSource>, CliError>,
 ) -> Result<Rendered, CliError> {
+    let fields = args
+        .fields
+        .as_deref()
+        .map(ListFieldMask::parse)
+        .transpose()?;
     let selected = select_date(now, args.when.as_deref())?;
     let (month_start, month_end) = month_bounds(selected.date);
     let month_start = month_start.to_string();
@@ -267,10 +273,13 @@ pub(crate) async fn run(
         complete,
         totals_complete,
     };
-    Ok(Rendered::new(
-        json!({"date": selected.date, "worklogs": worklogs, "schedule": details, "pagination": pagination}),
-        human,
-    ))
+    let data = fields.as_ref().map_or_else(
+        || {
+            json!({"date": selected.date, "worklogs": worklogs, "schedule": details, "pagination": pagination})
+        },
+        |mask| project_list_result(selected.date, &worklogs, &details, &pagination, mask),
+    );
+    Ok(Rendered::new(data, human))
 }
 
 fn to_worklog(entity: WorklogEntity, issue_key: String, timezone: Tz) -> Result<Worklog, CliError> {
@@ -760,6 +769,149 @@ mod tests {
             .lock()
             .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
         assert_eq!(requests.issues, ["10", "20"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn field_selection_projects_nested_worklog_and_pagination_fields_in_stable_order(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let render = |fields: &str| {
+            let fake = FakeListDataSource {
+                worklogs: vec![worklog("visible", "2026-07-14", "me", "10")],
+                schedule: Vec::new(),
+                requests: Arc::new(Mutex::new(Requests::default())),
+                failing_issues: Vec::new(),
+                pagination_result: None,
+            };
+            run(
+                &path,
+                now,
+                ListArgs {
+                    fields: Some(fields.to_owned()),
+                    ..ListArgs::default()
+                },
+                |_| Ok(Box::new(fake)),
+            )
+        };
+
+        let first = render("worklogs.issueKey,pagination.next,worklogs.interval.startTime").await?;
+        let reordered =
+            render("pagination.next,worklogs.interval.startTime,worklogs.issueKey").await?;
+
+        assert_eq!(
+            first.data,
+            json!({
+                "worklogs": [{"interval": {"startTime": "09:15"}, "issueKey": "KEY-10"}],
+                "pagination": {"next": null}
+            })
+        );
+        assert_eq!(first.data.to_string(), reordered.data.to_string());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn field_selection_preserves_empty_worklogs_schedule_totals_and_continuation_metadata(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let next_url = "https://api.tempo.io/4/worklogs?from=2026-07-01&to=2026-07-31&offset=1";
+        let fake = FakeListDataSource {
+            worklogs: vec![other_day_worklog()],
+            schedule: vec![ScheduleEntity {
+                date: "2026-07-14".to_owned(),
+                required_seconds: 28_800,
+                kind: "WORKING_DAY".to_owned(),
+            }],
+            requests: Arc::new(Mutex::new(Requests::default())),
+            failing_issues: Vec::new(),
+            pagination_result: Some((Some(next_url.to_owned()), 1)),
+        };
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        let rendered = run(
+            &path,
+            now,
+            ListArgs {
+                fields: Some(
+                    "worklogs,schedule.monthLoggedDuration,schedule.dayLoggedDuration,pagination.recordsRetrieved,pagination.recordsReturned,pagination.next,pagination.complete,pagination.totalsComplete"
+                        .to_owned(),
+                ),
+                ..ListArgs::default()
+            },
+            |_| Ok(Box::new(fake)),
+        )
+        .await?;
+
+        assert_eq!(rendered.data["worklogs"], json!([]));
+        assert_eq!(rendered.data["schedule"]["monthLoggedDuration"], "1h");
+        assert_eq!(rendered.data["schedule"]["dayLoggedDuration"], "0h");
+        assert_eq!(rendered.data["pagination"]["recordsRetrieved"], 1);
+        assert_eq!(rendered.data["pagination"]["recordsReturned"], 0);
+        assert!(rendered.data["pagination"]["next"].is_string());
+        assert_eq!(rendered.data["pagination"]["complete"], false);
+        assert_eq!(rendered.data["pagination"]["totalsComplete"], false);
+        let token = rendered.data["pagination"]["next"]
+            .as_str()
+            .ok_or_else(|| CliError::InvalidInput("missing projected continuation".to_owned()))?;
+        let continuation = decode_continuation(token)?;
+        assert_eq!(
+            (
+                continuation.selected_date.as_str(),
+                continuation.url.as_str(),
+                continuation.limit,
+                continuation.page_limit,
+            ),
+            ("2026-07-14", next_url, Some(100), 1)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn verbose_changes_human_rendering_without_changing_field_selection(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+        let render = |verbose| {
+            let fake = FakeListDataSource {
+                worklogs: vec![worklog("visible", "2026-07-14", "me", "10")],
+                schedule: Vec::new(),
+                requests: Arc::new(Mutex::new(Requests::default())),
+                failing_issues: Vec::new(),
+                pagination_result: None,
+            };
+            run(
+                &path,
+                now,
+                ListArgs {
+                    verbose,
+                    fields: Some("worklogs.id".to_owned()),
+                    ..ListArgs::default()
+                },
+                |_| Ok(Box::new(fake)),
+            )
+        };
+
+        let concise = render(false).await?;
+        let verbose = render(true).await?;
+
+        assert_eq!(concise.data, json!({"worklogs": [{"id": "visible"}]}));
+        assert_eq!(verbose.data, concise.data);
+        assert!(!concise.human.contains("description visible"));
+        assert!(verbose.human.contains("description visible"));
         Ok(())
     }
 
