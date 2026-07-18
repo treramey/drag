@@ -11,7 +11,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
   qualified partial totals, populated and empty worklog views, focused-row
   keyboard navigation and scrolling, selected-month calendar context with
   distinct today and selected-date highlights, previous/next date browsing,
-  responsive columns, verbose focused details, opening the focused Jira issue
+  a cohesive wide calendar-and-worklog dashboard, responsive columns, verbose
+  focused details, opening the focused Jira issue
   with recoverable status feedback, and clean quit keys.
 - Explicit NDJSON list streaming with discriminated worklog, schedule summary,
   and terminal pagination events; page-wise bounded retrieval; field-aware Jira

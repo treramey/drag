@@ -17,7 +17,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Text};
 use ratatui::widgets::calendar::{CalendarEventStore, Monthly};
-use ratatui::widgets::{Block, Cell, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 use tokio::sync::Mutex;
 
@@ -260,6 +260,37 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
 fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
     let report = model.report;
     let pagination_height = u16::from(!report.pagination().totals_complete) * 2;
+    if let Some(month_width) = dashboard_month_width(frame.area(), pagination_height, report) {
+        render_dashboard(frame, model, pagination_height, month_width);
+        return;
+    }
+    render_stacked(frame, model, pagination_height);
+}
+
+fn dashboard_month_width(
+    terminal_area: Rect,
+    pagination_height: u16,
+    report: &ListReport,
+) -> Option<u16> {
+    const MIN_REPORT_WIDTH: u16 = 47;
+    let date = calendar_date(report.selected_date())?;
+    let calendar = Monthly::new(date, CalendarEventStore::default())
+        .show_month_header(ratatui::style::Style::new())
+        .show_weekdays_header(ratatui::style::Style::new());
+    let month_width = calendar.width().saturating_add(2);
+    let minimum_width = month_width
+        .saturating_add(MIN_REPORT_WIDTH)
+        .saturating_add(2);
+    let minimum_height = calendar
+        .height()
+        .saturating_add(6)
+        .saturating_add(pagination_height);
+    (terminal_area.width >= minimum_width && terminal_area.height >= minimum_height)
+        .then_some(month_width)
+}
+
+fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagination_height: u16) {
+    let report = model.report;
     let month_height = month_height(frame.area(), pagination_height, report);
     let details_height =
         focused_details_height(frame.area().height, month_height, pagination_height, model);
@@ -278,7 +309,7 @@ fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
         Paragraph::new(report.selected_date().format("%A, %Y-%m-%d").to_string()).bold(),
         date,
     );
-    render_worklogs(frame, worklogs, model);
+    render_worklogs(frame, worklogs, model, true);
     render_focused_details(frame, details, model);
     let schedule = report.schedule();
     frame.render_widget(
@@ -291,6 +322,111 @@ fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
     );
     render_pagination_notice(frame, pagination, report);
     render_footer(frame, footer, model);
+}
+
+fn render_dashboard(
+    frame: &mut Frame<'_>,
+    model: &mut ListReportModel<'_>,
+    pagination_height: u16,
+    month_width: u16,
+) {
+    let [dashboard, pagination, footer] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(pagination_height),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+    let panel = Block::bordered();
+    let inner = panel.inner(dashboard);
+    frame.render_widget(panel, dashboard);
+    let [month, report] =
+        Layout::horizontal([Constraint::Length(month_width), Constraint::Fill(1)]).areas(inner);
+    render_dashboard_month(frame, month, model.report);
+    render_dashboard_report(frame, report, model);
+    render_pagination_notice(frame, pagination, model.report);
+    render_footer(frame, footer, model);
+}
+
+fn render_dashboard_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
+    let Some(selected_date) = calendar_date(report.selected_date()) else {
+        return;
+    };
+    let mut events = CalendarEventStore::default();
+    if let Some(today) = calendar_date(report.today()) {
+        events.add(today, ratatui::style::Style::new().cyan().bold());
+    }
+    events.add(
+        selected_date,
+        ratatui::style::Style::new().reversed().bold(),
+    );
+    let calendar = Monthly::new(selected_date, events)
+        .show_month_header(ratatui::style::Style::new().cyan().bold())
+        .show_weekdays_header(ratatui::style::Style::new().dim())
+        .show_surrounding(ratatui::style::Style::new().dim());
+    let summary_height = 3.min(area.height);
+    let [calendar_area, summary] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(summary_height)]).areas(area);
+    frame.render_widget(calendar, calendar_area);
+    let summary_block = Block::new().borders(Borders::TOP);
+    let summary_inner = summary_block.inner(summary);
+    frame.render_widget(summary_block, summary);
+    let schedule = report.schedule();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(format!(
+                "{} / {}",
+                schedule.month_logged_duration, schedule.month_required_duration
+            )),
+            Line::from(format!(
+                "{} current period",
+                schedule.month_current_period_duration
+            )),
+        ]),
+        summary_inner,
+    );
+}
+
+fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportModel<'_>) {
+    let divider = Block::new().borders(Borders::LEFT);
+    let inner = divider.inner(area);
+    frame.render_widget(divider, area);
+    let details_height =
+        if model.report.verbose() && model.focused_row().is_some() && inner.height >= 15 {
+            5
+        } else {
+            0
+        };
+    let [date, worklogs, details, day] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(details_height),
+        Constraint::Length(3),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(
+            model
+                .report
+                .selected_date()
+                .format("%A, %Y-%m-%d")
+                .to_string(),
+        )
+        .bold(),
+        date,
+    );
+    render_worklogs(frame, worklogs, model, false);
+    render_focused_details(frame, details, model);
+    let day_block = Block::new().borders(Borders::TOP);
+    let day_inner = day_block.inner(day);
+    frame.render_widget(day_block, day);
+    let schedule = model.report.schedule();
+    frame.render_widget(
+        Line::from(format!(
+            "Day summary: {} / {} logged / required",
+            schedule.day_logged_duration, schedule.day_required_duration
+        )),
+        day_inner,
+    );
 }
 
 fn month_height(terminal_area: Rect, pagination_height: u16, report: &ListReport) -> u16 {
@@ -499,22 +635,28 @@ fn calendar_date(date: chrono::NaiveDate) -> Option<time::Date> {
     time::Date::from_ordinal_date(date.year(), u16::try_from(date.ordinal()).ok()?).ok()
 }
 
-fn render_worklogs(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportModel<'_>) {
+fn render_worklogs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &mut ListReportModel<'_>,
+    bordered: bool,
+) {
     let report = model.report;
     if report.worklogs().is_empty() {
-        frame.render_widget(
-            Paragraph::new(if report.pagination().totals_complete {
-                format!(
-                    "No worklogs for {}",
-                    report.selected_date().format("%A, %Y-%m-%d")
-                )
-            } else {
-                "No worklogs in this retrieved segment".to_owned()
-            })
-            .centered()
-            .block(Block::bordered().title("Worklogs")),
-            area,
-        );
+        let empty = Paragraph::new(if report.pagination().totals_complete {
+            format!(
+                "No worklogs for {}",
+                report.selected_date().format("%A, %Y-%m-%d")
+            )
+        } else {
+            "No worklogs in this retrieved segment".to_owned()
+        })
+        .centered();
+        if bordered {
+            frame.render_widget(empty.block(Block::bordered().title("Worklogs")), area);
+        } else {
+            frame.render_widget(empty, area);
+        }
         return;
     }
     let rows = report.worklogs().iter().map(|worklog| {
@@ -554,8 +696,12 @@ fn render_worklogs(frame: &mut Frame<'_>, area: Rect, model: &mut ListReportMode
     let table = Table::new(rows, widths)
         .header(Row::new(["ID", "Time", "Issue", "Duration"]).bold())
         .row_highlight_style(ratatui::style::Style::new().reversed())
-        .highlight_symbol("▶ ")
-        .block(Block::bordered().title("Worklogs"));
+        .highlight_symbol("▶ ");
+    let table = if bordered {
+        table.block(Block::bordered().title("Worklogs"))
+    } else {
+        table
+    };
     frame.render_stateful_widget(table, area, &mut model.table_state);
 }
 
@@ -678,6 +824,31 @@ mod tests {
             .collect()
     }
 
+    fn screen_lines_with_size(
+        model: &mut ListReportModel<'_>,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = match Terminal::new(backend) {
+            Ok(terminal) => terminal,
+            Err(error) => match error {},
+        };
+        match terminal.draw(|frame| render(frame, model)) {
+            Ok(_) => {}
+            Err(error) => match error {},
+        }
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect()
+            })
+            .collect()
+    }
+
     fn calendar_day_style(
         report: &ListReport,
         row: &str,
@@ -749,6 +920,34 @@ mod tests {
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
+    }
+
+    #[test]
+    fn wide_report_composes_calendar_and_worklogs_in_one_dashboard() {
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+
+        let lines = screen_lines_with_size(&mut model, 100, 24);
+
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("July 2026") && line.contains("Tuesday, 2026-07-14")),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(
+            lines
+                .first()
+                .is_some_and(|line| line.starts_with('┌') && line.ends_with('┐')),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(
+            lines.iter().take(22).skip(1).all(|line| line.contains('│')),
+            "{}",
+            lines.join("\n")
+        );
     }
 
     #[test]
@@ -1048,7 +1247,7 @@ mod tests {
     #[test]
     fn focused_row_is_visible_and_scrolling_keeps_the_last_row_on_screen() {
         let report = report(
-            (1..=8)
+            (1..=12)
                 .map(|index| Worklog {
                     id: format!("row-{index}"),
                     interval: Some(ClockInterval {
@@ -1066,16 +1265,16 @@ mod tests {
         );
         let mut model = ListReportModel::new(&report);
 
-        let initial = screen_with_size(&mut model, 70, 16);
+        let initial = screen_with_size(&mut model, 100, 16);
         assert!(initial.contains("▶ row-1"), "{initial}");
 
         for _ in 1..report.worklogs().len() {
             model.update(Message::MoveDown, &NoopBrowserLauncher);
         }
-        let scrolled = screen_with_size(&mut model, 70, 16);
+        let scrolled = screen_with_size(&mut model, 100, 16);
 
-        assert!(scrolled.contains("▶ row-8"), "{scrolled}");
-        assert!(!scrolled.contains("row-1"), "{scrolled}");
+        assert!(scrolled.contains("▶ row-12"), "{scrolled}");
+        assert!(!scrolled.contains("row-1        09:00"), "{scrolled}");
     }
 
     #[test]
