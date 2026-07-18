@@ -190,7 +190,7 @@ async fn run_terminal(
                 terminal.restore()?;
                 return Ok(());
             }
-            if let Some(message) = message_for_key(key.code) {
+            if let Some(message) = message_for_key_event(key.code, key.kind) {
                 model.update(message, browser_launcher);
             }
         }
@@ -204,6 +204,14 @@ fn message_for_key(code: KeyCode) -> Option<Message> {
         KeyCode::Char('o') => Some(Message::Open),
         _ => None,
     }
+}
+
+fn message_for_key_event(code: KeyCode, kind: KeyEventKind) -> Option<Message> {
+    let message = message_for_key(code)?;
+    if message == Message::Open && kind != KeyEventKind::Press {
+        return None;
+    }
+    Some(message)
 }
 
 fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -321,22 +329,31 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
             "Ctrl-C ".bold().cyan(),
             "exit".dim(),
         ]
-    } else if area.width >= 32 {
+    } else if area.width >= 48 {
         vec![
             " q ".bold().cyan(),
             "quit  ".dim(),
             "↑/k ".bold().cyan(),
             "up  ".dim(),
             "↓/j ".bold().cyan(),
-            "down".dim(),
-            "  o ".bold().cyan(),
+            "down  ".dim(),
+            "o ".bold().cyan(),
+            "open".dim(),
+        ]
+    } else if area.width >= 32 {
+        vec![
+            " q ".bold().cyan(),
+            "quit  ".dim(),
+            "↑↓/jk ".bold().cyan(),
+            "move  ".dim(),
+            "o ".bold().cyan(),
             "open".dim(),
         ]
     } else if area.width >= 24 {
         vec![
             " q ".bold().cyan(),
             "quit  ".dim(),
-            "↑↓/jk ".bold().cyan(),
+            "↑↓ ".bold().cyan(),
             "move  ".dim(),
             "o ".bold().cyan(),
             "open".dim(),
@@ -442,12 +459,14 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use chrono::NaiveDate;
-    use crossterm::event::{KeyCode, KeyModifiers};
+    use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
     use drag::models::{ClockInterval, ListPagination, Worklog};
     use drag::schedule::ScheduleDetails;
     use ratatui::{backend::TestBackend, Terminal};
 
-    use super::{message_for_key, render, should_quit, ListReportModel, Message};
+    use super::{
+        message_for_key, message_for_key_event, render, should_quit, ListReportModel, Message,
+    };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
 
@@ -737,6 +756,37 @@ mod tests {
         let report = report(Vec::new(), true);
         let screen = screen(&report);
         assert!(screen.contains("o open"), "{screen}");
+    }
+
+    #[test]
+    fn key_repeat_moves_focus_but_does_not_repeat_browser_launches() {
+        assert_eq!(
+            message_for_key_event(KeyCode::Down, KeyEventKind::Repeat),
+            Some(Message::MoveDown)
+        );
+        assert_eq!(
+            message_for_key_event(KeyCode::Char('o'), KeyEventKind::Press),
+            Some(Message::Open)
+        );
+        assert_eq!(
+            message_for_key_event(KeyCode::Char('o'), KeyEventKind::Repeat),
+            None
+        );
+    }
+
+    #[test]
+    fn compact_footer_keeps_quit_move_and_open_hints_at_boundary_widths() {
+        let report = report(Vec::new(), true);
+        for width in [24, 32] {
+            let mut model = ListReportModel::new(&report);
+            let screen = screen_with_size(&mut model, width, 20);
+            for expected in ["q quit", "move", "o open"] {
+                assert!(
+                    screen.contains(expected),
+                    "missing {expected:?} at width {width}\n{screen}"
+                );
+            }
+        }
     }
 
     #[test]
