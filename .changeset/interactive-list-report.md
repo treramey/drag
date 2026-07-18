@@ -2,4 +2,4 @@
 "@treramey/drag": minor
 ---
 
-Open completed human list reports in Ratatui when all terminal streams are attached, while preserving redirected text and structured output.
+Open completed non-verbose human list reports in Ratatui when all terminal streams are attached, while qualifying partial segments and preserving verbose, redirected, and structured output.

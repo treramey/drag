@@ -88,7 +88,7 @@ impl ListReportSession for FakeListReportSession {
     }
 }
 
-fn empty_list_report() -> ListReport {
+fn empty_list_report(verbose: bool) -> ListReport {
     ListReport::new(
         NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN),
         Vec::new(),
@@ -114,7 +114,7 @@ fn empty_list_report() -> ListReport {
             totals_complete: true,
         },
         BTreeMap::new(),
-        false,
+        verbose,
     )
 }
 
@@ -136,7 +136,7 @@ async fn eligible_human_list_is_presented_by_the_injected_report_session() -> Re
         selected_dates: Arc::clone(&selected_dates),
     });
 
-    let rendered = app.finish_list(empty_list_report(), true).await?;
+    let rendered = app.finish_list(empty_list_report(false), true).await?;
 
     assert!(rendered.is_none());
     let dates = selected_dates
@@ -168,7 +168,9 @@ async fn explicit_json_or_ineligible_human_list_remains_non_interactive() -> Res
             selected_dates: Arc::clone(&selected_dates),
         });
 
-        let rendered = app.finish_list(empty_list_report(), interactive).await?;
+        let rendered = app
+            .finish_list(empty_list_report(false), interactive)
+            .await?;
 
         let rendered = rendered.ok_or_else(|| CliError::Api("missing plain result".to_owned()))?;
         assert_eq!(rendered.data["date"], "2026-07-14");
@@ -177,6 +179,38 @@ async fn explicit_json_or_ineligible_human_list_remains_non_interactive() -> Res
             .map_err(|_| CliError::Io(std::io::Error::other("selected dates lock poisoned")))?
             .is_empty());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn verbose_human_list_stays_plain_until_the_tui_can_show_verbose_details(
+) -> Result<(), CliError> {
+    let temp = TempDir::new()?;
+    let selected_dates = Arc::new(Mutex::new(Vec::new()));
+    let app = App::with_connection_verifier(
+        temp.path().join("config.json"),
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+            config_update: None,
+        },
+    )
+    .with_list_report_session(FakeListReportSession {
+        eligible: true,
+        selected_dates: Arc::clone(&selected_dates),
+    });
+
+    let rendered = app
+        .finish_list(empty_list_report(true), true)
+        .await?
+        .ok_or_else(|| CliError::Api("missing verbose plain result".to_owned()))?;
+
+    assert!(rendered.human.contains("No worklogs"));
+    assert!(selected_dates
+        .lock()
+        .map_err(|_| CliError::Io(std::io::Error::other("selected dates lock poisoned")))?
+        .is_empty());
     Ok(())
 }
 

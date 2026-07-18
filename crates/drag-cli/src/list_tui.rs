@@ -14,7 +14,7 @@ use futures_util::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
-use ratatui::text::Line;
+use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Cell, Paragraph, Row, Table};
 use ratatui::{Frame, Terminal};
 
@@ -120,11 +120,12 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
 }
 
 fn render(frame: &mut Frame<'_>, report: &ListReport) {
-    let [month, date, worklogs, day, footer] = Layout::vertical([
+    let [month, date, worklogs, day, pagination, footer] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(2),
         Constraint::Fill(1),
         Constraint::Length(3),
+        Constraint::Length(2),
         Constraint::Length(1),
     ])
     .areas(frame.area());
@@ -143,6 +144,7 @@ fn render(frame: &mut Frame<'_>, report: &ListReport) {
         .block(Block::bordered().title("Day summary")),
         day,
     );
+    render_pagination_notice(frame, pagination, report);
     frame.render_widget(
         Line::from(vec![
             " q ".bold().cyan(),
@@ -154,6 +156,20 @@ fn render(frame: &mut Frame<'_>, report: &ListReport) {
         ]),
         footer,
     );
+}
+
+fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
+    if report.pagination().totals_complete {
+        return;
+    }
+    let mut lines = Vec::with_capacity(2);
+    if report.pagination().next.is_some() {
+        lines.push(Line::from(
+            "More worklogs are available; use JSON pagination metadata to continue.",
+        ));
+    }
+    lines.push(Line::from("Totals reflect this bounded segment."));
+    frame.render_widget(Paragraph::new(Text::from(lines)).yellow(), area);
 }
 
 fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -173,10 +189,14 @@ fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
 fn render_worklogs(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
     if report.worklogs().is_empty() {
         frame.render_widget(
-            Paragraph::new(format!(
-                "No worklogs for {}",
-                report.selected_date().format("%A, %Y-%m-%d")
-            ))
+            Paragraph::new(if report.pagination().totals_complete {
+                format!(
+                    "No worklogs for {}",
+                    report.selected_date().format("%A, %Y-%m-%d")
+                )
+            } else {
+                "No worklogs in this retrieved segment".to_owned()
+            })
             .centered()
             .block(Block::bordered().title("Worklogs")),
             area,
@@ -222,7 +242,7 @@ mod tests {
     use super::{render, should_quit};
     use crate::list::ListReport;
 
-    fn report(worklogs: Vec<Worklog>) -> ListReport {
+    fn report(worklogs: Vec<Worklog>, totals_complete: bool) -> ListReport {
         ListReport::new(
             NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN),
             worklogs,
@@ -243,9 +263,9 @@ mod tests {
                 pages_retrieved: 1,
                 records_retrieved: 1,
                 records_returned: 1,
-                next: None,
-                complete: true,
-                totals_complete: true,
+                next: (!totals_complete).then(|| "opaque-token".to_owned()),
+                complete: totals_complete,
+                totals_complete,
             },
             BTreeMap::from([("standup".to_owned(), "OPS-42".to_owned())]),
             false,
@@ -273,18 +293,21 @@ mod tests {
 
     #[test]
     fn populated_report_shows_month_day_worklogs_and_quit_controls() {
-        let report = report(vec![Worklog {
-            id: "751393".to_owned(),
-            interval: Some(ClockInterval {
-                start_time: "09:00".to_owned(),
-                end_time: "10:30".to_owned(),
-            }),
-            issue_id: "42".to_owned(),
-            issue_key: "OPS-42".to_owned(),
-            duration: "1h 30m".to_owned(),
-            description: "Daily standup".to_owned(),
-            link: "https://example.atlassian.net/browse/OPS-42".to_owned(),
-        }]);
+        let report = report(
+            vec![Worklog {
+                id: "751393".to_owned(),
+                interval: Some(ClockInterval {
+                    start_time: "09:00".to_owned(),
+                    end_time: "10:30".to_owned(),
+                }),
+                issue_id: "42".to_owned(),
+                issue_key: "OPS-42".to_owned(),
+                duration: "1h 30m".to_owned(),
+                description: "Daily standup".to_owned(),
+                link: "https://example.atlassian.net/browse/OPS-42".to_owned(),
+            }],
+            true,
+        );
 
         let screen = screen(&report);
 
@@ -307,11 +330,21 @@ mod tests {
 
     #[test]
     fn empty_report_shows_empty_state_and_schedule_summaries() {
-        let screen = screen(&report(Vec::new()));
+        let screen = screen(&report(Vec::new(), true));
 
         assert!(screen.contains("No worklogs for Tuesday, 2026-07-14"));
         assert!(screen.contains("72h / 160h"));
         assert!(screen.contains("1h 30m / 8h"));
+    }
+
+    #[test]
+    fn incomplete_empty_report_qualifies_segment_and_totals() {
+        let screen = screen(&report(Vec::new(), false));
+
+        assert!(screen.contains("No worklogs in this retrieved segment"));
+        assert!(screen.contains("More worklogs are available"));
+        assert!(screen.contains("Totals reflect this bounded segment"));
+        assert!(!screen.contains("No worklogs for Tuesday"));
     }
 
     #[test]
