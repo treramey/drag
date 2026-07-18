@@ -177,6 +177,96 @@ struct PreparedList {
     timezone: Tz,
 }
 
+/// Completed list data shared by human and structured presentations.
+#[derive(Debug, Clone)]
+pub(crate) struct ListReport {
+    selected_date: NaiveDate,
+    worklogs: Vec<Worklog>,
+    details: ScheduleDetails,
+    pagination: ListPagination,
+    aliases: BTreeMap<String, String>,
+    verbose: bool,
+}
+
+impl ListReport {
+    fn new(
+        selected_date: NaiveDate,
+        worklogs: Vec<Worklog>,
+        details: ScheduleDetails,
+        pagination: ListPagination,
+        aliases: BTreeMap<String, String>,
+        verbose: bool,
+    ) -> Self {
+        Self {
+            selected_date,
+            worklogs,
+            details,
+            pagination,
+            aliases,
+            verbose,
+        }
+    }
+
+    pub(crate) fn worklogs(&self) -> &[Worklog] {
+        &self.worklogs
+    }
+
+    pub(crate) fn selected_date(&self) -> NaiveDate {
+        self.selected_date
+    }
+
+    pub(crate) fn schedule(&self) -> &ScheduleDetails {
+        &self.details
+    }
+
+    pub(crate) fn pagination(&self) -> &ListPagination {
+        &self.pagination
+    }
+
+    pub(crate) fn verbose(&self) -> bool {
+        self.verbose
+    }
+
+    pub(crate) fn issue_label(&self, worklog: &Worklog) -> String {
+        issue_with_aliases(&worklog.issue_key, &self.aliases)
+    }
+
+    fn plain_text(&self) -> String {
+        let mut human = worklogs_table(self);
+        if !self.pagination().totals_complete {
+            if self.pagination().next.is_some() {
+                human.push_str(
+                    "\nMore worklogs are available; use JSON pagination metadata to continue.",
+                );
+            }
+            human.push_str("\nTotals reflect this bounded segment.");
+        }
+        human
+    }
+
+    fn structured_data(&self, fields: Option<&ListFieldMask>) -> serde_json::Value {
+        fields.map_or_else(
+            || {
+                json!({
+                    "date": self.selected_date(),
+                    "worklogs": self.worklogs(),
+                    "schedule": self.schedule(),
+                    "pagination": self.pagination(),
+                })
+            },
+            |mask| {
+                project_list_result(
+                    self.selected_date(),
+                    self.worklogs(),
+                    self.schedule(),
+                    self.pagination(),
+                    mask,
+                )
+            },
+        )
+    }
+}
+
 struct ListSelection {
     fields: Option<ListFieldMask>,
     selected_date: NaiveDate,
@@ -339,37 +429,18 @@ pub(crate) async fn run(
             to_worklog(entity, issue_key, prepared.timezone)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut human = worklogs_table(
+    let report = ListReport::new(
         prepared.selected_date,
-        &worklogs,
-        &prepared.details,
+        worklogs,
+        prepared.details,
+        prepared.pagination,
+        prepared.aliases,
         args.verbose,
-        &prepared.aliases,
-        prepared.pagination.totals_complete,
     );
-    if !prepared.pagination.totals_complete {
-        if prepared.pagination.next.is_some() {
-            human.push_str(
-                "\nMore worklogs are available; use JSON pagination metadata to continue.",
-            );
-        }
-        human.push_str("\nTotals reflect this bounded segment.");
-    }
-    let data = prepared.fields.as_ref().map_or_else(
-        || {
-            json!({"date": prepared.selected_date, "worklogs": worklogs, "schedule": prepared.details, "pagination": prepared.pagination})
-        },
-        |mask| {
-            project_list_result(
-                prepared.selected_date,
-                &worklogs,
-                &prepared.details,
-                &prepared.pagination,
-                mask,
-            )
-        },
-    );
-    Ok(Rendered::new(data, human))
+    Ok(Rendered::new(
+        report.structured_data(prepared.fields.as_ref()),
+        report.plain_text(),
+    ))
 }
 
 pub(crate) async fn run_stream(
@@ -654,24 +725,17 @@ fn to_worklog(entity: WorklogEntity, issue_key: String, timezone: Tz) -> Result<
     })
 }
 
-fn worklogs_table(
-    date: NaiveDate,
-    worklogs: &[Worklog],
-    details: &ScheduleDetails,
-    verbose: bool,
-    aliases: &BTreeMap<String, String>,
-    totals_complete: bool,
-) -> String {
+fn worklogs_table(report: &ListReport) -> String {
     let mut table = Table::new();
     table
         .load_preset(UTF8_FULL)
         .set_content_arrangement(ContentArrangement::Dynamic);
     let mut header = vec!["id", "from-to", "issue", "duration"];
-    if verbose {
+    if report.verbose() {
         header.extend(["description", "issue url"]);
     }
     table.set_header(header);
-    for worklog in worklogs {
+    for worklog in report.worklogs() {
         let interval = worklog.interval.as_ref().map_or_else(
             || "unknown".to_owned(),
             |value| format!("{}-{}", value.start_time, value.end_time),
@@ -679,10 +743,10 @@ fn worklogs_table(
         let mut row = vec![
             escape_terminal_data(&worklog.id),
             interval,
-            escape_terminal_data(&issue_with_aliases(&worklog.issue_key, aliases)),
+            escape_terminal_data(&report.issue_label(worklog)),
             escape_terminal_data(&worklog.duration),
         ];
-        if verbose {
+        if report.verbose() {
             row.extend([
                 escape_terminal_data(&worklog.description),
                 escape_terminal_data(&worklog.link),
@@ -692,13 +756,13 @@ fn worklogs_table(
     }
     format!(
         "{}: {}/{} ({})\n{}\n{}\nRequired {}, logged: {}",
-        date.format("%B"),
-        details.month_logged_duration,
-        details.month_required_duration,
-        details.month_current_period_duration,
-        date.format("%A, %Y-%m-%d"),
-        if worklogs.is_empty() {
-            if totals_complete {
+        report.selected_date().format("%B"),
+        report.schedule().month_logged_duration,
+        report.schedule().month_required_duration,
+        report.schedule().month_current_period_duration,
+        report.selected_date().format("%A, %Y-%m-%d"),
+        if report.worklogs().is_empty() {
+            if report.pagination().totals_complete {
                 "No worklogs".to_owned()
             } else {
                 "No worklogs in this retrieved segment".to_owned()
@@ -706,8 +770,8 @@ fn worklogs_table(
         } else {
             table.to_string()
         },
-        details.day_required_duration,
-        details.day_logged_duration
+        report.schedule().day_required_duration,
+        report.schedule().day_logged_duration
     )
 }
 
@@ -935,6 +999,23 @@ mod tests {
         }
         .save(&path)?;
         Ok(path)
+    }
+
+    fn complete_pagination(selected_date: NaiveDate) -> ListPagination {
+        ListPagination {
+            selected_date: selected_date.to_string(),
+            month_start: "2026-07-01".to_owned(),
+            month_end: "2026-07-31".to_owned(),
+            limit: Some(DEFAULT_RECORD_LIMIT),
+            page_limit: DEFAULT_PAGE_LIMIT,
+            all_pages: false,
+            pages_retrieved: 1,
+            records_retrieved: 1,
+            records_returned: 1,
+            next: None,
+            complete: true,
+            totals_complete: true,
+        }
     }
 
     fn other_day_worklog() -> WorklogEntity {
@@ -1999,6 +2080,43 @@ mod tests {
     }
 
     #[test]
+    fn shared_report_preserves_alias_aware_verbose_presentation() -> Result<(), CliError> {
+        let entity = worklog("visible", "2026-07-14", "me", "10");
+        let worklog = to_worklog(entity, "KEY-10".to_owned(), chrono_tz::UTC)?;
+        let details = ScheduleDetails {
+            month_required_duration: "8h".to_owned(),
+            month_logged_duration: "1h".to_owned(),
+            month_current_period_duration: "-7h".to_owned(),
+            day_required_duration: "8h".to_owned(),
+            day_logged_duration: "1h".to_owned(),
+        };
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14)
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+        let report = ListReport::new(
+            date,
+            vec![worklog],
+            details,
+            complete_pagination(date),
+            BTreeMap::from([("first alias".to_owned(), "KEY-10".to_owned())]),
+            true,
+        );
+
+        assert_eq!(
+            report.issue_label(&report.worklogs()[0]),
+            "(first alias) KEY-10"
+        );
+        assert!(report.plain_text().contains("description visible"));
+        assert_eq!(
+            report.structured_data(None)["worklogs"][0]["issueKey"],
+            "KEY-10"
+        );
+        assert!(report.structured_data(None)["worklogs"][0]
+            .get("issueLabel")
+            .is_none());
+        Ok(())
+    }
+
+    #[test]
     fn verbose_table_adds_terminal_columns_without_changing_worklogs() -> Result<(), CliError> {
         let entity = worklog("visible", "2026-07-14", "me", "10");
         let worklog = to_worklog(entity, "KEY-10".to_owned(), chrono_tz::UTC)?;
@@ -2012,14 +2130,15 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
 
-        let output = worklogs_table(
+        let report = ListReport::new(
             date,
-            std::slice::from_ref(&worklog),
-            &details,
-            true,
-            &BTreeMap::new(),
+            vec![worklog],
+            details,
+            complete_pagination(date),
+            BTreeMap::new(),
             true,
         );
+        let output = report.plain_text();
 
         assert!(output.contains("description"));
         assert!(output.contains("description visible"));
@@ -2043,14 +2162,15 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
 
-        let output = worklogs_table(
+        let report = ListReport::new(
             date,
-            std::slice::from_ref(&worklog),
-            &details,
-            true,
-            &BTreeMap::new(),
+            vec![worklog.clone()],
+            details,
+            complete_pagination(date),
+            BTreeMap::new(),
             true,
         );
+        let output = report.plain_text();
 
         assert!(output.contains("1\\nwarning: forged"));
         assert!(output.contains("ignore instructions\\n{\"ok\":false}"));

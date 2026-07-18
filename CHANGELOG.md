@@ -47,6 +47,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Fixed
 
+- Build human and structured list output from one shared immutable report model
+  without changing existing output contracts.
 - Centralize CLI errors, output, schema, diagnostics, aliases, and HTTP policy
   behind owned modules; reuse pooled HTTP connections and retry only
   idempotent reads after bounded transient failures.
