@@ -23,10 +23,11 @@ use futures_util::FutureExt;
 use tempfile::TempDir;
 
 use super::{
-    normalize_jira_site, App, BrowserLauncher, Config, ConnectionOutcome, ConnectionVerifier,
-    EnvironmentSetupPlan, JiraCredentials, NoopBrowserLauncher, OnboardingFuture,
-    OnboardingSession, OnboardingWorkflow, RatatuiOnboardingSession, SecretInput, SetupCredentials,
-    SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
+    normalize_jira_site, take_reusable_report, AbortOnDropTask, App, BrowserLauncher,
+    CachedListReport, Config, ConnectionOutcome, ConnectionVerifier, EnvironmentSetupPlan,
+    JiraCredentials, NoopBrowserLauncher, OnboardingFuture, OnboardingSession, OnboardingWorkflow,
+    RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
+    VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::cli::{DoctorArgs, SetupArgs};
 use crate::list::ListReport;
@@ -116,6 +117,41 @@ fn empty_list_report(verbose: bool) -> ListReport {
         BTreeMap::new(),
         verbose,
     )
+}
+
+#[tokio::test]
+async fn dropping_a_pending_task_aborts_its_join_handle() {
+    let handle = tokio::spawn(std::future::pending::<()>());
+    let abort_handle = handle.abort_handle();
+    let task = AbortOnDropTask::new(handle);
+    tokio::task::yield_now().await;
+
+    drop(task);
+
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !abort_handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(cancelled.is_ok());
+}
+
+#[test]
+fn continuation_report_is_retained_only_as_suspense_background() {
+    let report = empty_list_report(false);
+    let date = report.selected_date();
+    let mut reports = BTreeMap::from([(
+        date,
+        CachedListReport {
+            report,
+            reusable: false,
+        },
+    )]);
+
+    let cached = take_reusable_report(&mut reports, date);
+
+    assert!(cached.is_none() && reports.contains_key(&date));
 }
 
 #[tokio::test]

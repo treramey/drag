@@ -23,6 +23,7 @@ dirs = "6.0"
 futures-util = "0.3"
 iana-time-zone = "0.1"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache", "widget-calendar"] }
+ratatui-braille-bar = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -30,7 +31,7 @@ schemars.workspace = true
 tachyonfx = { version = "0.25.1", default-features = false, features = ["sendable", "std-duration"] }
 drag = { version = "0.3.0", path = "../drag" }
 thiserror.workspace = true
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 time = "0.3"
 url = "2.5"
 webbrowser = { version = "1.2", features = ["hardened"] }

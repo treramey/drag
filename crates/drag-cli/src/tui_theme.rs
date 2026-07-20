@@ -5,6 +5,7 @@ use ratatui::style::{Color, Style};
 pub(crate) const PRIMARY_COLOR: Color = Color::Rgb(116, 39, 127);
 pub(crate) const MUTED_COLOR: Color = Color::Rgb(101, 92, 82);
 pub(crate) const SUCCESS_COLOR: Color = Color::Rgb(0, 121, 133);
+pub(crate) const TEXT_COLOR: Color = Color::Rgb(243, 239, 230);
 
 pub(crate) struct Palette;
 
@@ -17,12 +18,16 @@ impl Palette {
         Style::new().fg(MUTED_COLOR)
     }
 
+    pub(crate) const fn text() -> Style {
+        Style::new().fg(TEXT_COLOR)
+    }
+
     pub(crate) const fn focus() -> Style {
         Self::primary()
     }
 
     pub(crate) const fn action_focus() -> Style {
-        Style::new().fg(Color::Rgb(243, 239, 230)).bg(PRIMARY_COLOR)
+        Self::text().bg(PRIMARY_COLOR)
     }
 
     pub(crate) const fn pending() -> Style {
