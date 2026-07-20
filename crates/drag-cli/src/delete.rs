@@ -188,7 +188,7 @@ mod tests {
             r#"{
             "tempoToken":"tempo-secret","accountId":"account-1",
             "atlassianUserEmail":"person@example.com","atlassianToken":"jira-secret",
-            "hostname":"example.atlassian.net","aliases":{"dataType":"Map","value":[]}
+            "hostname":"example.atlassian.net"
         }"#,
         )?;
         Ok(path)

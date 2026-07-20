@@ -5,11 +5,10 @@ use drag::schedule::ScheduleDetails;
 use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
 use serde_json::{json, Map, Value};
 
-use crate::alias::{AliasDeleteResult, AliasSetResult};
-use crate::cli::{AliasDeleteInput, AliasSetInput, Cli, DeleteInput, LogInput};
+use crate::cli::{Cli, DeleteInput, LogInput};
 use crate::output::Rendered;
 
-const SCHEMA_VERSION: u64 = 2;
+const SCHEMA_VERSION: u64 = 3;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -260,8 +259,6 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
         let input_schema = match path {
             "log" => Some(json_schema::<LogInput>()),
             "delete" => Some(json_schema::<DeleteInput>()),
-            "alias set" | "alias:set" => Some(json_schema::<AliasSetInput>()),
-            "alias delete" | "alias:delete" => Some(json_schema::<AliasDeleteInput>()),
             _ => None,
         };
         if let Some(input_schema) = input_schema {
@@ -315,10 +312,8 @@ fn is_switch(argument: &Arg) -> bool {
 
 fn required_unless(path: &str, id: &str) -> Option<Vec<&'static str>> {
     match (path, id) {
-        ("log", "issue_key_or_alias" | "duration_or_interval") => Some(vec!["json"]),
+        ("log", "issue_key" | "duration_or_interval") => Some(vec!["json"]),
         ("delete", "worklog_ids") => Some(vec!["json"]),
-        ("alias set" | "alias:set", "alias" | "issue_key") => Some(vec!["json"]),
-        ("alias delete" | "alias:delete", "alias_name") => Some(vec!["json"]),
         _ => None,
     }
 }
@@ -334,7 +329,6 @@ fn required_with(path: &str, id: &str) -> Option<Vec<&'static str>> {
 fn semantic_default(path: &str, id: &str) -> Option<&'static str> {
     match (path, id) {
         ("log" | "list", "when") => Some("todayInConfiguredLocalTimeZone"),
-        ("completions", "shell") => Some("detectedFromShellEnvironmentOrBash"),
         _ => None,
     }
 }
@@ -447,8 +441,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "noOpen": ["verifyCredentials", "writeConfiguration"],
                 "fromEnv": ["verifyCredentials", "writeConfiguration"],
                 "fromEnvDryRun": [],
-                "fromEnvDryRunVerify": ["verifyCredentialsReadOnly"],
-                "preservesConfiguration": ["aliases"]
+                "fromEnvDryRunVerify": ["verifyCredentialsReadOnly"]
             }),
             network_access: json!({
                 "default": {"browser": "may-open", "jira": "read", "tempo": "read"},
@@ -465,40 +458,6 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "sideEffects": false,
                 "networkAccess": {"default": false, "verify": "read-only"}
             }),
-        },
-        "alias set" | "alias:set" => CommandSemantics {
-            success: schema_ref("AliasSetResult"),
-            error_codes: [local_errors, vec!["invalid_json"]].concat(),
-            side_effects: json!({"default": ["writeConfigurationIfChanged", "createOrReplaceAlias"], "dryRun": []}),
-            network_access: json!({"default": {}}),
-            dry_run: json!({"supported": true, "option": "dryRun", "sideEffects": false, "networkAccess": false}),
-        },
-        "alias delete" | "alias:delete" => CommandSemantics {
-            success: schema_ref("AliasDeleteResult"),
-            error_codes: [local_errors, vec!["invalid_json"]].concat(),
-            side_effects: json!({"default": ["writeConfigurationIfChanged", "deleteAliasIfPresent"], "dryRun": []}),
-            network_access: json!({"default": {}}),
-            dry_run: json!({"supported": true, "option": "dryRun", "sideEffects": false, "networkAccess": false}),
-        },
-        "alias list" | "alias:list" => CommandSemantics {
-            success: object_schema(
-                &["aliases"],
-                json!({"aliases": {"type": "object", "additionalProperties": {"type": "string"}}}),
-            ),
-            error_codes: local_errors,
-            side_effects: json!({"default": []}),
-            network_access: json!({"default": {}}),
-            dry_run: unsupported_dry_run(),
-        },
-        "completions" => CommandSemantics {
-            success: object_schema(
-                &["shell", "script"],
-                json!({"shell": {"type": "string"}, "script": {"type": "string"}}),
-            ),
-            error_codes: [local_errors, vec!["encoding_error"]].concat(),
-            side_effects: json!({"default": []}),
-            network_access: json!({"default": {}}),
-            dry_run: unsupported_dry_run(),
         },
         "doctor" => CommandSemantics {
             success: doctor_success_schema(),
@@ -559,13 +518,6 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "tempoPathCacheHit": {},
                 "tempoPathCacheMissOrStale": {"tempoOpenApi": "read"}
             }),
-            dry_run: unsupported_dry_run(),
-        },
-        "alias" => CommandSemantics {
-            success: Value::Null,
-            error_codes: vec!["usage"],
-            side_effects: json!({"dependsOnSubcommand": true}),
-            network_access: json!({"dependsOnSubcommand": true}),
             dry_run: unsupported_dry_run(),
         },
         _ => CommandSemantics {
@@ -776,8 +728,6 @@ fn shared_definitions() -> Value {
     add_serialization_definition::<ListPagination>(&mut definitions, "ListPagination");
     add_list_projection_definitions(&mut definitions);
     add_list_stream_definitions(&mut definitions);
-    add_serialization_definition::<AliasSetResult>(&mut definitions, "AliasSetResult");
-    add_serialization_definition::<AliasDeleteResult>(&mut definitions, "AliasDeleteResult");
     Value::Object(definitions)
 }
 
@@ -976,7 +926,7 @@ fn setup_success_schema() -> Value {
                             object_schema(&["status", "jira", "tempo"], json!({"status": {"const": "completed"}, "jira": {"const": "connected"}, "tempo": {"const": "connected"}}))
                         ]
                     },
-                    "configuration": object_schema(&["status", "credentials", "aliases"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}, "aliases": {"const": "preserve"}}))
+                    "configuration": object_schema(&["status", "credentials"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}}))
                 },
                 "additionalProperties": false
             }
@@ -991,7 +941,6 @@ fn doctor_success_schema() -> Value {
             "version",
             "configPath",
             "configured",
-            "aliases",
             "timezone",
             "target",
         ],
@@ -1011,7 +960,6 @@ fn doctor_success_schema() -> Value {
                 },
                 "additionalProperties": false
             },
-            "aliases": {"type": "integer", "minimum": 0},
             "timezone": {"type": "string"},
             "target": {"type": "object", "required": ["architecture", "operatingSystem"], "properties": {"architecture": {"type": "string"}, "operatingSystem": {"type": "string"}}, "additionalProperties": false},
             "remoteChecks": {"type": "object", "required": ["jira", "tempo"], "properties": {"jira": service_check_schema(), "tempo": service_check_schema()}, "additionalProperties": false}
@@ -1094,7 +1042,6 @@ fn error_contract() -> Value {
             "api_error": 1,
             "http_error": 1,
             "io_error": 1,
-            "encoding_error": 1,
             "remote_check_failed": {
                 "exitCodes": [1, 2],
                 "selection": "most severe failed remote check"
@@ -1109,7 +1056,7 @@ mod tests {
     use serde_json::Value;
 
     use super::{schema, SCHEMA_VERSION};
-    use crate::cli::{AliasDeleteInput, AliasSetInput, Cli, LogInput};
+    use crate::cli::{Cli, LogInput};
 
     #[test]
     fn contract_covers_every_clap_command_and_alias() {
@@ -1174,7 +1121,7 @@ mod tests {
         assert_eq!(input_schema["additionalProperties"], false);
         assert_eq!(
             input_schema["required"],
-            serde_json::json!(["issueKeyOrAlias", "durationOrInterval"])
+            serde_json::json!(["issueKey", "durationOrInterval"])
         );
         for field in ["when", "description", "start", "remainingEstimate"] {
             assert!(
@@ -1183,58 +1130,16 @@ mod tests {
             );
         }
         serde_json::from_value::<LogInput>(serde_json::json!({
-            "issueKeyOrAlias": "ABC-1",
+            "issueKey": "ABC-1",
             "durationOrInterval": "30m"
         }))
         .map_err(|error| error.to_string())?;
         assert!(serde_json::from_value::<LogInput>(serde_json::json!({
-            "issueKeyOrAlias": "ABC-1",
+            "issueKey": "ABC-1",
             "durationOrInterval": "30m",
             "unexpected": true
         }))
         .is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn alias_json_schemas_track_serde_fields_and_unknown_field_policy() -> Result<(), String> {
-        let rendered = schema();
-        for (path, required) in [
-            ("alias set", serde_json::json!(["alias", "issueKey"])),
-            ("alias delete", serde_json::json!(["alias"])),
-        ] {
-            let mut segments = path.split_whitespace();
-            let parent = segments.next().ok_or_else(|| "missing parent".to_owned())?;
-            let child = segments.next().ok_or_else(|| "missing child".to_owned())?;
-            let json_argument = rendered.data["commands"][parent]["subcommands"][child]
-                ["arguments"]
-                .as_array()
-                .and_then(|arguments| arguments.iter().find(|argument| argument["id"] == "json"))
-                .ok_or_else(|| format!("missing {path} json argument"))?;
-            assert_eq!(json_argument["jsonSchema"]["additionalProperties"], false);
-            assert_eq!(json_argument["jsonSchema"]["required"], required);
-        }
-
-        serde_json::from_value::<AliasSetInput>(serde_json::json!({
-            "alias": "lunch",
-            "issueKey": "ABC-1"
-        }))
-        .map_err(|error| error.to_string())?;
-        serde_json::from_value::<AliasDeleteInput>(serde_json::json!({"alias": "lunch"}))
-            .map_err(|error| error.to_string())?;
-        assert!(serde_json::from_value::<AliasSetInput>(serde_json::json!({
-            "alias": "lunch",
-            "issueKey": "ABC-1",
-            "unexpected": true
-        }))
-        .is_err());
-        assert!(
-            serde_json::from_value::<AliasDeleteInput>(serde_json::json!({
-                "alias": "lunch",
-                "unexpected": true
-            }))
-            .is_err()
-        );
         Ok(())
     }
 
@@ -1244,7 +1149,7 @@ mod tests {
         let arguments = rendered.data["commands"]["log"]["arguments"]
             .as_array()
             .ok_or_else(|| "log arguments are not an array".to_owned())?;
-        for id in ["issue_key_or_alias", "duration_or_interval"] {
+        for id in ["issue_key", "duration_or_interval"] {
             let argument = arguments
                 .iter()
                 .find(|argument| argument["id"] == id)
@@ -1259,65 +1164,11 @@ mod tests {
             "drag",
             "log",
             "--json",
-            r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}"#,
+            r#"{"issueKey":"ABC-1","durationOrInterval":"30m"}"#,
         ])
         .map_err(|error| error.to_string())?;
         assert!(Cli::try_parse_from(["drag", "log"]).is_err());
         assert!(Cli::try_parse_from(["drag", "log", "ABC-1", "30m", "--json", "{}"]).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn declared_alias_conditions_match_modern_and_compatibility_clap_forms() -> Result<(), String> {
-        let rendered = schema();
-        for (command, positional_ids) in [
-            ("alias set", &["alias", "issue_key"][..]),
-            ("alias delete", &["alias_name"][..]),
-        ] {
-            let mut segments = command.split_whitespace();
-            let parent = segments.next().ok_or_else(|| "missing parent".to_owned())?;
-            let child = segments.next().ok_or_else(|| "missing child".to_owned())?;
-            let arguments = rendered.data["commands"][parent]["subcommands"][child]["arguments"]
-                .as_array()
-                .ok_or_else(|| format!("{command} arguments are not an array"))?;
-            for id in positional_ids {
-                let argument = arguments
-                    .iter()
-                    .find(|argument| argument["id"] == *id)
-                    .ok_or_else(|| format!("missing {command} {id}"))?;
-                assert_eq!(
-                    argument["requiredUnlessPresent"],
-                    serde_json::json!(["json"])
-                );
-            }
-        }
-
-        for arguments in [
-            &[
-                "drag",
-                "alias",
-                "set",
-                "--json",
-                r#"{"alias":"lunch","issueKey":"ABC-1"}"#,
-            ][..],
-            &[
-                "drag",
-                "alias:set",
-                "--json",
-                r#"{"alias":"lunch","issueKey":"ABC-1"}"#,
-            ],
-            &["drag", "alias", "delete", "--json", r#"{"alias":"lunch"}"#],
-            &["drag", "alias:delete", "--json", r#"{"alias":"lunch"}"#],
-        ] {
-            Cli::try_parse_from(arguments).map_err(|error| error.to_string())?;
-        }
-        assert!(Cli::try_parse_from(["drag", "alias", "set"]).is_err());
-        assert!(Cli::try_parse_from(["drag", "alias", "delete"]).is_err());
-        assert!(
-            Cli::try_parse_from(["drag", "alias", "set", "lunch", "ABC-1", "--json", "{}"])
-                .is_err()
-        );
-        assert!(Cli::try_parse_from(["drag", "alias", "delete", "lunch", "--json", "{}"]).is_err());
         Ok(())
     }
 
@@ -1358,14 +1209,6 @@ mod tests {
             .is_some_and(|variants| variants.iter().any(|variant| variant["type"] == "null")));
         assert!(definitions["AddWorklogRequest"]["properties"]["timeSpentSeconds"].is_object());
         assert!(definitions["ScheduleDetails"]["properties"]["dayLoggedDuration"].is_object());
-        assert_eq!(
-            definitions["SetAliasAction"]["enum"],
-            serde_json::json!(["create", "replace", "unchanged"])
-        );
-        assert_eq!(
-            definitions["DeleteAliasAction"]["enum"],
-            serde_json::json!(["delete", "unchanged"])
-        );
         assert_eq!(
             rendered.data["commands"]["list"]["success"]["properties"]["worklogs"]["items"]["$ref"],
             "#/$defs/Worklog"
@@ -1506,7 +1349,7 @@ mod tests {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        for alias in ["l", "ls", "d", "autocomplete"] {
+        for alias in ["l", "ls", "d"] {
             assert!(
                 targets.contains(&Value::String(alias.to_owned())),
                 "missing {alias}"

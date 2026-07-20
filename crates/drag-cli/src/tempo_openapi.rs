@@ -65,7 +65,9 @@ pub(crate) async fn run_command(
             Err(error)
                 if matches!(
                     error.kind(),
-                    clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+                    clap::error::ErrorKind::DisplayHelp
+                        | clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                        | clap::error::ErrorKind::DisplayVersion
                 ) =>
             {
                 return Ok(CommandOutput::Plain(error.to_string()));

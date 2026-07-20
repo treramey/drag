@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use clap_complete::Shell;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -50,7 +49,7 @@ pub enum Command {
     /// supplied; intervals include their own start time.
     #[command(
         visible_alias = "l",
-        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log --json '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' --dry-run\n  printf '%s' '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
+        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log --json '{\"issueKey\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' --dry-run\n  printf '%s' '{\"issueKey\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
     )]
     Log(LogArgs),
     /// List worklogs for a date without changing Jira or Tempo.
@@ -80,17 +79,6 @@ pub enum Command {
     /// to keep token URLs in the terminal without launching a browser. Set
     /// DRAG_REDUCED_MOTION=1 for a gentler color-only brand transition.
     Setup(SetupArgs),
-    /// Manage issue-key aliases.
-    Alias {
-        #[command(subcommand)]
-        command: AliasCommand,
-    },
-    /// Generate shell completions.
-    #[command(visible_alias = "autocomplete")]
-    Completions {
-        #[arg(value_enum)]
-        shell: Option<Shell>,
-    },
     /// Report local diagnostics without network access.
     ///
     /// Add --remote to run opt-in, read-only Jira and Tempo connection checks.
@@ -99,15 +87,6 @@ pub enum Command {
     Tempo(TempoArgs),
     /// Describe the CLI contract or one Tempo OpenAPI operation.
     Schema(SchemaArgs),
-    /// Compatibility form for `alias set`.
-    #[command(name = "alias:set", hide = true)]
-    LegacyAliasSet(AliasSetArgs),
-    /// Compatibility form for `alias list`.
-    #[command(name = "alias:list", hide = true)]
-    LegacyAliasList,
-    /// Compatibility form for `alias delete`.
-    #[command(name = "alias:delete", hide = true)]
-    LegacyAliasDelete(AliasDeleteArgs),
 }
 
 #[derive(Debug, Args)]
@@ -135,9 +114,9 @@ pub struct SchemaArgs {
 
 #[derive(Debug, Args)]
 pub struct LogArgs {
-    /// Jira issue key or configured alias.
+    /// Jira issue key.
     #[arg(required_unless_present = "json")]
-    pub issue_key_or_alias: Option<String>,
+    pub issue_key: Option<String>,
     /// Duration (`1h15m`) or interval (`11-12:30` or `11.35-14.20`).
     #[arg(required_unless_present = "json")]
     pub duration_or_interval: Option<String>,
@@ -153,7 +132,7 @@ pub struct LogArgs {
     #[arg(short = 'r', long)]
     pub remaining_estimate: Option<String>,
     /// Raw input JSON, or '-' to read it from stdin.
-    #[arg(long, conflicts_with_all = ["issue_key_or_alias", "duration_or_interval", "when", "description", "start", "remaining_estimate"])]
+    #[arg(long, conflicts_with_all = ["issue_key", "duration_or_interval", "when", "description", "start", "remaining_estimate"])]
     pub json: Option<String>,
     /// Validate and print the Tempo request without sending it.
     #[arg(long)]
@@ -163,7 +142,7 @@ pub struct LogArgs {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LogInput {
-    pub issue_key_or_alias: String,
+    pub issue_key: String,
     pub duration_or_interval: String,
     #[serde(default)]
     pub when: Option<String>,
@@ -254,58 +233,6 @@ pub struct DoctorArgs {
     pub remote: bool,
 }
 
-#[derive(Debug, Subcommand)]
-pub enum AliasCommand {
-    /// Set or replace an alias.
-    Set(AliasSetArgs),
-    /// List aliases.
-    List,
-    /// Delete an alias.
-    Delete(AliasDeleteArgs),
-}
-
-#[derive(Debug, Args)]
-pub struct AliasSetArgs {
-    /// Alias name to create or replace.
-    #[arg(required_unless_present = "json")]
-    pub alias: Option<String>,
-    /// Jira issue key assigned to the alias.
-    #[arg(required_unless_present = "json")]
-    pub issue_key: Option<String>,
-    /// Raw input JSON, or '-' to read it from stdin.
-    #[arg(long, conflicts_with_all = ["alias", "issue_key"])]
-    pub json: Option<String>,
-    /// Show the normalized config change without writing configuration.
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AliasSetInput {
-    pub alias: String,
-    pub issue_key: String,
-}
-
-#[derive(Debug, Args)]
-pub struct AliasDeleteArgs {
-    /// Alias name to delete.
-    #[arg(required_unless_present = "json")]
-    pub alias_name: Option<String>,
-    /// Raw input JSON, or '-' to read it from stdin.
-    #[arg(long, conflicts_with = "alias_name")]
-    pub json: Option<String>,
-    /// Show the normalized config change without writing configuration.
-    #[arg(long)]
-    pub dry_run: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AliasDeleteInput {
-    pub alias: String,
-}
-
 #[cfg(test)]
 mod tests {
     use clap::error::ErrorKind;
@@ -337,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn tracker_commands_are_not_available() -> Result<(), String> {
+    fn removed_commands_are_not_available() -> Result<(), String> {
         for arguments in [
             &["tracker", "start", "ABC-1"][..],
             &["tracker", "pause", "ABC-1"],
@@ -355,12 +282,20 @@ mod tests {
             &["tracker:stop", "ABC-1"],
             &["tracker:list"],
             &["tracker:delete", "ABC-1"],
+            &["alias", "list"],
+            &["alias", "set", "lunch", "ABC-1"],
+            &["alias", "delete", "lunch"],
+            &["alias:list"],
+            &["alias:set", "lunch", "ABC-1"],
+            &["alias:delete", "lunch"],
+            &["completions"],
+            &["autocomplete"],
         ] {
             let Err(error) =
                 Cli::try_parse_from(std::iter::once("drag").chain(arguments.iter().copied()))
             else {
                 return Err(format!(
-                    "tracker command unexpectedly parsed: {arguments:?}"
+                    "removed command unexpectedly parsed: {arguments:?}"
                 ));
             };
             assert_eq!(error.kind(), ErrorKind::InvalidSubcommand, "{arguments:?}");

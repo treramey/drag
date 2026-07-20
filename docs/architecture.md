@@ -35,7 +35,6 @@ several peer submodules rather than a single implementation file.
   complete reports into stable structured shapes.
 - `drag::pagination`: deterministic bounded and exhaustive traversal plans.
 - `drag::schedule`: month/day required and logged totals.
-- `drag_cli::alias`: alias persistence and presentation.
 - `drag_cli::browser`: shared boundary for local default-browser launches.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
 - `drag_cli::api`: authenticated Jira/Tempo requests, pagination, and response
@@ -47,7 +46,7 @@ several peer submodules rather than a single implementation file.
 - `drag_cli::output`: JSON envelopes, stream selection, and terminal-safe text.
 - `drag_cli::list`: retrieval and enrichment produce one immutable list report
   containing the selected date, worklogs, schedule and pagination details,
-  alias-aware issue labels, and verbose state. Plain text and structured JSON
+  issue labels, and verbose state. Plain text and structured JSON
   are projections of that completed report.
 - `drag_cli::list_tui`: eligibility checks, focused row state, bounded keyboard
   navigation, responsive stderr Ratatui rendering, scrolling, verbose focused
@@ -107,9 +106,8 @@ several peer submodules rather than a single implementation file.
   local, redacted status messages and do not terminate the report.
 - Only idempotent reads retry transient transport failures and retryable HTTP
   statuses; mutations are attempted once.
-- Mutating worklog and alias operations support `--dry-run`; structured and
-  positional worklog deletion share one ordered batch plan, while alias preview
-  and execution consume the same normalized config-change plan.
+- Mutating worklog operations support `--dry-run`; structured and positional
+  worklog deletion share one ordered batch plan.
 
 ## Adding behavior
 

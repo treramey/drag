@@ -78,8 +78,6 @@ pub(crate) enum CliError {
     Json(#[from] serde_json::Error),
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
-    #[error("generated completion output was not UTF-8: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
 }
 
 impl CliError {
@@ -95,7 +93,6 @@ impl CliError {
             Self::Url(_) => "invalid_url",
             Self::Json(_) => "invalid_json",
             Self::Io(_) => "io_error",
-            Self::Utf8(_) => "encoding_error",
         }
     }
 
@@ -107,12 +104,9 @@ impl CliError {
             | Self::NotConfigured(_)
             | Self::Json(_)
             | Self::Url(_) => EXIT_USAGE,
-            Self::Config { .. }
-            | Self::Api(_)
-            | Self::Remote(_)
-            | Self::Http(_)
-            | Self::Io(_)
-            | Self::Utf8(_) => EXIT_FAILURE,
+            Self::Config { .. } | Self::Api(_) | Self::Remote(_) | Self::Http(_) | Self::Io(_) => {
+                EXIT_FAILURE
+            }
         }
     }
 

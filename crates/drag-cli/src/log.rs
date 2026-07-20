@@ -55,17 +55,15 @@ where
     let input = log_input(args)?;
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
-    let mut request = build_log_request(&config, &credentials, &input.value, now)?;
-    let issue_key = config
-        .resolve_issue(&input.value.issue_key_or_alias)
-        .to_uppercase();
+    let mut request = build_log_request(&credentials, &input.value, now)?;
+    let issue_key = input.value.issue_key.to_uppercase();
     if input.dry_run {
         return Ok(Rendered::new(
             json!({"dryRun": true, "issueKey": issue_key, "request": request}),
             format!(
                 "Would log {} to {}.",
                 format_duration(request.time_spent_seconds, false),
-                input.value.issue_key_or_alias
+                input.value.issue_key
             ),
         ));
     }
@@ -85,7 +83,6 @@ where
 }
 
 fn build_log_request(
-    config: &Config,
     credentials: &Credentials,
     input: &LogInput,
     now: DateTime<Tz>,
@@ -114,9 +111,7 @@ fn build_log_request(
             Ok(parsed.seconds)
         })
         .transpose()?;
-    let issue_key = config
-        .resolve_issue(&input.issue_key_or_alias)
-        .to_uppercase();
+    let issue_key = input.issue_key.to_uppercase();
     // The issue ID is filled by the async caller; this marker is replaced before upload.
     Ok(AddWorklogRequest {
         issue_id: format!("<resolved from {issue_key}>"),
@@ -146,9 +141,9 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
         serde_json::from_str(&raw)?
     } else {
         LogInput {
-            issue_key_or_alias: args
-                .issue_key_or_alias
-                .ok_or_else(|| CliError::InvalidInput("missing issue key or alias".to_owned()))?,
+            issue_key: args
+                .issue_key
+                .ok_or_else(|| CliError::InvalidInput("missing issue key".to_owned()))?,
             duration_or_interval: args
                 .duration_or_interval
                 .ok_or_else(|| CliError::InvalidInput("missing duration or interval".to_owned()))?,
@@ -193,7 +188,6 @@ pub(crate) fn to_worklog(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -283,13 +277,6 @@ mod tests {
     }
 
     fn configured_file(directory: &TempDir) -> Result<PathBuf, CliError> {
-        configured_file_with_aliases(directory, BTreeMap::new())
-    }
-
-    fn configured_file_with_aliases(
-        directory: &TempDir,
-        aliases: BTreeMap<String, String>,
-    ) -> Result<PathBuf, CliError> {
         let path = directory.path().join("config.json");
         Config {
             tempo_token: Some("tempo-secret".to_owned()),
@@ -297,7 +284,6 @@ mod tests {
             atlassian_user_email: Some("person@example.com".to_owned()),
             atlassian_token: Some("atlassian-secret".to_owned()),
             hostname: Some("example.atlassian.net".to_owned()),
-            aliases,
         }
         .save(&path)?;
         Ok(path)
@@ -312,7 +298,7 @@ mod tests {
 
     fn log_args(duration: &str) -> LogArgs {
         LogArgs {
-            issue_key_or_alias: Some("abc-1".to_owned()),
+            issue_key: Some("abc-1".to_owned()),
             duration_or_interval: Some(duration.to_owned()),
             when: None,
             description: None,
@@ -370,7 +356,7 @@ mod tests {
             &path,
             now,
             LogArgs {
-                issue_key_or_alias: Some("abc-1".to_owned()),
+                issue_key: Some("abc-1".to_owned()),
                 duration_or_interval: Some("1h15m".to_owned()),
                 when: None,
                 description: Some("review".to_owned()),
@@ -472,7 +458,7 @@ mod tests {
             &config_path,
             fixed_now()?,
             LogArgs {
-                issue_key_or_alias: Some("abc-1".to_owned()),
+                issue_key: Some("abc-1".to_owned()),
                 duration_or_interval: Some("1h15m".to_owned()),
                 when: Some("2026-07-14".to_owned()),
                 description: Some("review".to_owned()),
@@ -706,23 +692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configured_alias_is_resolved_before_issue_key_normalization() -> Result<(), CliError> {
-        let directory = TempDir::new()?;
-        let path = configured_file_with_aliases(
-            &directory,
-            BTreeMap::from([("focus".to_owned(), "team-7".to_owned())]),
-        )?;
-        let mut args = log_args("30m");
-        args.issue_key_or_alias = Some("focus".to_owned());
-
-        let rendered = preview(&path, fixed_now()?, args).await?;
-
-        assert_eq!(rendered.data["issueKey"], "TEAM-7");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn unmatched_alias_input_is_normalized_as_an_issue_key() -> Result<(), CliError> {
+    async fn issue_key_input_is_normalized() -> Result<(), CliError> {
         let directory = TempDir::new()?;
         let path = configured_file(&directory)?;
 
@@ -908,12 +878,9 @@ mod tests {
     #[tokio::test]
     async fn dry_run_returns_normalized_preview_without_creating_gateway() -> Result<(), CliError> {
         let directory = TempDir::new()?;
-        let path = configured_file_with_aliases(
-            &directory,
-            BTreeMap::from([("focus".to_owned(), "team-7".to_owned())]),
-        )?;
+        let path = configured_file(&directory)?;
         let mut args = log_args("30m");
-        args.issue_key_or_alias = Some("focus".to_owned());
+        args.issue_key = Some("team-7".to_owned());
         args.when = Some("2026-07-01".to_owned());
         args.start = Some("9:05".to_owned());
         args.description = Some("review".to_owned());
@@ -937,7 +904,7 @@ mod tests {
                 }
             })
         );
-        assert_eq!(rendered.human, "Would log 30m to focus.");
+        assert_eq!(rendered.human, "Would log 30m to team-7.");
         Ok(())
     }
 }

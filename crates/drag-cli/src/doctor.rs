@@ -108,7 +108,6 @@ pub(crate) async fn run(
         "version": env!("CARGO_PKG_VERSION"),
         "configPath": path,
         "configured": configured,
-        "aliases": config.aliases.len(),
         "timezone": timezone.name(),
         "target": {
             "architecture": std::env::consts::ARCH,
@@ -116,11 +115,10 @@ pub(crate) async fn run(
         }
     });
     let mut human = format!(
-        "drag {}\nconfig: {}\ntimezone: {}\naliases: {}\nJira: {}\nTempo: {}",
+        "drag {}\nconfig: {}\ntimezone: {}\nJira: {}\nTempo: {}",
         env!("CARGO_PKG_VERSION"),
         path.display(),
         timezone.name(),
-        config.aliases.len(),
         configured_label(jira_configured),
         configured_label(tempo_configured),
     );

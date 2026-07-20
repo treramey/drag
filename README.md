@@ -12,8 +12,6 @@ output, dry runs, safer HTTP behavior, and cross-platform binaries.
 - Log work using durations (`1h15m`) or intervals (`11-12:30`).
 - List daily worklogs with monthly required/logged totals.
 - Delete one or several worklogs.
-- Store aliases such as `lunch => ABC-123`.
-- Read the legacy TypeScript CLI's config format.
 - Return readable terminal output or consistent JSON for scripts and agents.
 - Preview mutations with `--dry-run`.
 
@@ -114,7 +112,7 @@ drag --output json setup --from-env --dry-run
 ```
 
 The plan reports completed local validation, planned read-only Jira and Tempo
-verification, and the planned credential replacement while preserving aliases.
+verification, and the planned credential replacement.
 Add `--verify` to perform the read-only connection checks during the dry-run;
 the configuration is still not written. Tokens are accepted only through the
 four environment variables and never through command arguments or JSON.
@@ -130,7 +128,7 @@ returned by Jira. Headless setup never prompts or opens a browser. Use
 Setup reads the current configuration before asking for credentials and writes
 once, after both read-only connection checks succeed. Cancellation and failed
 validation or verification leave the existing file unchanged. A successful
-reconfiguration replaces only connection credentials, preserving aliases.
+reconfiguration replaces the connection credentials.
 Config files use user-only permissions on Unix. Tokens are never
 printed or included in human output, JSON, debug diagnostics, or errors.
 
@@ -147,15 +145,14 @@ changes the configuration.
 
 ### Log work
 
-Pass an issue key or configured alias followed by either a duration or a clock
-interval:
+Pass an issue key followed by either a duration or a clock interval:
 
 ```bash
 drag log ABC-123 1h15m
 drag l ABC-123 11:35-14:20 yesterday -d "review"
 drag log ABC-123 11.35-14.20 2026-07-14
-drag log lunch 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h
-drag log lunch 30m --start 12:00 --dry-run
+drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h
+drag log ABC-123 30m --start 12:00 --dry-run
 ```
 
 Durations accept minutes, hours, or both, such as `15m`, `1h`, and `1h15m`.
@@ -190,15 +187,6 @@ drag --output ndjson list --limit 250 --page-limit 3
 drag delete 123456 123457
 drag delete --json '{"worklogIds":[123456,123457]}' --dry-run
 printf '%s' '{"worklogIds":[123456,123457]}' | drag delete --json -
-
-# Aliases (both modern and original colon forms work)
-drag alias set lunch ABC-123
-drag alias set lunch ABC-456 --dry-run
-printf '%s' '{"alias":"lunch","issueKey":"ABC-123"}' \
-  | drag alias set --json - --dry-run
-drag alias list
-drag alias delete lunch
-drag alias:set lunch ABC-123
 
 ```
 
@@ -331,13 +319,6 @@ is not atomic: worklogs deleted before a later failure remain deleted. Use
 `--dry-run` to perform the same ordered reads and preview every target without
 deleting it.
 
-Alias set and delete operations accept either their positional arguments or a
-camel-case JSON document through `--json`, with `-` reading from stdin. Set
-payloads contain `alias` and `issueKey`; delete payloads contain `alias`.
-`--dry-run` reports an `action` of `create`, `replace`, `delete`, or
-`unchanged` without rewriting the config file. Live execution uses the same
-normalized change plan and skips config writes for unchanged operations.
-
 ### JSON and raw input
 
 Output defaults to human text in a terminal and JSON when redirected. Pin the
@@ -347,28 +328,27 @@ contract explicitly in automation:
 drag --output json list --fields 'worklogs.issueKey,worklogs.duration,pagination.next' | jq
 drag --output ndjson list --fields 'worklogs.issueKey,worklogs.duration,pagination.next'
 drag --output json schema
-printf '%s' '{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m"}' \
+printf '%s' '{"issueKey":"ABC-1","durationOrInterval":"30m"}' \
   | drag --output json log --json - --dry-run
 ```
 
-Raw log input uses camel-case fields: `issueKeyOrAlias`,
+Raw log input uses camel-case fields: `issueKey`,
 `durationOrInterval`, `when`, `description`, `start`, and
 `remainingEstimate`. Unknown fields are rejected. `--json` cannot be combined
-with positional log arguments or their corresponding flags. Alias JSON follows
-the same unknown-field and convenience-argument conflict rules.
+with positional log arguments or their corresponding flags.
 
 Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `{"ok":false,"error":{"code":"...","message":"..."}}`.
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 and NDJSON output stay machine-readable.
 
-`drag --output json schema` emits the versioned CLI contract. Schema version 2
+`drag --output json schema` emits the versioned CLI contract. Schema version 3
 includes the installed CLI version and every command, nested subcommand,
 shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
 command also describes its JSON success data, possible structured error codes,
 side effects, network access, and dry-run behavior. The `--json` arguments for
-log, worklog deletion, and alias mutations contain nested JSON Schemas generated
+log and worklog deletion contain nested JSON Schemas generated
 from the same serde input types used at runtime, while command and option
 metadata is read from Clap's command model.
 
@@ -380,10 +360,7 @@ metadata is read from Clap's command model.
 
 ## Backward compatibility
 
-The binary is `drag`; shortcuts `l`, `ls`, and `d` remain available. Original
-alias command names such as `alias:set` and `alias:list` are accepted.
-The config reader supports the TypeScript `Map` JSON representation and writes
-the same representation so rollback remains possible.
+The binary is `drag`; shortcuts `l`, `ls`, and `d` remain available.
 
 Behavioral fixes are intentional: malformed config is reported instead of
 silently discarded, issue/account URL segments are validated, and Tempo

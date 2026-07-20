@@ -1157,7 +1157,6 @@ fn render_worklogs(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::io;
     use std::sync::{Arc, Mutex};
 
@@ -1246,7 +1245,6 @@ mod tests {
                 complete: totals_complete,
                 totals_complete,
             },
-            BTreeMap::from([("standup".to_owned(), "OPS-42".to_owned())]),
             verbose,
         )
         .with_today(today)
@@ -1425,7 +1423,7 @@ mod tests {
             "Tuesday, 2026-07-14",
             "751393",
             "09:00–10:30",
-            "(standup) OPS-42",
+            "OPS-42",
             "Day summary: 1h 30m",
             "h/l date",
             "q quit",
@@ -2044,7 +2042,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_report_keeps_primary_fields_alias_and_navigation_hints() {
+    fn narrow_report_keeps_primary_fields_and_navigation_hints() {
         let report = report(
             vec![Worklog {
                 id: "751393".to_owned(),
@@ -2067,7 +2065,7 @@ mod tests {
         for expected in [
             "751393",
             "09:00–10:30",
-            "(standup)",
+            "OPS-42",
             "1h 30m",
             "↑/k",
             "↓/j",

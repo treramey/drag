@@ -1,4 +1,3 @@
-mod alias;
 mod api;
 mod app;
 mod browser;
@@ -22,10 +21,8 @@ use std::ffi::OsString;
 use std::io;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
-use clap_complete::generate;
-use cli::{AliasCommand, Cli, Command};
-use serde_json::json;
+use clap::Parser;
+use cli::{Cli, Command};
 
 use crate::app::{default_timezone, App};
 pub(crate) use crate::error::{CliError, RemoteError, RemoteErrorKind, RemoteService, EXIT_USAGE};
@@ -95,24 +92,6 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
         },
         Command::Delete(args) => app.delete(args).await?,
         Command::Setup(args) => app.setup(args).await?,
-        Command::Alias { command } => match command {
-            AliasCommand::Set(args) => app.alias_set(args)?,
-            AliasCommand::List => app.alias_list()?,
-            AliasCommand::Delete(args) => app.alias_delete(args)?,
-        },
-        Command::LegacyAliasSet(args) => app.alias_set(args)?,
-        Command::LegacyAliasList => app.alias_list()?,
-        Command::LegacyAliasDelete(args) => app.alias_delete(args)?,
-        Command::Completions { shell } => {
-            let shell = shell.unwrap_or_else(detect_shell);
-            let mut bytes = Vec::new();
-            generate(shell, &mut Cli::command(), "drag", &mut bytes);
-            let script = String::from_utf8(bytes)?;
-            Rendered::new(
-                json!({"shell": shell.to_string(), "script": script}),
-                script,
-            )
-        }
         Command::Doctor(args) => app.doctor(args).await?,
         Command::Tempo(args) => {
             match tempo_openapi::run_command(args.arguments, &path, debug).await? {
@@ -130,22 +109,6 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
 
 fn request_debug_enabled(requested: bool, mode: ResolvedOutputMode) -> bool {
     requested && mode == ResolvedOutputMode::Human
-}
-
-fn detect_shell() -> clap_complete::Shell {
-    let shell = std::env::var("SHELL").ok().and_then(|path| {
-        std::path::PathBuf::from(path)
-            .file_name()?
-            .to_str()
-            .map(str::to_owned)
-    });
-    match shell.as_deref() {
-        Some("zsh") => clap_complete::Shell::Zsh,
-        Some("fish") => clap_complete::Shell::Fish,
-        Some("elvish") => clap_complete::Shell::Elvish,
-        Some("powershell" | "pwsh") => clap_complete::Shell::PowerShell,
-        _ => clap_complete::Shell::Bash,
-    }
 }
 
 #[cfg(test)]

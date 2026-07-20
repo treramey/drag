@@ -9,9 +9,7 @@ use chrono::{DateTime, Days, Utc};
 use chrono_tz::Tz;
 use serde_json::json;
 
-use crate::cli::{
-    AliasDeleteArgs, AliasSetArgs, DeleteArgs, DoctorArgs, ListArgs, LogArgs, SetupArgs,
-};
+use crate::cli::{DeleteArgs, DoctorArgs, ListArgs, LogArgs, SetupArgs};
 #[cfg(test)]
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
@@ -273,8 +271,7 @@ impl App {
                 "remoteVerification": verification,
                 "configuration": {
                     "status": "planned",
-                    "credentials": "replace",
-                    "aliases": "preserve"
+                    "credentials": "replace"
                 }
             }),
             format!(
@@ -522,18 +519,6 @@ impl App {
             ApiDeleteGateway::new(credentials, self.debug)
         })
         .await
-    }
-
-    pub fn alias_set(&self, args: AliasSetArgs) -> Result<Rendered, CliError> {
-        crate::alias::set(&self.path, args)
-    }
-
-    pub fn alias_delete(&self, args: AliasDeleteArgs) -> Result<Rendered, CliError> {
-        crate::alias::delete(&self.path, args)
-    }
-
-    pub fn alias_list(&self) -> Result<Rendered, CliError> {
-        crate::alias::list(&self.path)
     }
 
     fn now(&self) -> DateTime<Tz> {

@@ -173,7 +173,6 @@ struct PreparedList {
     details: ScheduleDetails,
     pagination: ListPagination,
     selected_entities: Vec<WorklogEntity>,
-    aliases: BTreeMap<String, String>,
     source: Box<dyn ListDataSource>,
     timezone: Tz,
 }
@@ -186,7 +185,6 @@ pub(crate) struct ListReport {
     worklogs: Vec<Worklog>,
     details: ScheduleDetails,
     pagination: ListPagination,
-    aliases: BTreeMap<String, String>,
     verbose: bool,
     fields: Option<ListFieldMask>,
 }
@@ -197,7 +195,6 @@ impl ListReport {
         worklogs: Vec<Worklog>,
         details: ScheduleDetails,
         pagination: ListPagination,
-        aliases: BTreeMap<String, String>,
         verbose: bool,
     ) -> Self {
         Self {
@@ -206,7 +203,6 @@ impl ListReport {
             worklogs,
             details,
             pagination,
-            aliases,
             verbose,
             fields: None,
         }
@@ -247,7 +243,7 @@ impl ListReport {
     }
 
     pub(crate) fn issue_label(&self, worklog: &Worklog) -> String {
-        issue_with_aliases(&worklog.issue_key, &self.aliases)
+        worklog.issue_key.clone()
     }
 
     fn plain_text(&self) -> String {
@@ -349,7 +345,6 @@ async fn prepare(
     let selection = list_selection(now, args)?;
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
-    let aliases = config.aliases;
     let source = make_source(credentials.clone())?;
     let (page, schedule) = tokio::try_join!(
         source.worklogs(
@@ -422,7 +417,6 @@ async fn prepare(
         details,
         pagination,
         selected_entities,
-        aliases,
         source,
         timezone: now.timezone(),
     })
@@ -473,7 +467,6 @@ pub(crate) async fn run_report(
         worklogs,
         prepared.details,
         prepared.pagination,
-        prepared.aliases,
         args.verbose,
     )
     .with_today(prepared.today)
@@ -812,28 +805,6 @@ fn worklogs_table(report: &ListReport) -> String {
     )
 }
 
-fn issue_with_aliases(issue_key: &str, aliases: &BTreeMap<String, String>) -> String {
-    let names: Vec<_> = aliases
-        .iter()
-        .filter(|(_, issue)| issue.eq_ignore_ascii_case(issue_key))
-        .map(|(alias, _)| alias.as_str())
-        .collect();
-    let Some(first) = names.first() else {
-        return issue_key.to_owned();
-    };
-    let truncated = if first.chars().count() > 17 {
-        format!("{}…", first.chars().take(16).collect::<String>())
-    } else {
-        (*first).to_owned()
-    };
-    let suffix = if names.len() > 1 {
-        format!(", +{}", names.len() - 1)
-    } else {
-        String::new()
-    };
-    format!("({truncated}{suffix}) {issue_key}")
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1029,10 +1000,6 @@ mod tests {
             atlassian_user_email: Some("me@example.com".to_owned()),
             atlassian_token: Some("jira-secret".to_owned()),
             hostname: Some("example.atlassian.net".to_owned()),
-            aliases: BTreeMap::from([
-                ("first alias".to_owned(), "key-10".to_owned()),
-                ("second alias".to_owned(), "KEY-10".to_owned()),
-            ]),
         }
         .save(&path)?;
         Ok(path)
@@ -1816,7 +1783,7 @@ mod tests {
         );
         assert!(rendered.human.contains("July: 4h/8h"));
         assert!(rendered.human.contains("Tuesday, 2026-07-14"));
-        assert!(rendered.human.contains("(first alias, +1) KEY-10"));
+        assert!(rendered.human.contains("KEY-10"));
         assert!(rendered.human.contains("Required 8h, logged: 3h"));
         assert!(!rendered.human.contains("description visible-1"));
         assert!(!rendered.human.contains("issue url"));
@@ -2155,7 +2122,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_report_preserves_alias_aware_verbose_presentation() -> Result<(), CliError> {
+    fn shared_report_preserves_verbose_presentation() -> Result<(), CliError> {
         let entity = worklog("visible", "2026-07-14", "me", "10");
         let worklog = to_worklog(entity, "KEY-10".to_owned(), chrono_tz::UTC)?;
         let details = ScheduleDetails {
@@ -2172,14 +2139,10 @@ mod tests {
             vec![worklog],
             details,
             complete_pagination(date),
-            BTreeMap::from([("first alias".to_owned(), "KEY-10".to_owned())]),
             true,
         );
 
-        assert_eq!(
-            report.issue_label(&report.worklogs()[0]),
-            "(first alias) KEY-10"
-        );
+        assert_eq!(report.issue_label(&report.worklogs()[0]), "KEY-10");
         assert!(report.plain_text().contains("description visible"));
         assert_eq!(
             report.structured_data(None)["worklogs"][0]["issueKey"],
@@ -2210,7 +2173,6 @@ mod tests {
             vec![worklog],
             details,
             complete_pagination(date),
-            BTreeMap::new(),
             true,
         );
         let output = report.plain_text();
@@ -2242,7 +2204,6 @@ mod tests {
             vec![worklog.clone()],
             details,
             complete_pagination(date),
-            BTreeMap::new(),
             true,
         );
         let output = report.plain_text();

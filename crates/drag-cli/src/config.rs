@@ -1,11 +1,10 @@
-use std::collections::BTreeMap;
 use std::fs;
 #[cfg(not(windows))]
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::CliError;
@@ -23,12 +22,6 @@ pub struct Config {
     pub atlassian_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
-    #[serde(
-        default,
-        with = "aliases_compat",
-        skip_serializing_if = "BTreeMap::is_empty"
-    )]
-    pub aliases: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -157,13 +150,6 @@ impl Config {
                 .ok_or_else(|| missing_credential("account ID", "TEMPO_ACCOUNT_ID"))?,
         })
     }
-
-    pub fn resolve_issue(&self, issue_or_alias: &str) -> String {
-        self.aliases
-            .get(issue_or_alias)
-            .cloned()
-            .unwrap_or_else(|| issue_or_alias.to_owned())
-    }
 }
 
 fn credential_value(configured: &Option<String>, environment: Option<String>) -> Option<String> {
@@ -261,86 +247,11 @@ pub fn config_path() -> Result<PathBuf, CliError> {
         })
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyMapRef<'a, T> {
-    data_type: &'static str,
-    value: Vec<(&'a String, &'a T)>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum MapRepresentation<T> {
-    Legacy {
-        #[serde(rename = "dataType")]
-        _data_type: String,
-        value: Vec<(String, T)>,
-    },
-    Object(BTreeMap<String, T>),
-}
-
-fn serialize_map<S, T>(map: &BTreeMap<String, T>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-    T: Serialize,
-{
-    LegacyMapRef {
-        data_type: "Map",
-        value: map.iter().collect(),
-    }
-    .serialize(serializer)
-}
-
-fn deserialize_map<'de, D, T>(deserializer: D) -> Result<BTreeMap<String, T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    Ok(match MapRepresentation::deserialize(deserializer)? {
-        MapRepresentation::Legacy { value, .. } => value.into_iter().collect(),
-        MapRepresentation::Object(map) => map,
-    })
-}
-
-mod aliases_compat {
-    use super::*;
-
-    pub fn serialize<S>(map: &BTreeMap<String, String>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serialize_map(map, serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserialize_map(deserializer)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use super::{CliError, Config};
-
-    #[test]
-    fn reads_and_writes_typescript_map_format() -> Result<(), Box<dyn std::error::Error>> {
-        let input = r#"{
-          "tempoToken":"secret",
-          "aliases":{"dataType":"Map","value":[["lunch","ABC-1"]]}
-        }"#;
-        let config: Config = serde_json::from_str(input)?;
-        assert_eq!(
-            config.aliases.get("lunch").map(String::as_str),
-            Some("ABC-1")
-        );
-        let output = serde_json::to_string(&config)?;
-        assert!(output.contains("\"dataType\":\"Map\""));
-        Ok(())
-    }
 
     #[test]
     fn malformed_config_is_not_silently_discarded() -> Result<(), Box<dyn std::error::Error>> {
@@ -403,7 +314,6 @@ mod tests {
             atlassian_user_email: Some(" person@example.com ".to_owned()),
             atlassian_token: Some(" jira-secret ".to_owned()),
             hostname: Some("https://example.atlassian.net/jira".to_owned()),
-            ..Config::default()
         };
 
         let runtime = config.credentials_from_source(|_| None)?;

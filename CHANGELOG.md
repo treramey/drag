@@ -47,23 +47,20 @@ This project follows [Semantic Versioning](https://semver.org/) and
 - Opt-in `doctor --remote` checks for read-only Jira and Tempo connectivity,
   with stable per-service human and JSON results.
 - Verified headless setup using a reduced set of four environment variables.
-- Worklog, alias, and schedule behavior.
+- Worklog and schedule behavior.
 - Tempo API v4 and Atlassian API v3 clients using Rustls.
-- Compatibility with the original map format.
 - Human/JSON output, structured errors, schema discovery, and diagnostics.
 - A complete versioned machine-readable CLI contract derived from Clap and
   shared serde models, covering commands, compatibility forms, inputs, result
   schemas, structured errors, side effects, network access, and dry runs.
 - Raw JSON input, environment-based headless setup, and mutation dry runs.
-- Typed inline and stdin JSON for alias set/delete, with shared normalized
-  create, replace, delete, and unchanged plans and config-safe dry runs.
 - Cross-platform CI, dependency policy, audits, and release artifacts.
 
 ### Fixed
 
 - Build human and structured list output from one shared immutable report model
   without changing existing output contracts.
-- Centralize CLI errors, output, schema, diagnostics, aliases, and HTTP policy
+- Centralize CLI errors, output, schema, diagnostics, and HTTP policy
   behind owned modules; reuse pooled HTTP connections and retry only
   idempotent reads after bounded transient failures.
 - Lock down the mutating `log`/`l` contract: duration, interval, date, start,
@@ -76,6 +73,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Removed
 
+- Shell completion generation through `completions` and `autocomplete`.
+- Issue-key alias commands, persisted aliases, alias resolution, and alias-aware
+  list labels.
 - Local tracker commands, compatibility aliases, persisted tracker state, and
   tracker upload behavior.
 

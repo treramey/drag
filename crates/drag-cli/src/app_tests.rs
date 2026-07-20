@@ -115,7 +115,6 @@ fn empty_list_report(verbose: bool) -> ListReport {
             complete: true,
             totals_complete: true,
         },
-        BTreeMap::new(),
         verbose,
     )
 }
@@ -1094,7 +1093,6 @@ fn existing_config() -> Config {
         atlassian_user_email: Some("old@example.com".to_owned()),
         atlassian_token: Some("old-jira-token".to_owned()),
         hostname: Some("old.atlassian.net".to_owned()),
-        aliases: BTreeMap::from([("lunch".to_owned(), "ABC-1".to_owned())]),
     }
 }
 
@@ -1449,7 +1447,6 @@ fn pty_reconfiguration_offers_defaults_and_retains_tokens() -> Result<(), Box<dy
     let saved = Config::load(&path)?;
     assert_eq!(saved.atlassian_token.as_deref(), Some("old-jira-token"));
     assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
-    assert!(saved.aliases.contains_key("lunch"));
     Ok(())
 }
 
@@ -1551,10 +1548,6 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
     let path = directory.path().join("config.json");
     let initial = existing_config();
     initial.save(&path)?;
-    let mut concurrent = initial;
-    concurrent
-        .aliases
-        .insert("meeting".to_owned(), "ABC-3".to_owned());
     let events = Arc::new(Mutex::new(Vec::new()));
     let tempo_accounts = Arc::new(Mutex::new(Vec::new()));
     let app = App::with_onboarding_session(
@@ -1563,7 +1556,7 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
             jira_error: None,
             tempo_error: None,
             tempo_accounts: Arc::clone(&tempo_accounts),
-            config_update: Some((path.clone(), concurrent)),
+            config_update: None,
         },
         ScriptedOnboardingSession {
             events: Arc::clone(&events),
@@ -1585,7 +1578,6 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
         saved.atlassian_token.as_deref(),
         saved.tempo_token.as_deref(),
         saved.account_id.as_deref(),
-        saved.aliases.get("meeting").map(String::as_str),
     );
     assert_eq!(
         observed,
@@ -1595,7 +1587,6 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
             Some("scripted-jira-token"),
             Some("scripted-tempo-token"),
             Some("derived-account"),
-            Some("ABC-3"),
         )
     );
     assert_eq!(
@@ -2245,7 +2236,6 @@ async fn ratatui_reconfiguration_retains_replaces_backtracks_and_reverifies(
             Some("final-derived-account"),
         )
     );
-    assert!(saved.aliases.contains_key("lunch"));
 
     let captured_frames = frames.lock().map_err(|_| "test frame lock poisoned")?;
     assert!(captured_frames.first().is_some_and(|frame| {
@@ -2872,7 +2862,6 @@ async fn interactive_reconfiguration_offers_defaults_and_retains_hidden_tokens(
     let saved = Config::load(&path)?;
     assert_eq!(saved.atlassian_token.as_deref(), Some("old-jira-token"));
     assert_eq!(saved.tempo_token.as_deref(), Some("old-tempo-token"));
-    assert!(saved.aliases.contains_key("lunch"));
     let state = state.lock().map_err(|_| "test prompt lock was poisoned")?;
     assert_eq!(
         state.text_prompts,
@@ -3200,10 +3189,6 @@ async fn verified_environment_setup_derives_account_and_preserves_local_state(
     let saved = Config::load(&path)?;
     assert_eq!(saved.account_id.as_deref(), Some("derived-account"));
     assert_eq!(saved.tempo_token.as_deref(), Some("new-tempo-token"));
-    assert_eq!(
-        saved.aliases.get("lunch").map(String::as_str),
-        Some("ABC-1")
-    );
     let accounts = tempo_accounts
         .lock()
         .map_err(|_| "test verifier lock was poisoned")?;
@@ -3278,37 +3263,6 @@ async fn verified_environment_setup_dry_run_completes_read_only_checks_without_s
     assert!(!output.contains("new-tempo-token"));
     assert!(!output.contains("new-jira-token"));
     assert!(!output.contains("derived-account"));
-    Ok(())
-}
-
-#[tokio::test]
-async fn verified_environment_setup_preserves_config_updates_made_during_verification(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
-    let path = directory.path().join("config.json");
-    existing_config().save(&path)?;
-    let mut updated_config = existing_config();
-    updated_config
-        .aliases
-        .insert("meeting".to_owned(), "ABC-3".to_owned());
-    let app = App::with_connection_verifier(
-        path.clone(),
-        FakeVerifier {
-            jira_error: None,
-            tempo_error: None,
-            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
-            config_update: Some((path.clone(), updated_config)),
-        },
-    );
-
-    app.verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()))
-        .await?;
-
-    let saved = Config::load(&path)?;
-    assert_eq!(
-        saved.aliases.get("meeting").map(String::as_str),
-        Some("ABC-3")
-    );
     Ok(())
 }
 

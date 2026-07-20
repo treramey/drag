@@ -11,7 +11,6 @@ authors = ["Szymon Kozak", "Drag contributors"]
 
 [workspace.dependencies]
 clap = { version = "4.5", features = ["derive", "string"] }
-clap_complete = "4.5"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 chrono-tz = "0.10"
 serde = { version = "1.0", features = ["derive"] }
