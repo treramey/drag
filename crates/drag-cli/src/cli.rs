@@ -126,7 +126,7 @@ pub struct GenerateSkillsArgs {
     #[arg(long, value_enum, default_value_t = SkillScope::All)]
     pub scope: SkillScope,
 
-    /// Replace existing skill directories and all files inside them.
+    /// Replace existing skill directories, their contents, and the generated index.
     #[arg(long)]
     pub force: bool,
 }

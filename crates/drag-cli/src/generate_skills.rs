@@ -598,6 +598,13 @@ fn validate_catalog_destinations(
     }
     if let Some((index_path, _)) = index {
         validate_path_without_symlinks(current, index_path, false)?;
+        let destination = current.join(index_path);
+        if fs::symlink_metadata(&destination).is_ok() && !force {
+            return Err(CliError::InvalidInput(format!(
+                "refusing to replace existing {}; pass --force to replace the generated skills index",
+                destination.display()
+            )));
+        }
     }
     Ok(())
 }

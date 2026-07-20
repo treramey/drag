@@ -217,6 +217,26 @@ fn skill_generation_requires_force_before_replacing_existing_directories(
 }
 
 #[test]
+fn skill_generation_requires_force_before_replacing_an_existing_index(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let docs = directory.path().join("docs");
+    fs::create_dir(&docs)?;
+    let index = docs.join("skills.md");
+    fs::write(&index, "unrelated documentation")?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args(["--output", "json", "generate-skills", "--scope", "local"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read_to_string(index)?, "unrelated documentation");
+    assert!(!directory.path().join("skills").exists());
+    Ok(())
+}
+
+#[test]
 fn invalid_index_destination_preserves_existing_skills() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let skill_dir = directory.path().join("skills/drag-log");

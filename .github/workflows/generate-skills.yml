@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event_name == 'push' && github.ref_name || 'main' }}
-          token: ${{ github.event_name == 'push' && github.token || secrets.RELEASE_TOKEN || github.token }}
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -78,7 +78,7 @@ jobs:
           (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
         uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
         with:
-          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+          token: ${{ secrets.RELEASE_TOKEN }}
           branch: chore/sync-agent-skills
           title: "chore: sync generated agent skills"
           body: |
@@ -99,5 +99,5 @@ jobs:
           git config user.name "drag-release-bot"
           git config user.email "drag-release-bot@users.noreply.github.com"
           git add skills/drag skills/drag-log skills/drag-list skills/drag-delete docs/skills.md
-          git commit -m "chore: regenerate local agent skills [skip ci]"
+          git commit -m "chore: regenerate local agent skills"
           git push
