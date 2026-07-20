@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::{DateTime, Days, Utc};
 use chrono_tz::Tz;
@@ -16,7 +18,8 @@ use crate::config::{Config, Credentials, TempoCredentials};
 use crate::delete::{self, ApiDeleteGateway};
 use crate::list::{self, ApiListDataSource};
 use crate::list_tui::{
-    ListReportAction, ListReportSession, ListReportSuspenseOutcome, RatatuiListReportSession,
+    ListReportAction, ListReportSession, ListReportSuspenseOutcome, PendingListReportFuture,
+    RatatuiListReportSession,
 };
 use crate::log::{self, ApiLogGateway};
 #[cfg(test)]
@@ -32,6 +35,8 @@ use crate::setup::{
 };
 use crate::setup_tui::RatatuiOnboardingSession;
 use crate::{CliError, Rendered};
+
+const LIST_FETCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 pub struct App {
     path: PathBuf,
@@ -392,11 +397,20 @@ impl App {
             } else if let Some(report) = take_reusable_report(&mut reports, requested_date) {
                 (report, true)
             } else {
-                let task = prefetches
-                    .remove(&requested_date)
-                    .unwrap_or_else(|| self.spawn_list_report(args.clone()));
-                let ready = task.is_finished();
-                let load = Box::pin(await_list_report_task(task));
+                let (ready, load): (bool, PendingListReportFuture<'_>) =
+                    if let Some(task) = prefetches.remove(&requested_date) {
+                        let ready = task.is_finished();
+                        (ready, Box::pin(await_list_report_task(task)))
+                    } else {
+                        let load = self.load_list_report(args.clone());
+                        (
+                            false,
+                            Box::pin(debounce_list_fetch(
+                                tokio::time::sleep(LIST_FETCH_DEBOUNCE),
+                                load,
+                            )),
+                        )
+                    };
                 let report = if ready {
                     load.await?
                 } else {
@@ -535,6 +549,15 @@ async fn await_list_report_task(
             "list prefetch failed: {error}"
         )))
     })?
+}
+
+async fn debounce_list_fetch<Q, F, T>(quiet_period: Q, load: F) -> T
+where
+    Q: Future<Output = ()>,
+    F: Future<Output = T>,
+{
+    quiet_period.await;
+    load.await
 }
 
 fn required_setup_environment(

@@ -25,7 +25,7 @@ use tokio::sync::Mutex;
 use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::list::ListReport;
 use crate::output::escape_terminal_data;
-use crate::tui_theme::Palette;
+use crate::tui_theme::{constrain_content_width, footer_divider, render_brand_header, Palette};
 use crate::CliError;
 
 const DASHBOARD_CALENDAR_WIDTH: u16 = 30;
@@ -34,6 +34,13 @@ const DASHBOARD_MONTH_SUMMARY_HEIGHT: u16 = 3;
 const DASHBOARD_DATE_HEIGHT: u16 = 2;
 const DASHBOARD_DAY_SUMMARY_HEIGHT: u16 = 3;
 const DASHBOARD_DETAILS_HEIGHT: u16 = 5;
+const SPACIOUS_HEADER_TOP_PADDING: u16 = 2;
+const SPACIOUS_HEADER_HEIGHT: u16 = 5;
+const COMPACT_HEADER_TOP_PADDING: u16 = 1;
+const COMPACT_HEADER_HEIGHT: u16 = 2;
+const MIN_COMPACT_HEADER_HEIGHT: u16 = 20;
+const MIN_SPACIOUS_HEADER_HEIGHT: u16 = 28;
+const MIN_DIVIDED_FOOTER_HEIGHT: u16 = 16;
 
 pub(crate) type ListReportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ListReportAction, CliError>> + Send + 'a>>;
@@ -106,6 +113,7 @@ enum Message {
 
 struct ListReportModel<'a> {
     report: &'a ListReport,
+    selected_date: chrono::NaiveDate,
     table_state: TableState,
     status: Option<String>,
 }
@@ -116,9 +124,21 @@ impl<'a> ListReportModel<'a> {
         table_state.select((!report.worklogs().is_empty()).then_some(0));
         Self {
             report,
+            selected_date: report.selected_date(),
             table_state,
             status: None,
         }
+    }
+
+    fn loading(report: &'a ListReport, selected_date: chrono::NaiveDate) -> Self {
+        Self {
+            selected_date,
+            ..Self::new(report)
+        }
+    }
+
+    fn selected_date(&self) -> chrono::NaiveDate {
+        self.selected_date
     }
 
     fn focused_row(&self) -> Option<usize> {
@@ -199,7 +219,7 @@ async fn run_suspense(
         .ok_or_else(|| CliError::Io(io::Error::other("list terminal was not initialized")))?;
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(std::time::Duration::from_millis(80));
-    let mut model = ListReportModel::new(background);
+    let mut model = ListReportModel::loading(background, date);
     loop {
         terminal
             .terminal
@@ -239,17 +259,19 @@ async fn run_suspense(
 
 fn render_suspense(
     frame: &mut Frame<'_>,
-    _date: chrono::NaiveDate,
+    date: chrono::NaiveDate,
     model: &mut ListReportModel<'_>,
 ) {
+    model.selected_date = date;
     let background = model.report;
     render(frame, model);
+    let (_, report_area) = list_areas(frame.area());
 
     let pagination_height = u16::from(!background.pagination().totals_complete) * 2;
     let loading_area = if let Some(month_width) =
-        dashboard_month_width(frame.area(), pagination_height, background)
+        dashboard_month_width(report_area, pagination_height, model.selected_date())
     {
-        let [dashboard, _, _, _] = dashboard_areas(frame.area(), model, pagination_height);
+        let [dashboard, _, _, _] = dashboard_areas(report_area, model, pagination_height);
         let inner = Block::bordered().inner(dashboard);
         let [_, report] =
             Layout::horizontal([Constraint::Length(month_width), Constraint::Fill(1)]).areas(inner);
@@ -257,9 +279,15 @@ fn render_suspense(
         let [_, _, _, _, _, day] = dashboard_report_areas(content, model);
         top_line(Block::new().borders(Borders::TOP).inner(day))
     } else {
-        let month_height = month_height(frame.area(), pagination_height, background);
+        let month_height = month_height(
+            report_area,
+            pagination_height,
+            background,
+            model.selected_date(),
+        );
         let details_height =
-            focused_details_height(frame.area().height, month_height, pagination_height, model);
+            focused_details_height(report_area.height, month_height, pagination_height, model);
+        let footer_height = footer_height(report_area.height);
         let [_, _, _, _, day, _, _] = Layout::vertical([
             Constraint::Length(month_height),
             Constraint::Length(1),
@@ -267,9 +295,9 @@ fn render_suspense(
             Constraint::Length(details_height),
             Constraint::Length(3),
             Constraint::Length(pagination_height),
-            Constraint::Length(1),
+            Constraint::Length(footer_height),
         ])
-        .areas(frame.area());
+        .areas(report_area);
         top_line(Block::bordered().inner(day))
     };
 
@@ -284,6 +312,7 @@ fn render_suspense(
     let desired_status_width = spinner_width + LOADING_LABEL_WIDTH;
     let status_width = available_width.min(desired_status_width);
     if status_width < LOADING_LABEL_WIDTH {
+        render_compact_loading_status(frame, report_area);
         return;
     }
     let status = Rect::new(
@@ -306,6 +335,25 @@ fn render_suspense(
         Paragraph::new(" Loading entries…").style(Palette::text()),
         label,
     );
+}
+
+fn render_compact_loading_status(frame: &mut Frame<'_>, report_area: Rect) {
+    if report_area.width == 0 || report_area.height == 0 {
+        return;
+    }
+    let content = Rect::new(
+        report_area.x,
+        report_area.bottom().saturating_sub(1),
+        report_area.width,
+        1,
+    );
+    frame.render_widget(Clear, content);
+    let label = if content.width >= 8 {
+        "Loading…"
+    } else {
+        "…"
+    };
+    frame.render_widget(Paragraph::new(label).style(Palette::text()), content);
 }
 
 fn top_line(area: Rect) -> Rect {
@@ -441,38 +489,71 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
 }
 
 fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
+    let (header, report_area) = list_areas(frame.area());
+    if header.height > 0 {
+        render_brand_header(frame, header);
+    }
     let report = model.report;
     let pagination_height = u16::from(!report.pagination().totals_complete) * 2;
-    if let Some(month_width) = dashboard_month_width(frame.area(), pagination_height, report) {
-        render_dashboard(frame, model, pagination_height, month_width);
+    if let Some(month_width) =
+        dashboard_month_width(report_area, pagination_height, model.selected_date())
+    {
+        render_dashboard(frame, report_area, model, pagination_height, month_width);
         return;
     }
-    render_stacked(frame, model, pagination_height);
+    render_stacked(frame, report_area, model, pagination_height);
+}
+
+fn list_areas(area: Rect) -> (Rect, Rect) {
+    let (top_padding, header_height) = if area.height >= MIN_SPACIOUS_HEADER_HEIGHT {
+        (SPACIOUS_HEADER_TOP_PADDING, SPACIOUS_HEADER_HEIGHT)
+    } else if area.height >= MIN_COMPACT_HEADER_HEIGHT {
+        (COMPACT_HEADER_TOP_PADDING, COMPACT_HEADER_HEIGHT)
+    } else {
+        (0, 0)
+    };
+    let [_, header, report] = Layout::vertical([
+        Constraint::Length(top_padding),
+        Constraint::Length(header_height),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
+    (
+        constrain_content_width(header),
+        constrain_content_width(report),
+    )
 }
 
 fn dashboard_month_width(
     terminal_area: Rect,
     pagination_height: u16,
-    report: &ListReport,
+    selected_date: chrono::NaiveDate,
 ) -> Option<u16> {
     const MIN_REPORT_WIDTH: u16 = 55;
-    calendar_date(report.selected_date())?;
+    calendar_date(selected_date)?;
     let month_width = DASHBOARD_CALENDAR_WIDTH;
     let minimum_width = month_width
         .saturating_add(MIN_REPORT_WIDTH)
         .saturating_add(2);
     let minimum_height = DASHBOARD_CALENDAR_HEIGHT
-        .saturating_add(6)
+        .saturating_add(5)
+        .saturating_add(footer_height(terminal_area.height))
         .saturating_add(pagination_height);
     (terminal_area.width >= minimum_width && terminal_area.height >= minimum_height)
         .then_some(month_width)
 }
 
-fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagination_height: u16) {
+fn render_stacked(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &mut ListReportModel<'_>,
+    pagination_height: u16,
+) {
     let report = model.report;
-    let month_height = month_height(frame.area(), pagination_height, report);
+    let month_height = month_height(area, pagination_height, report, model.selected_date());
     let details_height =
-        focused_details_height(frame.area().height, month_height, pagination_height, model);
+        focused_details_height(area.height, month_height, pagination_height, model);
+    let footer_height = footer_height(area.height);
     let [month, date, worklogs, details, day, pagination, footer] = Layout::vertical([
         Constraint::Length(month_height),
         Constraint::Length(1),
@@ -480,12 +561,12 @@ fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagina
         Constraint::Length(details_height),
         Constraint::Length(3),
         Constraint::Length(pagination_height),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
-    .areas(frame.area());
-    render_month(frame, month, report);
+    .areas(area);
+    render_month(frame, month, report, model.selected_date());
     frame.render_widget(
-        Paragraph::new(report.selected_date().format("%A, %Y-%m-%d").to_string())
+        Paragraph::new(model.selected_date().format("%A, %Y-%m-%d").to_string())
             .style(Palette::primary().bold()),
         date,
     );
@@ -493,11 +574,7 @@ fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagina
     render_focused_details(frame, details, model);
     let schedule = report.schedule();
     frame.render_widget(
-        Paragraph::new(format!(
-            "{} / {} · logged / required",
-            schedule.day_logged_duration, schedule.day_required_duration
-        ))
-        .block(
+        Paragraph::new(schedule.day_logged_duration.as_str()).block(
             Block::bordered()
                 .title(primary("Day summary"))
                 .border_style(Palette::muted()),
@@ -510,33 +587,34 @@ fn render_stacked(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>, pagina
 
 fn render_dashboard(
     frame: &mut Frame<'_>,
+    area: Rect,
     model: &mut ListReportModel<'_>,
     pagination_height: u16,
     month_width: u16,
 ) {
-    let [dashboard, pagination, _, footer] =
-        dashboard_areas(frame.area(), model, pagination_height);
+    let [dashboard, pagination, _, footer] = dashboard_areas(area, model, pagination_height);
     let panel = Block::bordered().border_style(Palette::muted());
     let inner = panel.inner(dashboard);
     frame.render_widget(panel, dashboard);
     let [month, report] =
         Layout::horizontal([Constraint::Length(month_width), Constraint::Fill(1)]).areas(inner);
-    render_dashboard_month(frame, month, model.report);
+    render_dashboard_month(frame, month, model.report, model.selected_date());
     render_dashboard_report(frame, report, model);
     render_pagination_notice(frame, pagination, model.report);
     render_footer(frame, footer, model);
 }
 
 fn dashboard_areas(area: Rect, model: &ListReportModel<'_>, pagination_height: u16) -> [Rect; 4] {
+    let footer_height = footer_height(area.height);
     let available_height = area
         .height
-        .saturating_sub(pagination_height.saturating_add(1));
+        .saturating_sub(pagination_height.saturating_add(footer_height));
     let dashboard_height = dashboard_desired_height(model).min(available_height);
     Layout::vertical([
         Constraint::Length(dashboard_height),
         Constraint::Length(pagination_height),
         Constraint::Fill(1),
-        Constraint::Length(1),
+        Constraint::Length(footer_height),
     ])
     .areas(area)
 }
@@ -575,7 +653,12 @@ fn horizontal_content_padding(area: Rect) -> Rect {
     content
 }
 
-fn render_dashboard_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
+fn render_dashboard_month(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    report: &ListReport,
+    selected_date: chrono::NaiveDate,
+) {
     let area = horizontal_content_padding(area);
     let summary_height = DASHBOARD_MONTH_SUMMARY_HEIGHT.min(area.height);
     let [calendar_area, summary, _] = Layout::vertical([
@@ -584,31 +667,34 @@ fn render_dashboard_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport
         Constraint::Fill(1),
     ])
     .areas(area);
-    render_large_calendar(frame, calendar_area, report);
+    render_large_calendar(frame, calendar_area, report, selected_date);
     let summary_block = Block::new()
         .borders(Borders::TOP)
         .border_style(Palette::muted());
     let summary_inner = summary_block.inner(summary);
     frame.render_widget(summary_block, summary);
+    if !same_calendar_month(report.selected_date(), selected_date) {
+        return;
+    }
     let schedule = report.schedule();
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(format!(
-                "{} current period",
-                schedule.month_current_period_duration
-            )),
-            Line::from(format!(
-                "{} logged of {}",
-                readable_duration(&schedule.month_logged_duration),
-                readable_duration(&schedule.month_required_duration)
+            Line::from(current_period_text(&schedule.month_current_period_duration)),
+            Line::from(month_totals_text(
+                &schedule.month_logged_duration,
+                &schedule.month_required_duration,
             )),
         ]),
         summary_inner,
     );
 }
 
-fn render_large_calendar(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
-    let selected = report.selected_date();
+fn render_large_calendar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    report: &ListReport,
+    selected: chrono::NaiveDate,
+) {
     let start = selected
         .with_day(1)
         .and_then(|first| {
@@ -663,14 +749,8 @@ fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListRe
     frame.render_widget(divider, area);
     let [date, _date_gap, worklogs, details, _, day] = dashboard_report_areas(inner, model);
     frame.render_widget(
-        Paragraph::new(
-            model
-                .report
-                .selected_date()
-                .format("%A, %Y-%m-%d")
-                .to_string(),
-        )
-        .style(Palette::primary().bold()),
+        Paragraph::new(model.selected_date().format("%A, %Y-%m-%d").to_string())
+            .style(Palette::primary().bold()),
         date,
     );
     render_worklogs(frame, worklogs, model, false);
@@ -684,11 +764,22 @@ fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListRe
 }
 
 fn day_summary_text(report: &ListReport) -> String {
-    let schedule = report.schedule();
-    format!(
-        "Day summary: {} / {} logged / required",
-        schedule.day_logged_duration, schedule.day_required_duration
+    format!("Day summary: {}", report.schedule().day_logged_duration)
+}
+
+fn same_calendar_month(left: chrono::NaiveDate, right: chrono::NaiveDate) -> bool {
+    left.year() == right.year() && left.month() == right.month()
+}
+
+fn current_period_text(duration: &str) -> Cow<'_, str> {
+    duration.strip_prefix('-').map_or_else(
+        || Cow::Owned(format!("{duration} current period")),
+        |remaining| Cow::Owned(format!("{remaining} left")),
     )
+}
+
+fn month_totals_text(logged: &str, required: &str) -> String {
+    format!("{logged} logged of {required}")
 }
 
 fn dashboard_report_areas(inner: Rect, model: &ListReportModel<'_>) -> [Rect; 6] {
@@ -714,12 +805,19 @@ fn dashboard_report_areas(inner: Rect, model: &ListReportModel<'_>) -> [Rect; 6]
     .areas(inner)
 }
 
-fn month_height(terminal_area: Rect, pagination_height: u16, report: &ListReport) -> u16 {
+fn month_height(
+    terminal_area: Rect,
+    pagination_height: u16,
+    report: &ListReport,
+    selected_date: chrono::NaiveDate,
+) -> u16 {
     const COMPACT_MONTH_HEIGHT: u16 = 3;
     // Date heading, one bordered table row with its header, day summary, and
     // footer remain visible before the month summary expands into a calendar.
-    const PRIMARY_REPORT_HEIGHT: u16 = 9;
-    let Some(date) = calendar_date(report.selected_date()) else {
+    // Verbose reports also keep enough room for the focused Jira URL.
+    const PRIMARY_REPORT_HEIGHT_WITH_COMPACT_FOOTER: u16 = 9;
+    const MIN_VERBOSE_DETAILS_HEIGHT: u16 = 3;
+    let Some(date) = calendar_date(selected_date) else {
         return COMPACT_MONTH_HEIGHT;
     };
     let calendar = Monthly::new(date, CalendarEventStore::default())
@@ -727,8 +825,16 @@ fn month_height(terminal_area: Rect, pagination_height: u16, report: &ListReport
         .show_weekdays_header(Palette::muted());
     let calendar_height = calendar.height().saturating_add(3);
     let calendar_width = calendar.width().saturating_add(2);
+    let details_height = if report.verbose() && !report.worklogs().is_empty() {
+        MIN_VERBOSE_DETAILS_HEIGHT
+    } else {
+        0
+    };
+    let primary_report_height = PRIMARY_REPORT_HEIGHT_WITH_COMPACT_FOOTER
+        .saturating_add(footer_height(terminal_area.height).saturating_sub(1));
     if terminal_area.width >= calendar_width
-        && terminal_area.height >= calendar_height + PRIMARY_REPORT_HEIGHT + pagination_height
+        && terminal_area.height
+            >= calendar_height + primary_report_height + details_height + pagination_height
     {
         calendar_height
     } else {
@@ -747,7 +853,9 @@ fn focused_details_height(
     }
     // Month, date, day summary, footer, pagination, and a bordered table with
     // one visible row take priority over secondary verbose details.
-    let available = terminal_height.saturating_sub(month_height + 9 + pagination_height);
+    let primary_report_height = 8_u16.saturating_add(footer_height(terminal_height));
+    let available =
+        terminal_height.saturating_sub(month_height + primary_report_height + pagination_height);
     match available {
         5.. => 5,
         3..=4 => 3,
@@ -796,8 +904,16 @@ fn render_focused_details(frame: &mut Frame<'_>, area: Rect, model: &ListReportM
 }
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>) {
+    let [divider, content] = if area.height >= 2 {
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(area)
+    } else {
+        [Rect::new(area.x, area.y, area.width, 0), area]
+    };
+    if divider.height > 0 {
+        frame.render_widget(footer_divider(divider.width), divider);
+    }
     if let Some(status) = model.status() {
-        frame.render_widget(Line::from(status.to_owned()), area);
+        frame.render_widget(Line::from(status.to_owned()), content);
         return;
     }
     let spans = if area.width >= 70 {
@@ -853,7 +969,15 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
     } else {
         vec![primary(" q "), muted("quit")]
     };
-    frame.render_widget(Line::from(spans), area);
+    frame.render_widget(Line::from(spans), content);
+}
+
+const fn footer_height(terminal_height: u16) -> u16 {
+    if terminal_height >= MIN_DIVIDED_FOOTER_HEIGHT {
+        2
+    } else {
+        1
+    }
 }
 
 fn primary<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
@@ -885,19 +1009,31 @@ fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListRepo
     );
 }
 
-fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
-    let schedule = report.schedule();
+fn render_month(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    report: &ListReport,
+    selected_date: chrono::NaiveDate,
+) {
+    let totals_are_current = same_calendar_month(report.selected_date(), selected_date);
     if area.height <= 3 {
+        let summary = if totals_are_current {
+            let schedule = report.schedule();
+            format!(
+                "{} · {}",
+                month_totals_text(
+                    &schedule.month_logged_duration,
+                    &schedule.month_required_duration,
+                ),
+                current_period_text(&schedule.month_current_period_duration)
+            )
+        } else {
+            String::new()
+        };
         frame.render_widget(
-            Paragraph::new(format!(
-                "{} logged of {} · {} current period",
-                readable_duration(&schedule.month_logged_duration),
-                readable_duration(&schedule.month_required_duration),
-                schedule.month_current_period_duration
-            ))
-            .block(
+            Paragraph::new(summary).block(
                 Block::bordered()
-                    .title(primary(report.selected_date().format("%B %Y").to_string()))
+                    .title(primary(selected_date.format("%B %Y").to_string()))
                     .border_style(Palette::muted()),
             ),
             area,
@@ -910,7 +1046,7 @@ fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
 
     let [calendar_area, summary_area] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(inner);
-    let Some(selected_date) = calendar_date(report.selected_date()) else {
+    let Some(selected_date) = calendar_date(selected_date) else {
         return;
     };
     let mut events = CalendarEventStore::default();
@@ -923,26 +1059,21 @@ fn render_month(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
         .show_weekdays_header(Palette::muted().bold())
         .show_surrounding(Palette::muted());
     frame.render_widget(calendar, calendar_area);
+    if !totals_are_current {
+        return;
+    }
+    let schedule = report.schedule();
     frame.render_widget(
         Line::from(format!(
-            "{} logged of {} · {} current period",
-            readable_duration(&schedule.month_logged_duration),
-            readable_duration(&schedule.month_required_duration),
-            schedule.month_current_period_duration
+            "{} · {}",
+            month_totals_text(
+                &schedule.month_logged_duration,
+                &schedule.month_required_duration,
+            ),
+            current_period_text(&schedule.month_current_period_duration)
         )),
         summary_area,
     );
-}
-
-fn readable_duration(duration: &str) -> Cow<'_, str> {
-    let Some((hours, minutes)) = duration.split_once('h') else {
-        return Cow::Borrowed(duration);
-    };
-    if minutes.is_empty() {
-        Cow::Borrowed(duration)
-    } else {
-        Cow::Owned(format!("{hours}h {minutes}"))
-    }
 }
 
 fn calendar_date(date: chrono::NaiveDate) -> Option<time::Date> {
@@ -1041,12 +1172,13 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::{
-        date_action_for_key_event, message_for_key, message_for_key_event, readable_duration,
-        render, render_suspense, should_quit, ListReportAction, ListReportModel, Message,
+        current_period_text, date_action_for_key_event, message_for_key, message_for_key_event,
+        month_totals_text, render, render_suspense, should_quit, ListReportAction, ListReportModel,
+        Message,
     };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
-    use crate::tui_theme::Palette;
+    use crate::tui_theme::{Palette, DRAG_ART, MAX_CONTENT_WIDTH};
 
     struct FakeBrowserLauncher {
         opened: Arc<Mutex<Vec<String>>>,
@@ -1208,7 +1340,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(100, 24)).ok()?;
         terminal.draw(|frame| render(frame, &mut model)).ok()?;
         let buffer = terminal.backend().buffer();
-        for y in 0..10 {
+        for y in 0..buffer.area.height {
             let line: String = (0..100)
                 .filter_map(|x| buffer.cell((x, y)))
                 .map(|cell| cell.symbol())
@@ -1233,8 +1365,14 @@ mod tests {
     }
 
     #[test]
-    fn readable_duration_separates_hours_and_minutes() {
-        assert_eq!(readable_duration("89h15m"), "89h 15m");
+    fn month_totals_keep_compact_duration_spacing() {
+        assert_eq!(month_totals_text("89h15m", "176h"), "89h15m logged of 176h");
+    }
+
+    #[test]
+    fn negative_current_period_duration_is_presented_as_time_left() {
+        assert_eq!(current_period_text("-14h45m"), "14h45m left");
+        assert_eq!(current_period_text("+4h"), "+4h current period");
     }
 
     #[test]
@@ -1265,7 +1403,7 @@ mod tests {
             "751393",
             "09:00–10:30",
             "(standup) OPS-42",
-            "1h 30m / 8h",
+            "Day summary: 1h 30m",
             "h/l date",
             "q quit",
             "Esc close",
@@ -1273,6 +1411,49 @@ mod tests {
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
+    }
+
+    #[test]
+    fn list_report_shows_the_shared_brand_lockup_and_version() {
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+
+        let lines = screen_lines_with_size(&mut model, 100, 40);
+
+        assert!(lines.get(2).is_some_and(|line| {
+            line.contains(DRAG_ART[0]) && line.contains(concat!("v", env!("CARGO_PKG_VERSION")))
+        }));
+        assert!(lines.get(3).is_some_and(|line| line.contains(DRAG_ART[1])));
+    }
+
+    #[test]
+    fn narrow_header_keeps_the_logo_intact_by_suppressing_the_version() {
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+
+        let screen = screen_with_size(&mut model, 23, 20);
+
+        assert!(screen.contains(DRAG_ART[0]), "{screen}");
+        assert!(!screen.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
+    }
+
+    #[test]
+    fn wide_terminal_centers_the_list_at_the_setup_content_width() {
+        const TERMINAL_WIDTH: u16 = 140;
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+
+        let lines = screen_lines_with_size(&mut model, TERMINAL_WIDTH, 40);
+        let dashboard_border = lines
+            .iter()
+            .find(|line| line.contains('┌') && line.contains('┐'));
+        let expected_left = usize::from((TERMINAL_WIDTH - MAX_CONTENT_WIDTH) / 2);
+        let expected_right = expected_left + usize::from(MAX_CONTENT_WIDTH) - 1;
+
+        assert!(dashboard_border.is_some_and(|line| {
+            line.chars().position(|character| character == '┌') == Some(expected_left)
+                && line.chars().position(|character| character == '┐') == Some(expected_right)
+        }));
     }
 
     #[test]
@@ -1289,26 +1470,23 @@ mod tests {
             "{}",
             lines.join("\n")
         );
+        let dashboard_start = lines
+            .iter()
+            .position(|line| line.starts_with('┌') && line.ends_with('┐'));
+        let dashboard_end = lines
+            .iter()
+            .position(|line| line.starts_with('└') && line.trim_end().ends_with('┘'));
+        assert_eq!(dashboard_start, Some(3), "{}", lines.join("\n"));
+        assert_eq!(dashboard_end, Some(20), "{}", lines.join("\n"));
         assert!(
-            lines
-                .first()
-                .is_some_and(|line| line.starts_with('┌') && line.ends_with('┐')),
+            lines.get(21).is_some_and(|line| line.trim().is_empty()),
             "{}",
             lines.join("\n")
         );
         assert!(
-            lines.get(17).is_some_and(|line| {
-                line.starts_with('└') && line.trim_end().ends_with('┘')
-            }),
-            "{}",
-            lines.join("\n")
-        );
-        assert!(
             lines
-                .iter()
-                .take(23)
-                .skip(18)
-                .all(|line| line.trim().is_empty()),
+                .get(22)
+                .is_some_and(|line| line.chars().all(|character| character == '─')),
             "{}",
             lines.join("\n")
         );
@@ -1359,11 +1537,11 @@ mod tests {
 
         assert_eq!(day_summary, current_period, "{}", lines.join("\n"));
         assert_eq!(month_total, current_period + 1, "{}", lines.join("\n"));
-        assert_eq!(day_summary, 15, "{}", lines.join("\n"));
+        assert_eq!(day_summary, 22, "{}", lines.join("\n"));
     }
 
     #[test]
-    fn suspense_keeps_the_current_report_and_loads_in_the_footer() {
+    fn suspense_updates_the_calendar_while_current_entries_remain_visible() {
         let report = report(
             vec![Worklog {
                 id: "751393".to_owned(),
@@ -1392,8 +1570,8 @@ mod tests {
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
-        assert!(screen.contains("Tuesday, 2026-07-14"), "{screen}");
-        assert!(!screen.contains("Wednesday, 2026-07-15"), "{screen}");
+        assert!(screen.contains("Wednesday, 2026-07-15"), "{screen}");
+        assert!(!screen.contains("Tuesday, 2026-07-14"), "{screen}");
         let loading_line = lines
             .iter()
             .position(|line| line.contains("Loading entries…"));
@@ -1406,6 +1584,32 @@ mod tests {
                 .is_some_and(|column| column > 60),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn narrow_suspense_uses_the_footer_for_a_compact_loading_status() {
+        let report = report(Vec::new(), true);
+        let next_date = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap_or(NaiveDate::MIN);
+
+        let screen = suspense_screen_lines(&report, next_date, 32, 20).join("\n");
+
+        assert!(screen.contains("Wednesday, 2026-07-15"), "{screen}");
+        assert!(screen.contains("Loading…"), "{screen}");
+    }
+
+    #[test]
+    fn suspense_can_move_the_calendar_across_a_month_boundary() {
+        let report = report(Vec::new(), true);
+        let next_month = NaiveDate::from_ymd_opt(2026, 8, 1).unwrap_or(NaiveDate::MIN);
+
+        let screen = suspense_screen_lines(&report, next_month, 100, 24).join("\n");
+
+        assert!(screen.contains("August 2026"), "{screen}");
+        assert!(screen.contains("Saturday, 2026-08-01"), "{screen}");
+        assert!(screen.contains("Loading entries…"), "{screen}");
+        assert!(!screen.contains("72h logged of 160h"), "{screen}");
+        assert!(!screen.contains("+4h current period"), "{screen}");
+        assert!(!screen.contains("Tuesday, 2026-07-14"), "{screen}");
     }
 
     #[test]
@@ -1483,7 +1687,8 @@ mod tests {
         assert!(screen.contains("No worklogs"));
         assert!(!screen.contains("No worklogs for Tuesday"));
         assert!(screen.contains("72h logged of 160h"));
-        assert!(screen.contains("1h 30m / 8h"));
+        assert!(screen.contains("Day summary: 1h 30m"));
+        assert!(!screen.contains("logged / required"));
     }
 
     #[test]

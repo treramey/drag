@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
@@ -23,11 +24,11 @@ use futures_util::FutureExt;
 use tempfile::TempDir;
 
 use super::{
-    normalize_jira_site, take_reusable_report, AbortOnDropTask, App, BrowserLauncher,
-    CachedListReport, Config, ConnectionOutcome, ConnectionVerifier, EnvironmentSetupPlan,
-    JiraCredentials, NoopBrowserLauncher, OnboardingFuture, OnboardingSession, OnboardingWorkflow,
-    RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
-    VerificationFuture, ATLASSIAN_TOKEN_URL,
+    debounce_list_fetch, normalize_jira_site, take_reusable_report, AbortOnDropTask, App,
+    BrowserLauncher, CachedListReport, Config, ConnectionOutcome, ConnectionVerifier,
+    EnvironmentSetupPlan, JiraCredentials, NoopBrowserLauncher, OnboardingFuture,
+    OnboardingSession, OnboardingWorkflow, RatatuiOnboardingSession, SecretInput, SetupCredentials,
+    SetupPrompter, TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::cli::{DoctorArgs, SetupArgs};
 use crate::list::ListReport;
@@ -135,6 +136,32 @@ async fn dropping_a_pending_task_aborts_its_join_handle() {
     })
     .await;
     assert!(cancelled.is_ok());
+}
+
+#[tokio::test]
+async fn list_fetch_debounce_does_not_poll_the_load_until_the_quiet_period_ends() {
+    let polled = Arc::new(AtomicBool::new(false));
+    let load_polled = Arc::clone(&polled);
+    let load = std::future::poll_fn(move |_| {
+        load_polled.store(true, Ordering::SeqCst);
+        std::task::Poll::Ready(())
+    });
+    let (release, quiet_period) = tokio::sync::oneshot::channel::<()>();
+    let quiet_period = async move {
+        let _ = quiet_period.await;
+    };
+    let debounced = debounce_list_fetch(quiet_period, load);
+    tokio::pin!(debounced);
+
+    tokio::select! {
+        () = &mut debounced => panic!("load completed before the quiet period"),
+        () = tokio::task::yield_now() => {}
+    }
+    assert!(!polled.load(Ordering::SeqCst));
+
+    assert!(release.send(()).is_ok());
+    debounced.await;
+    assert!(polled.load(Ordering::SeqCst));
 }
 
 #[test]

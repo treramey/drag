@@ -30,12 +30,14 @@ use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher,
 };
-use crate::tui_theme::{Palette, MUTED_COLOR, PRIMARY_COLOR, SUCCESS_COLOR};
+use crate::tui_theme::{
+    constrain_content_width, footer_divider, render_brand_header, Palette, MAX_CONTENT_WIDTH,
+    MUTED_COLOR, PRIMARY_COLOR, SUCCESS_COLOR,
+};
 use crate::CliError;
 
 const MIN_TERMINAL_WIDTH: u16 = 84;
 const MIN_TERMINAL_HEIGHT: u16 = 28;
-const MAX_CONTENT_WIDTH: u16 = 100;
 const MAX_FORM_WIDTH: u16 = 80;
 const SPACE_SM: u16 = 1;
 const SPACE_MD: u16 = 2;
@@ -47,7 +49,6 @@ const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 const ANIMATION_RNG_SEED: u32 = 0x4452_4147;
 const ENTRANCE_DURATION_MS: u32 = 240;
 const REDUCED_MOTION_DURATION_MS: u32 = 140;
-const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const REVIEW_CONNECTOR_FRAMES: [&str; 4] = ["•  ▶", "─• ▶", "──•▶", "──▶ "];
 const REVIEW_CONNECTOR_VERTICAL_FRAMES: [&str; 4] = ["·", "•", "▼", "▼"];
@@ -1378,22 +1379,8 @@ fn render(frame: &mut Frame<'_>, model: &OnboardingModel) -> Option<AnimatedArea
     })
 }
 
-fn constrain_content_width(area: Rect) -> Rect {
-    constrain_width(area, MAX_CONTENT_WIDTH)
-}
-
 fn constrain_width_left(area: Rect, maximum: u16) -> Rect {
     Rect::new(area.x, area.y, area.width.min(maximum), area.height)
-}
-
-fn constrain_width(area: Rect, maximum: u16) -> Rect {
-    let width = area.width.min(maximum);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y,
-        width,
-        area.height,
-    )
 }
 
 struct FormSpacing {
@@ -1453,6 +1440,7 @@ fn render_header(
     area: Rect,
     model: &OnboardingModel,
 ) -> HeaderAnimatedAreas {
+    render_brand_header(frame, area);
     let pending_symbol = model.pending_symbol();
     let stages = Line::from(vec![
         stage_span(
@@ -1476,26 +1464,9 @@ fn render_header(
             pending_symbol,
         ),
     ]);
-    let mut title = DRAG_ART
-        .iter()
-        .map(|line| Line::styled(*line, Palette::primary().bold()))
-        .collect::<Vec<_>>();
-    title.push(Line::default());
-    title.push(stages);
-    let title = Text::from(title);
-    frame.render_widget(Paragraph::new(title), area);
-    let version = format!("v{}", env!("CARGO_PKG_VERSION"));
-    let version_width = u16::try_from(version.len())
-        .unwrap_or(area.width)
-        .min(area.width);
     frame.render_widget(
-        Paragraph::new(version).style(Palette::muted()),
-        Rect::new(
-            area.right().saturating_sub(version_width),
-            area.y,
-            version_width,
-            1,
-        ),
+        Paragraph::new(stages),
+        Rect::new(area.x, area.y.saturating_add(3), area.width, 1),
     );
     let jira_width = u16::try_from("Jira account".len() + 2).unwrap_or(area.width);
     let tempo_width = u16::try_from("Tempo account".len() + 2).unwrap_or(area.width);
@@ -2128,10 +2099,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &OnboardingModel) {
         ratatui::text::Span::styled(" Esc ", Palette::muted().bold()),
         ratatui::text::Span::styled(format!("{escape_action}  "), Palette::muted()),
     ]);
-    let footer = Text::from(vec![
-        Line::styled("─".repeat(usize::from(area.width)), Palette::muted()),
-        Line::from(controls),
-    ]);
+    let footer = Text::from(vec![footer_divider(area.width), Line::from(controls)]);
     frame.render_widget(Paragraph::new(footer), area);
 }
 
@@ -2158,8 +2126,9 @@ mod tests {
     use super::{
         event_allowed_while_undersized, reduced_motion_value, test_backend_text, Action,
         BufferAnimation, ConnectionStatus, OnboardingEvent, OnboardingModel, Terminal, UiStage,
-        DRAG_ART, MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
+        MIN_TERMINAL_HEIGHT, MIN_TERMINAL_WIDTH,
     };
+    use crate::tui_theme::DRAG_ART;
 
     const fn inactive_animation() -> BufferAnimation {
         BufferAnimation {
