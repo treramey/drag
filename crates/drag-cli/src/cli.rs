@@ -87,6 +87,48 @@ pub enum Command {
     Tempo(TempoArgs),
     /// Inspect the CLI contract or a Tempo OpenAPI operation or type.
     Schema(SchemaArgs),
+    /// Generate portable AI agent skills from Drag and Tempo metadata.
+    GenerateSkills(GenerateSkillsArgs),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SkillScope {
+    Local,
+    Tempo,
+    All,
+}
+
+impl SkillScope {
+    pub(crate) const fn includes_local(self) -> bool {
+        matches!(self, Self::Local | Self::All)
+    }
+
+    pub(crate) const fn includes_tempo(self) -> bool {
+        matches!(self, Self::Tempo | Self::All)
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Tempo => "tempo",
+            Self::All => "all",
+        }
+    }
+}
+
+#[derive(Debug, Args)]
+pub struct GenerateSkillsArgs {
+    /// Relative directory where generated skill folders are written.
+    #[arg(long, value_name = "DIR", default_value = "skills")]
+    pub output_dir: PathBuf,
+
+    /// Generate repository-controlled skills, the live Tempo catalog, or both.
+    #[arg(long, value_enum, default_value_t = SkillScope::All)]
+    pub scope: SkillScope,
+
+    /// Replace existing skill directories and all files inside them.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Debug, Args)]

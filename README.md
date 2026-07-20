@@ -247,6 +247,10 @@ report.
 Press `q`, Escape, or Ctrl-C to close it. `--verbose`
 shows the focused worklog's description and Jira URL below the responsive
 table. Bounded reports label partial totals and empty retrieved segments.
+While the interactive report is open, Drag checks the latest stable GitHub
+release without blocking the interface. A newer version appears beneath the
+current version in the header; timeouts, offline use, and check failures stay
+silent.
 Redirected human output, explicit JSON, and NDJSON remain non-interactive so
 their existing fields and payloads are preserved.
 
@@ -361,6 +365,38 @@ its local-contract, Tempo component, and Tempo operation result variants.
 | `0` | Success |
 | `1` | Config, network, server, or I/O failure |
 | `2` | Invalid command, input, date, or duration |
+
+## AI agent skills
+
+Drag ships portable Agent Skills generated from the CLI contract and Tempo's
+official OpenAPI document. Install every skill from the repository:
+
+```bash
+npx skills add https://github.com/treramey/drag
+```
+
+Or install one task skill:
+
+```bash
+npx skills add https://github.com/treramey/drag/tree/main/skills/drag-log
+npx skills add https://github.com/treramey/drag/tree/main/skills/drag-tempo
+```
+
+The local skills document `log`, `list`, and `delete` directly from Drag's Clap
+and `drag schema` metadata. `drag-tempo` includes resource references generated
+from the live Tempo OpenAPI operation catalog. See the complete
+[skills index](docs/skills.md).
+
+Maintainers can regenerate repository-controlled skills without network access,
+refresh only Tempo's external catalog, or refresh both:
+
+```bash
+drag generate-skills --scope local --force
+drag generate-skills --scope tempo --force
+drag generate-skills --scope all --force
+```
+
+`--force` is required when replacing existing generated skill directories.
 
 ## Backward compatibility
 

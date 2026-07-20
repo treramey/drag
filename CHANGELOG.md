@@ -7,6 +7,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- A non-blocking update notification in the interactive list header when a
+  newer stable GitHub release is available, with silent offline failure.
 - JSON-first `schema` output in human terminals and dotted Tempo component
   lookup alongside operation lookup, while retaining Drag's full local CLI
   contract.

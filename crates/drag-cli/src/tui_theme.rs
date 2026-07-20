@@ -59,7 +59,11 @@ pub(crate) fn constrain_content_width(area: Rect) -> Rect {
     )
 }
 
-pub(crate) fn render_brand_header(frame: &mut Frame<'_>, area: Rect) {
+pub(crate) fn render_brand_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    available_update: Option<&str>,
+) {
     let title = DRAG_ART
         .iter()
         .map(|line| Line::styled(*line, Palette::primary().bold()))
@@ -84,6 +88,26 @@ pub(crate) fn render_brand_header(frame: &mut Frame<'_>, area: Rect) {
             area.right().saturating_sub(version_width),
             area.y,
             version_width,
+            1,
+        ),
+    );
+
+    let Some(available_update) = available_update.filter(|_| area.height >= 2) else {
+        return;
+    };
+    let update = format!("Update available: v{available_update}");
+    let update_width = u16::try_from(update.len())
+        .unwrap_or(area.width)
+        .min(area.width);
+    if area.width < logo_width.saturating_add(update_width).saturating_add(1) {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(update).style(Palette::success().bold()),
+        Rect::new(
+            area.right().saturating_sub(update_width),
+            area.y.saturating_add(1),
+            update_width,
             1,
         ),
     );

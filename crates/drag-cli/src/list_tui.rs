@@ -20,12 +20,13 @@ use ratatui::widgets::calendar::{CalendarEventStore, Monthly};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 use ratatui::{Frame, Terminal};
 use ratatui_braille_bar::BrailleSpinner;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::list::ListReport;
 use crate::output::escape_terminal_data;
 use crate::tui_theme::{constrain_content_width, footer_divider, render_brand_header, Palette};
+use crate::update;
 use crate::CliError;
 
 const DASHBOARD_CALENDAR_WIDTH: u16 = 30;
@@ -83,6 +84,7 @@ pub(crate) trait ListReportSession: Send + Sync {
 pub(crate) struct RatatuiListReportSession {
     browser_launcher: Box<dyn BrowserLauncher>,
     terminal: Mutex<Option<StderrTerminal>>,
+    available_update: OnceCell<Option<String>>,
 }
 
 impl RatatuiListReportSession {
@@ -90,6 +92,7 @@ impl RatatuiListReportSession {
         Self {
             browser_launcher: Box::new(SystemBrowserLauncher),
             terminal: Mutex::new(None),
+            available_update: OnceCell::new(),
         }
     }
 
@@ -100,6 +103,7 @@ impl RatatuiListReportSession {
         Self {
             browser_launcher: Box::new(browser_launcher),
             terminal: Mutex::new(None),
+            available_update: OnceCell::new(),
         }
     }
 }
@@ -116,6 +120,7 @@ struct ListReportModel<'a> {
     selected_date: chrono::NaiveDate,
     table_state: TableState,
     status: Option<String>,
+    available_update: Option<String>,
 }
 
 impl<'a> ListReportModel<'a> {
@@ -127,6 +132,7 @@ impl<'a> ListReportModel<'a> {
             selected_date: report.selected_date(),
             table_state,
             status: None,
+            available_update: None,
         }
     }
 
@@ -187,6 +193,7 @@ impl ListReportSession for RatatuiListReportSession {
             report,
             self.browser_launcher.as_ref(),
             &self.terminal,
+            &self.available_update,
         ))
     }
 
@@ -202,6 +209,7 @@ impl ListReportSession for RatatuiListReportSession {
             report,
             self.browser_launcher.as_ref(),
             &self.terminal,
+            &self.available_update,
         ))
     }
 }
@@ -212,6 +220,7 @@ async fn run_suspense(
     mut report: PendingListReportFuture<'_>,
     browser_launcher: &dyn BrowserLauncher,
     terminal_state: &Mutex<Option<StderrTerminal>>,
+    available_update: &OnceCell<Option<String>>,
 ) -> Result<ListReportSuspenseOutcome, CliError> {
     let mut terminal_state = terminal_state.lock().await;
     let terminal = terminal_state
@@ -220,6 +229,7 @@ async fn run_suspense(
     let mut events = EventStream::new();
     let mut ticks = tokio::time::interval(std::time::Duration::from_millis(80));
     let mut model = ListReportModel::loading(background, date);
+    model.available_update = available_update.get().cloned().flatten();
     loop {
         terminal
             .terminal
@@ -415,6 +425,7 @@ async fn run_terminal(
     report: &ListReport,
     browser_launcher: &dyn BrowserLauncher,
     terminal_state: &Mutex<Option<StderrTerminal>>,
+    available_update: &OnceCell<Option<String>>,
 ) -> Result<ListReportAction, CliError> {
     let mut terminal_state = terminal_state.lock().await;
     if terminal_state.is_none() {
@@ -425,9 +436,25 @@ async fn run_terminal(
         .ok_or_else(|| CliError::Io(io::Error::other("list terminal was not initialized")))?;
     let mut events = EventStream::new();
     let mut model = ListReportModel::new(report);
+    model.available_update = available_update.get().cloned().flatten();
+    let mut checking_for_update = available_update.get().is_none();
+    let update_check = available_update.get_or_init(update::available_version);
+    tokio::pin!(update_check);
     loop {
         terminal.terminal.draw(|frame| render(frame, &mut model))?;
-        let event = events.next().await.ok_or_else(|| {
+        let event = if checking_for_update {
+            tokio::select! {
+                version = &mut update_check => {
+                    model.available_update.clone_from(version);
+                    checking_for_update = false;
+                    continue;
+                }
+                event = events.next() => event,
+            }
+        } else {
+            events.next().await
+        };
+        let event = event.ok_or_else(|| {
             CliError::Io(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "terminal event stream ended",
@@ -488,7 +515,7 @@ fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
 fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
     let (header, report_area) = list_areas(frame.area());
     if header.height > 0 {
-        render_brand_header(frame, header);
+        render_brand_header(frame, header, model.available_update.as_deref());
     }
     let report = model.report;
     let pagination_height = u16::from(!report.pagination().totals_complete) * 2;
@@ -1445,6 +1472,22 @@ mod tests {
             line.contains(DRAG_ART[0]) && line.contains(concat!("v", env!("CARGO_PKG_VERSION")))
         }));
         assert!(lines.get(3).is_some_and(|line| line.contains(DRAG_ART[1])));
+    }
+
+    #[test]
+    fn list_report_places_an_available_update_below_the_current_version() {
+        let report = report(Vec::new(), true);
+        let mut model = ListReportModel::new(&report);
+        model.available_update = Some("0.6.0".to_owned());
+
+        let lines = screen_lines_with_size(&mut model, 100, 40);
+
+        assert!(lines
+            .get(2)
+            .is_some_and(|line| line.contains(concat!("v", env!("CARGO_PKG_VERSION")))));
+        assert!(lines
+            .get(3)
+            .is_some_and(|line| line.contains("Update available: v0.6.0")));
     }
 
     #[test]

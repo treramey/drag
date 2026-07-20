@@ -6,6 +6,7 @@ mod config;
 mod delete;
 mod doctor;
 mod error;
+mod generate_skills;
 mod list;
 mod list_tui;
 mod log;
@@ -16,6 +17,7 @@ mod setup_tui;
 mod tempo_openapi;
 mod transport;
 mod tui_theme;
+mod update;
 
 use std::ffi::OsString;
 use std::io;
@@ -75,6 +77,9 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
             "NDJSON output is supported only for list".to_owned(),
         ));
     }
+    if let Command::GenerateSkills(args) = &cli.command {
+        return generate_skills::run(args).await.map(RunResult::Rendered);
+    }
     let timezone = default_timezone(cli.timezone.as_deref())?;
     let path = cli.config.unwrap_or(config::config_path()?);
     let debug = request_debug_enabled(cli.debug, mode);
@@ -99,6 +104,11 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
             }
         }
         Command::Schema(args) => schema::run(args).await?,
+        Command::GenerateSkills(_) => {
+            return Err(CliError::InvalidInput(
+                "skill generation dispatch failed".to_owned(),
+            ));
+        }
     };
     Ok(RunResult::Rendered(rendered))
 }
