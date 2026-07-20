@@ -1,5 +1,17 @@
 # @treramey/drag
 
+## 0.4.0
+
+### Minor Changes
+
+- 26349ac: Open completed non-verbose human list reports in Ratatui when all terminal streams are attached, while qualifying partial segments and preserving verbose, redirected, and structured output.
+- d9e0d0d: Add focused-row navigation, scrolling, responsive columns, and verbose worklog details to the interactive list report.
+- e275798: Open the focused interactive list worklog's resolved Jira URL with `o` and keep the report usable after browser success or failure.
+
+### Patch Changes
+
+- 892ece3: Build list presentations from one shared immutable report model while preserving existing output.
+
 ## 0.3.0
 
 ### Minor Changes
