@@ -1,5 +1,18 @@
 # @treramey/drag
 
+## 0.6.0
+
+### Minor Changes
+
+- 7c0f785: Generate installable AI agent skills from Drag's command contract and Tempo's live OpenAPI catalog.
+- a92fd56: Remove issue-key alias commands, persisted aliases, alias resolution, and alias-aware list labels; log JSON now uses `issueKey`.
+- a92fd56: Remove the `completions` command and its `autocomplete` alias.
+- d62c23a: Print schema JSON directly in human terminals and inspect dotted Tempo component schemas as well as operations.
+
+### Patch Changes
+
+- a92fd56: Show generated Tempo command help successfully when no resource is supplied.
+
 ## 0.5.0
 
 ### Minor Changes
