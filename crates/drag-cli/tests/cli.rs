@@ -198,6 +198,33 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
 }
 
 #[test]
+fn equivalent_default_skill_output_path_also_generates_the_index(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args([
+            "--output",
+            "json",
+            "generate-skills",
+            "--scope",
+            "local",
+            "--output-dir",
+            "./skills",
+        ])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.path().join("docs/skills.md").is_file());
+    Ok(())
+}
+
+#[test]
 fn skill_generation_requires_force_before_replacing_existing_directories(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
