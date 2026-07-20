@@ -472,25 +472,6 @@ fn log_dry_run_parses_without_network_access() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
-fn malformed_log_attributes_fail_before_configuration_or_network_access(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
-    let missing = directory.path().join("missing.json");
-    let output = command(&missing)?
-        .args(["log", "ABC-1", "1h", "--attribute", "_Worktype_"])
-        .output()?;
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let body: Value = serde_json::from_slice(&output.stderr)?;
-    assert_eq!(body["error"]["code"], "invalid_input");
-    assert!(body["error"]["message"]
-        .as_str()
-        .is_some_and(|message| message.contains("KEY=VALUE")));
-    Ok(())
-}
-
-#[test]
 fn log_and_alias_produce_equivalent_positional_dot_interval_previews(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
@@ -525,7 +506,7 @@ fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn
 {
     let directory = TempDir::new()?;
     let path = configured_file(&directory)?;
-    let raw = r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m","when":"2020-02-28","description":"review with team","start":"9:30","remainingEstimate":"2h","attributes":[{"key":"_Worktype_","value":"Development"},{"key":"_Test_","value":"RD"}]}"#;
+    let raw = r#"{"issueKeyOrAlias":"ABC-1","durationOrInterval":"30m","when":"2020-02-28","description":"review with team","start":"9:30","remainingEstimate":"2h"}"#;
     let positional = command(&path)?
         .args([
             "log",
@@ -538,10 +519,6 @@ fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn
             "9:30",
             "--remaining-estimate",
             "2h",
-            "--attribute",
-            "_Worktype_=Development",
-            "--attribute",
-            "_Test_=RD",
             "--dry-run",
         ])
         .output()?;
@@ -562,12 +539,6 @@ fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn
     let inline: Value = serde_json::from_slice(&inline.stdout)?;
     let stdin: Value = serde_json::from_slice(&stdin.stdout)?;
     assert_eq!(stdin["ok"], true);
-    assert_eq!(
-        positional["data"]["request"]["attributes"]
-            .as_array()
-            .map(Vec::len),
-        Some(2)
-    );
     assert_eq!(inline["data"], positional["data"]);
     assert_eq!(stdin["data"], positional["data"]);
     Ok(())
@@ -822,7 +793,6 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         json_input["conflictsWith"],
         serde_json::json!([
-            "attributes",
             "description",
             "durationOrInterval",
             "issueKeyOrAlias",
@@ -1192,6 +1162,15 @@ paths:
               properties:
                 issueId: {type: integer}
                 timeSpentSeconds: {type: integer}
+                attributes:
+                  type: array
+                  items:
+                    type: object
+                    required: [key, value]
+                    additionalProperties: false
+                    properties:
+                      key: {type: string}
+                      value: {type: string}
       responses:
         "200": {description: SUCCESS}
 components: {schemas: {}}
@@ -1229,7 +1208,7 @@ components: {schemas: {}}
             "worklogs",
             "create",
             "--json",
-            r#"{"issueId":10001,"timeSpentSeconds":3600}"#,
+            r#"{"issueId":10001,"timeSpentSeconds":3600,"attributes":[{"key":"_Test_","value":"PS"},{"key":"_PSTYPE_","value":"Consulting"}]}"#,
             "--dry-run",
         ])
         .output()?;
@@ -1241,7 +1220,14 @@ components: {schemas: {}}
     assert_eq!(mutation["data"]["method"], "POST");
     assert_eq!(
         mutation["data"]["body"],
-        serde_json::json!({"issueId": 10001, "timeSpentSeconds": 3600})
+        serde_json::json!({
+            "issueId": 10001,
+            "timeSpentSeconds": 3600,
+            "attributes": [
+                {"key": "_Test_", "value": "PS"},
+                {"key": "_PSTYPE_", "value": "Consulting"}
+            ]
+        })
     );
 
     let help = command(&config)?

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
-use drag::models::{AddWorklogRequest, WorkAttributeValue, Worklog, WorklogEntity};
+use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
 use drag::time::{
     clock_interval, format_duration, parse_clock, parse_duration_or_interval, select_date,
 };
@@ -126,7 +126,6 @@ fn build_log_request(
         description: input.description.clone(),
         remaining_estimate_seconds,
         author_account_id: Some(credentials.account_id.clone()),
-        attributes: input.attributes.clone(),
     })
 }
 
@@ -157,33 +156,11 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
             description: args.description,
             start: args.start,
             remaining_estimate: args.remaining_estimate,
-            attributes: args
-                .attributes
-                .iter()
-                .map(|attribute| parse_work_attribute(attribute))
-                .collect::<Result<Vec<_>, _>>()?,
         }
     };
     Ok(ResolvedLogInput {
         value,
         dry_run: args.dry_run,
-    })
-}
-
-fn parse_work_attribute(raw: &str) -> Result<WorkAttributeValue, CliError> {
-    let (key, value) = raw.split_once('=').ok_or_else(|| {
-        CliError::InvalidInput("work attributes must use KEY=VALUE form".to_owned())
-    })?;
-    let key = key.trim();
-    let value = value.trim();
-    if key.is_empty() || value.is_empty() {
-        return Err(CliError::InvalidInput(
-            "work attribute keys and values cannot be empty".to_owned(),
-        ));
-    }
-    Ok(WorkAttributeValue {
-        key: key.to_owned(),
-        value: value.to_owned(),
     })
 }
 
@@ -341,7 +318,6 @@ mod tests {
             description: None,
             start: None,
             remaining_estimate: None,
-            attributes: Vec::new(),
             json: None,
             dry_run: false,
         }
@@ -400,7 +376,6 @@ mod tests {
                 description: Some("review".to_owned()),
                 start: None,
                 remaining_estimate: Some("2h".to_owned()),
-                attributes: vec!["_Worktype_=Development".to_owned()],
                 json: None,
                 dry_run: false,
             },
@@ -423,10 +398,6 @@ mod tests {
                     description: Some("review".to_owned()),
                     remaining_estimate_seconds: Some(7_200),
                     author_account_id: Some("account-1".to_owned()),
-                    attributes: vec![WorkAttributeValue {
-                        key: "_Worktype_".to_owned(),
-                        value: "Development".to_owned(),
-                    }],
                 }),
             ]
         );
@@ -463,16 +434,6 @@ mod tests {
             description: Some("review".to_owned()),
             remaining_estimate_seconds: Some(7_200),
             author_account_id: Some("account-1".to_owned()),
-            attributes: vec![
-                WorkAttributeValue {
-                    key: "_Worktype_".to_owned(),
-                    value: "Development".to_owned(),
-                },
-                WorkAttributeValue {
-                    key: "_Test_".to_owned(),
-                    value: "RD".to_owned(),
-                },
-            ],
         };
 
         Mock::given(method("GET"))
@@ -517,7 +478,6 @@ mod tests {
                 description: Some("review".to_owned()),
                 start: Some("9:15".to_owned()),
                 remaining_estimate: Some("2h".to_owned()),
-                attributes: vec!["_Worktype_=Development".to_owned(), "_Test_=RD".to_owned()],
                 json: None,
                 dry_run: false,
             },

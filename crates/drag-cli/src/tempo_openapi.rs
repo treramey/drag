@@ -1020,7 +1020,11 @@ components: {schemas: {}}
         let server = MockServer::start().await;
         let body = serde_json::json!({
             "issueId": 10001,
-            "timeSpentSeconds": 3600
+            "timeSpentSeconds": 3600,
+            "attributes": [
+                {"key": "_Test_", "value": "PS"},
+                {"key": "_PSTYPE_", "value": "Consulting"}
+            ]
         });
         Mock::given(method("POST"))
             .and(path("/4/worklogs"))
@@ -1050,6 +1054,15 @@ paths:
               properties:
                 issueId: {type: integer}
                 timeSpentSeconds: {type: integer}
+                attributes:
+                  type: array
+                  items:
+                    type: object
+                    required: [key, value]
+                    additionalProperties: false
+                    properties:
+                      key: {type: string}
+                      value: {type: string}
 components: {schemas: {}}
 "#,
         )?;

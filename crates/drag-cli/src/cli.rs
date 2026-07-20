@@ -50,7 +50,7 @@ pub enum Command {
     /// supplied; intervals include their own start time.
     #[command(
         visible_alias = "l",
-        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log ABC-123 1h -d \"test\" --attribute _Worktype_=Development --attribute _Test_=RD\n  drag log --json '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' --dry-run\n  printf '%s' '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
+        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log --json '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' --dry-run\n  printf '%s' '{\"issueKeyOrAlias\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
     )]
     Log(LogArgs),
     /// List worklogs for a date without changing Jira or Tempo.
@@ -152,11 +152,8 @@ pub struct LogArgs {
     /// Remaining estimate as a duration, such as 2h.
     #[arg(short = 'r', long)]
     pub remaining_estimate: Option<String>,
-    /// Tempo work attribute in KEY=VALUE form; repeat for multiple attributes.
-    #[arg(long = "attribute", value_name = "KEY=VALUE")]
-    pub attributes: Vec<String>,
     /// Raw input JSON, or '-' to read it from stdin.
-    #[arg(long, conflicts_with_all = ["issue_key_or_alias", "duration_or_interval", "when", "description", "start", "remaining_estimate", "attributes"])]
+    #[arg(long, conflicts_with_all = ["issue_key_or_alias", "duration_or_interval", "when", "description", "start", "remaining_estimate"])]
     pub json: Option<String>,
     /// Validate and print the Tempo request without sending it.
     #[arg(long)]
@@ -176,8 +173,6 @@ pub struct LogInput {
     pub start: Option<String>,
     #[serde(default)]
     pub remaining_estimate: Option<String>,
-    #[serde(default)]
-    pub attributes: Vec<drag::models::WorkAttributeValue>,
 }
 
 #[derive(Debug, Clone, Args, Default)]

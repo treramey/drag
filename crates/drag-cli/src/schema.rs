@@ -592,12 +592,6 @@ fn command_behavior(path: &str) -> Value {
     match path {
         "log" => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
-            "workAttributes": {
-                "option": "attribute",
-                "syntax": "KEY=VALUE",
-                "repeatable": true,
-                "jsonShape": [{"key": "_Worktype_", "value": "Development"}]
-            },
             "durationOrInterval": {
                 "durationSyntax": ["15m", "1h", "1h15m"],
                 "intervalSyntax": ["11-14", "11-14:30", "11:35-14:20", "11.35-14.20"],
@@ -1182,13 +1176,7 @@ mod tests {
             input_schema["required"],
             serde_json::json!(["issueKeyOrAlias", "durationOrInterval"])
         );
-        for field in [
-            "when",
-            "description",
-            "start",
-            "remainingEstimate",
-            "attributes",
-        ] {
+        for field in ["when", "description", "start", "remainingEstimate"] {
             assert!(
                 input_schema["properties"][field].is_object(),
                 "missing {field}"

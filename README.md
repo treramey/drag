@@ -155,7 +155,6 @@ drag log ABC-123 1h15m
 drag l ABC-123 11:35-14:20 yesterday -d "review"
 drag log ABC-123 11.35-14.20 2026-07-14
 drag log lunch 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h
-drag log ABC-123 1h -d "test" --attribute _Worktype_=Development --attribute _Test_=RD
 drag log lunch 30m --start 12:00 --dry-run
 ```
 
@@ -170,10 +169,7 @@ as the following local day.
 `--start`/`-s` sets the start in `HH:mm` form. Without it, today's worklog uses
 the current local time; a selected date uses the start of that day.
 `--description`/`-d` adds worklog text, and `--remaining-estimate`/`-r` accepts
-a duration such as `2h`. Repeat `--attribute KEY=VALUE` to attach Tempo work
-attributes. Use the underscore-delimited keys returned by Tempo (for example
-`_Worktype_`), not their display labels. Raw JSON accepts the API-compatible
-`attributes: [{"key":"...","value":"..."}]` shape.
+a duration such as `2h`.
 
 Live logging reads Jira once to resolve the issue ID, then creates one Tempo
 worklog. Drag does not retry the create request automatically. Use `--dry-run`
@@ -221,16 +217,15 @@ Tempo schemas come only from
 the platform cache directory. `DRAG_CACHE_DIR` overrides that location for
 isolated automation.
 
-Read-only Tempo API commands are generated from that same OpenAPI document at
-runtime. Resource names come from OpenAPI tags, canonical methods come from
-operation IDs, and short aliases such as `list` are added only when they are
-unambiguous:
+Tempo API commands are generated from that same OpenAPI document at runtime.
+Resource names come from OpenAPI tags, canonical methods come from operation
+IDs, and short aliases such as `list` are added only when they are unambiguous:
 
 ```bash
 drag tempo --help
 drag tempo work-attributes list --params '{"limit":25}' --dry-run
 drag --output json tempo work-attributes list --params '{"limit":25}'
-drag tempo worklogs create --json '{"authorAccountId":"...","issueId":10001,"startDate":"2026-01-01","timeSpentSeconds":3600}' --dry-run
+drag tempo worklogs create --json '{"authorAccountId":"...","issueId":10001,"startDate":"2026-01-01","timeSpentSeconds":3600,"attributes":[{"key":"_Test_","value":"PS"},{"key":"_Worktype_","value":"Development"},{"key":"_PSTYPE_","value":"Consulting"}]}' --dry-run
 ```
 
 `--params` must be a JSON object containing only path and query parameters

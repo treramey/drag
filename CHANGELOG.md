@@ -13,8 +13,6 @@ This project follows [Semantic Versioning](https://semver.org/) and
   resources, operation-ID methods, unambiguous friendly aliases, typed JSON
   parameters and request bodies, dynamic help, authenticated execution, and
   network-safe dry-run previews; mutations retain the no-retry policy.
-- Tempo work attributes on `log` through repeatable `--attribute KEY=VALUE`
-  options and the equivalent typed raw-JSON array.
 - Interactive Ratatui list reports for fully attached human terminals, with
   qualified partial totals, populated and empty worklog views, focused-row
   keyboard navigation and scrolling, selected-month calendar context with

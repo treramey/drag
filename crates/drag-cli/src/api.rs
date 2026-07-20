@@ -646,7 +646,6 @@ mod tests {
             description: Some("review".to_owned()),
             remaining_estimate_seconds: Some(7_200),
             author_account_id: None,
-            attributes: Vec::new(),
         }
     }
 
