@@ -103,7 +103,7 @@ impl RatatuiListReportSession {
         Self {
             browser_launcher: Box::new(browser_launcher),
             terminal: Mutex::new(None),
-            available_update: OnceCell::new(),
+            available_update: OnceCell::new_with(None),
         }
     }
 }
@@ -444,12 +444,13 @@ async fn run_terminal(
         terminal.terminal.draw(|frame| render(frame, &mut model))?;
         let event = if checking_for_update {
             tokio::select! {
+                biased;
+                event = events.next() => event,
                 version = &mut update_check => {
                     model.available_update.clone_from(version);
                     checking_for_update = false;
                     continue;
                 }
-                event = events.next() => event,
             }
         } else {
             events.next().await
