@@ -89,6 +89,37 @@ components:
     )
 }
 
+fn cache_skill_tempo_openapi(cache: &std::path::Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(cache)?;
+    fs::write(
+        cache.join("tempo-openapi.yaml"),
+        r#"openapi: 3.0.3
+info:
+  title: Tempo API
+  version: "4"
+paths:
+  /4/worklogs:
+    get:
+      operationId: getWorklogs
+      summary: List Worklogs
+      tags: [Worklogs]
+      responses:
+        "200": {description: SUCCESS}
+    post:
+      operationId: createWorklog
+      summary: Create Worklog
+      tags: [Worklogs]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: SUCCESS}
+components: {schemas: {}}
+"#,
+    )
+}
+
 fn list_continuation(
     selected_date: &str,
     month_start: &str,
@@ -118,6 +149,231 @@ fn reports_version() -> Result<(), Box<dyn std::error::Error>> {
         .arg("--version")
         .assert()
         .success();
+    Ok(())
+}
+
+#[test]
+fn local_skill_generation_is_configuration_free_deterministic_and_safe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let run = || -> Result<std::process::Output, Box<dyn std::error::Error>> {
+        Ok(Command::cargo_bin("drag")?
+            .current_dir(directory.path())
+            .args([
+                "--output",
+                "json",
+                "generate-skills",
+                "--scope",
+                "local",
+                "--force",
+            ])
+            .output()?)
+    };
+
+    let first = run()?;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let body: Value = serde_json::from_slice(&first.stdout)?;
+    assert_eq!(body["data"]["scope"], "local");
+    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(4));
+
+    let log_path = directory.path().join("skills/drag-log/SKILL.md");
+    let delete_path = directory.path().join("skills/drag-delete/SKILL.md");
+    let first_log = fs::read_to_string(&log_path)?;
+    assert!(first_log.contains("explicitly authorizes creating the worklog"));
+    assert!(first_log.contains("--dry-run"));
+    let delete = fs::read_to_string(delete_path)?;
+    assert!(delete.contains("permanently removes Tempo worklogs"));
+    let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
+    assert!(!index.contains("drag-tempo"));
+    assert!(!first_log.contains("../drag/SKILL.md"));
+
+    let second = run()?;
+    assert!(second.status.success());
+    assert_eq!(fs::read_to_string(log_path)?, first_log);
+    Ok(())
+}
+
+#[test]
+fn skill_generation_requires_force_before_replacing_existing_directories(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let skill_dir = directory.path().join("skills/drag-log");
+    fs::create_dir_all(&skill_dir)?;
+    let custom_file = skill_dir.join("notes.md");
+    fs::write(&custom_file, "keep me")?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args(["--output", "json", "generate-skills", "--scope", "local"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read_to_string(custom_file)?, "keep me");
+    Ok(())
+}
+
+#[test]
+fn skill_generation_requires_force_before_replacing_an_existing_index(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let docs = directory.path().join("docs");
+    fs::create_dir(&docs)?;
+    let index = docs.join("skills.md");
+    fs::write(&index, "unrelated documentation")?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args(["--output", "json", "generate-skills", "--scope", "local"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read_to_string(index)?, "unrelated documentation");
+    assert!(!directory.path().join("skills").exists());
+    Ok(())
+}
+
+#[test]
+fn invalid_index_destination_preserves_existing_skills() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let skill_dir = directory.path().join("skills/drag-log");
+    fs::create_dir_all(&skill_dir)?;
+    let skill_file = skill_dir.join("SKILL.md");
+    fs::write(&skill_file, "existing skill")?;
+    fs::create_dir_all(directory.path().join("docs/skills.md"))?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args([
+            "--output",
+            "json",
+            "generate-skills",
+            "--scope",
+            "local",
+            "--force",
+        ])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read_to_string(skill_file)?, "existing skill");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn skill_generation_rejects_a_symlinked_index_destination() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::fs::symlink;
+
+    let directory = TempDir::new()?;
+    let outside = directory.path().join("outside.md");
+    fs::write(&outside, "outside")?;
+    fs::create_dir(directory.path().join("docs"))?;
+    symlink(&outside, directory.path().join("docs/skills.md"))?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args(["--output", "json", "generate-skills", "--scope", "local"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(fs::read_to_string(outside)?, "outside");
+    Ok(())
+}
+
+#[test]
+fn skill_generation_rejects_output_paths_outside_the_working_directory(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .args([
+            "--output",
+            "json",
+            "generate-skills",
+            "--scope",
+            "local",
+            "--output-dir",
+            "../outside",
+        ])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(!directory
+        .path()
+        .parent()
+        .ok_or("missing parent")?
+        .join("outside")
+        .exists());
+    Ok(())
+}
+
+#[test]
+fn tempo_skill_generation_materializes_the_cached_live_command_shape(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let cache = directory.path().join("cache");
+    cache_skill_tempo_openapi(&cache)?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .env("DRAG_CACHE_DIR", &cache)
+        .args(["--output", "json", "generate-skills", "--scope", "tempo"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let skill = fs::read_to_string(directory.path().join("skills/drag-tempo/SKILL.md"))?;
+    let resource = fs::read_to_string(
+        directory
+            .path()
+            .join("skills/drag-tempo/references/worklogs.md"),
+    )?;
+    assert!(skill.contains("official Tempo OpenAPI 3.0.3"));
+    assert!(skill.contains("references/worklogs.md"));
+    assert!(!skill.contains("../drag/SKILL.md"));
+    assert!(resource.contains("drag tempo worklogs get-worklogs"));
+    assert!(resource.contains("drag tempo worklogs create-worklog"));
+    assert!(resource.contains("`POST`"));
+    let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
+    assert!(index.contains("drag-tempo"));
+    assert!(!index.contains("drag-log"));
+    Ok(())
+}
+
+#[test]
+fn failed_tempo_discovery_preserves_the_existing_generated_catalog(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let cache = directory.path().join("cache");
+    fs::create_dir_all(&cache)?;
+    fs::write(
+        cache.join("tempo-openapi.yaml"),
+        "openapi: 3.0.3\npaths: not-an-object\n",
+    )?;
+    let skill_dir = directory.path().join("skills/drag-tempo");
+    fs::create_dir_all(&skill_dir)?;
+    let skill_path = skill_dir.join("SKILL.md");
+    fs::write(&skill_path, "existing catalog")?;
+
+    let output = Command::cargo_bin("drag")?
+        .current_dir(directory.path())
+        .env("DRAG_CACHE_DIR", &cache)
+        .args(["--output", "json", "generate-skills", "--scope", "tempo"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(1));
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "api_error");
+    assert_eq!(fs::read_to_string(skill_path)?, "existing catalog");
     Ok(())
 }
 
@@ -457,7 +713,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 4);
+    assert_eq!(contract["schemaVersion"], 5);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -689,7 +945,16 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(interactive["browser"]["remoteMutation"], false);
     assert_eq!(
         contract["commands"]["list"]["networkAccess"]["interactive"],
-        serde_json::json!({"browser": "may-open", "jira": "read", "tempo": "read"})
+        serde_json::json!({"browser": "may-open", "github": "read", "jira": "read", "tempo": "read"})
+    );
+    assert_eq!(
+        interactive["updateCheck"],
+        serde_json::json!({
+            "source": "latestStableGitHubRelease",
+            "timing": "nonBlocking",
+            "failure": "silent",
+            "display": "brandHeaderWhenNewer"
+        })
     );
     assert_eq!(
         contract["commands"]["list"]["behavior"]["automation"],

@@ -41,6 +41,8 @@ several peer submodules rather than a single implementation file.
   decoding.
 - `drag_cli::transport`: shared HTTP client policy and bounded retries for
   idempotent reads.
+- `drag_cli::update`: best-effort, time-bounded latest-release discovery for
+  the interactive list header; failures never affect command success.
 - `drag_cli::doctor`: local diagnostics and optional remote connection checks.
 - `drag_cli::error`: typed process and remote-service failures.
 - `drag_cli::output`: JSON envelopes, stream selection, and terminal-safe text.
@@ -56,6 +58,9 @@ several peer submodules rather than a single implementation file.
   entered.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
   metadata and schemars schemas for shared serde input and result models.
+- `drag_cli::generate_skills`: deterministic local Agent Skill rendering from
+  the machine contract plus progressively disclosed Tempo resource references
+  from the official OpenAPI operation catalog.
 - `drag_cli::tempo_openapi`: fixed-origin Tempo OpenAPI discovery, bounded YAML
   parsing, 24-hour ETag-aware caching, dotted operation lookup, local
   component-reference resolution, generated read-only command trees, and

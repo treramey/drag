@@ -39,6 +39,23 @@ struct OperationDescriptor {
     definition: Value,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SkillOperation {
+    pub(crate) resource: String,
+    pub(crate) method: String,
+    pub(crate) friendly_alias: Option<String>,
+    pub(crate) operation_id: String,
+    pub(crate) http_method: String,
+    pub(crate) summary: String,
+    pub(crate) has_request_body: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SkillCatalog {
+    pub(crate) openapi_version: String,
+    pub(crate) operations: Vec<SkillOperation>,
+}
+
 struct PreparedRequest {
     operation_id: String,
     method: String,
@@ -49,6 +66,37 @@ struct PreparedRequest {
 pub(crate) enum CommandOutput {
     Rendered(Rendered),
     Plain(String),
+}
+
+pub(crate) async fn skill_catalog() -> Result<SkillCatalog, CliError> {
+    let loaded = load_document().await?;
+    let openapi_version = loaded
+        .value
+        .get("openapi")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CliError::Api("Tempo OpenAPI document has no version".to_owned()))?
+        .to_owned();
+    let operations = executable_operations(&loaded.value)?
+        .into_iter()
+        .map(|operation| SkillOperation {
+            resource: operation.resource,
+            method: operation.method,
+            friendly_alias: operation.friendly_alias,
+            operation_id: operation.operation_id,
+            http_method: operation.http_method,
+            summary: operation
+                .definition
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or("No summary provided")
+                .to_owned(),
+            has_request_body: operation.definition.get("requestBody").is_some(),
+        })
+        .collect();
+    Ok(SkillCatalog {
+        openapi_version,
+        operations,
+    })
 }
 
 pub(crate) async fn run_command(

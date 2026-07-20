@@ -1438,7 +1438,7 @@ fn render_header(
     area: Rect,
     model: &OnboardingModel,
 ) -> HeaderAnimatedAreas {
-    render_brand_header(frame, area);
+    render_brand_header(frame, area, None);
     let pending_symbol = model.pending_symbol();
     let stages = Line::from(vec![
         stage_span(

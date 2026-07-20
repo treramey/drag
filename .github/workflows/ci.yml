@@ -44,6 +44,47 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  skills:
+    name: Agent Skills
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Verify repository-controlled skills
+        run: |
+          cargo run --locked -- generate-skills --scope local --force
+          git diff --exit-code -- \
+            skills/drag \
+            skills/drag-log \
+            skills/drag-list \
+            skills/drag-delete \
+            docs/skills.md
+
+      - name: Check the external Tempo catalog
+        env:
+          DRAG_CACHE_DIR: ${{ runner.temp }}/drag-openapi
+        run: |
+          if cargo run --locked -- generate-skills --scope tempo --force; then
+            if ! git diff --quiet -- skills/drag-tempo; then
+              echo "::warning::Tempo's OpenAPI catalog changed; the scheduled synchronization workflow will open a PR."
+            fi
+          else
+            echo "::warning::Tempo's OpenAPI catalog could not be checked; external availability does not block CI."
+          fi
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Validate generated skills
+        run: |
+          failed=0
+          for skill_dir in skills/*/; do
+            if ! uvx --from skills-ref@0.1.1 agentskills validate "$skill_dir"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+
   dependencies:
     name: Dependencies and licenses
     runs-on: ubuntu-latest

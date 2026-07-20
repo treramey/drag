@@ -1,0 +1,103 @@
+name: Generate Skills
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+  push:
+    branches-ignore:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/drag-cli/Cargo.toml"
+      - "crates/drag-cli/src/cli.rs"
+      - "crates/drag-cli/src/generate_skills.rs"
+      - "crates/drag-cli/src/schema.rs"
+      - "crates/drag-cli/src/tempo_openapi.rs"
+      - ".github/workflows/generate-skills.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: generate-skills-${{ github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  generate:
+    name: Generate and publish skills
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref_name || 'main' }}
+          token: ${{ secrets.RELEASE_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Generate local skills for branch changes
+        if: github.event_name == 'push'
+        run: cargo run --locked -- generate-skills --scope local --force
+
+      - name: Generate all skills for main synchronization
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          DRAG_CACHE_DIR: ${{ runner.temp }}/drag-openapi
+        run: cargo run --locked -- generate-skills --scope all --force
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+      - name: Validate generated skills
+        run: |
+          failed=0
+          for skill_dir in skills/*/; do
+            if ! uvx --from skills-ref@0.1.1 agentskills validate "$skill_dir"; then
+              failed=1
+            fi
+          done
+          exit "$failed"
+
+      - name: Check for changes
+        id: diff
+        shell: bash
+        run: |
+          if git diff --quiet -- skills/ docs/skills.md; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create or update main synchronization PR
+        if: >-
+          steps.diff.outputs.changed == 'true' &&
+          (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        uses: peter-evans/create-pull-request@22a9089034f40e5a961c8808d113e2c98fb63676 # v7
+        with:
+          token: ${{ secrets.RELEASE_TOKEN }}
+          branch: chore/sync-agent-skills
+          title: "chore: sync generated agent skills"
+          body: |
+            Synchronize Drag's generated Agent Skills with the current CLI
+            contract and official Tempo OpenAPI operation catalog.
+
+            Created by the **Generate Skills** workflow.
+          commit-message: "chore: regenerate agent skills"
+          add-paths: |
+            skills/
+            docs/skills.md
+          delete-branch: true
+
+      - name: Commit branch skill changes directly
+        if: steps.diff.outputs.changed == 'true' && github.event_name == 'push'
+        shell: bash
+        run: |
+          git config user.name "drag-release-bot"
+          git config user.email "drag-release-bot@users.noreply.github.com"
+          git add skills/drag skills/drag-log skills/drag-list skills/drag-delete docs/skills.md
+          git commit -m "chore: regenerate local agent skills"
+          git push

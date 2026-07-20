@@ -10,7 +10,7 @@ use crate::error::CliError;
 use crate::output::Rendered;
 use crate::tempo_openapi;
 
-const SCHEMA_VERSION: u64 = 4;
+const SCHEMA_VERSION: u64 = 5;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -293,7 +293,9 @@ fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'st
         || (path == "list" && matches!(argument.get_id().as_str(), "limit" | "page_limit"))
     {
         "unsignedInteger"
-    } else if argument.get_id() == "config" {
+    } else if argument.get_id() == "config"
+        || (path == "generate-skills" && argument.get_id() == "output_dir")
+    {
         "path"
     } else if !possible_values.is_empty() {
         "enum"
@@ -420,7 +422,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
             }),
             network_access: json!({
                 "default": {"jira": "read", "tempo": "read"},
-                "interactive": {"browser": "may-open", "jira": "read", "tempo": "read"}
+                "interactive": {"browser": "may-open", "github": "read", "jira": "read", "tempo": "read"}
             }),
             dry_run: unsupported_dry_run(),
         },
@@ -528,6 +530,24 @@ fn command_semantics(path: &str) -> CommandSemantics {
             }),
             dry_run: unsupported_dry_run(),
         },
+        "generate-skills" => CommandSemantics {
+            success: object_schema(
+                &["outputDir", "scope", "skills"],
+                json!({
+                    "outputDir": {"type": "string"},
+                    "scope": {"type": "string", "enum": ["local", "tempo", "all"]},
+                    "skills": {"type": "array", "items": {"type": "string"}}
+                }),
+            ),
+            error_codes: [local_errors, vec!["api_error", "http_error"]].concat(),
+            side_effects: json!({"default": ["writeGeneratedSkillFiles"]}),
+            network_access: json!({
+                "local": {},
+                "tempo": {"tempoOpenApi": "readOrCache"},
+                "all": {"tempoOpenApi": "readOrCache"}
+            }),
+            dry_run: unsupported_dry_run(),
+        },
         _ => CommandSemantics {
             success: Value::Null,
             error_codes: local_errors,
@@ -550,6 +570,14 @@ fn command_behavior(path: &str) -> Value {
         });
     }
     match path {
+        "generate-skills" => json!({
+            "sourceOfTruth": {
+                "local": "clapAndDragSchema",
+                "tempo": "officialTempoOpenApi"
+            },
+            "failure": "renderBeforeWrite; Tempo discovery failure leaves generated files unchanged",
+            "outputDirectory": "relativePathWithinCurrentWorkingDirectory"
+        }),
         "log" => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
             "durationOrInterval": {
@@ -583,6 +611,12 @@ fn command_behavior(path: &str) -> Value {
                     "additionalApiRequestByDrag": false,
                     "remoteMutation": false,
                     "failure": "recoverableRedactedStatus"
+                },
+                "updateCheck": {
+                    "source": "latestStableGitHubRelease",
+                    "timing": "nonBlocking",
+                    "failure": "silent",
+                    "display": "brandHeaderWhenNewer"
                 }
             },
             "automation": {
