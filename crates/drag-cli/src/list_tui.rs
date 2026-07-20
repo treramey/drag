@@ -93,7 +93,7 @@ impl RatatuiListReportSession {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn terminal_with_browser_launcher(
         browser_launcher: impl BrowserLauncher + 'static,
     ) -> Self {
