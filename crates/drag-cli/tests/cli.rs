@@ -46,6 +46,49 @@ fn configured_file(directory: &TempDir) -> Result<std::path::PathBuf, std::io::E
     Ok(path)
 }
 
+fn cache_tempo_openapi(cache: &std::path::Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(cache)?;
+    fs::write(
+        cache.join("tempo-openapi.yaml"),
+        r#"openapi: 3.0.3
+info:
+  title: Tempo API
+  version: "4"
+paths:
+  /worklogs:
+    post:
+      operationId: createWorklog
+      summary: Create Worklog
+      tags: [Worklogs]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WorklogInput'
+      responses:
+        "200":
+          description: SUCCESS
+components:
+  schemas:
+    WorklogInput:
+      type: object
+      required: [issueId, timeSpentSeconds]
+      properties:
+        issueId:
+          type: string
+        timeSpentSeconds:
+          type: integer
+        author:
+          $ref: '#/components/schemas/Author'
+    Author:
+      type: object
+      properties:
+        accountId:
+          type: string
+"#,
+    )
+}
+
 fn list_continuation(
     selected_date: &str,
     month_start: &str,
@@ -414,7 +457,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 3);
+    assert_eq!(contract["schemaVersion"], 4);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -673,44 +716,26 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn schema_prints_the_local_contract_in_human_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::cargo_bin("drag")?
+        .args(["--output", "human", "schema"])
+        .output()?;
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let contract: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(contract["name"], "drag");
+    assert!(contract.get("ok").is_none());
+    Ok(())
+}
+
+#[test]
 fn dotted_tempo_schema_lookup_uses_the_cached_official_openapi_contract(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let config = directory.path().join("config.json");
     let cache = directory.path().join("cache");
-    fs::create_dir_all(&cache)?;
-    fs::write(
-        cache.join("tempo-openapi.yaml"),
-        r#"openapi: 3.0.3
-info:
-  title: Tempo API
-  version: "4"
-paths:
-  /worklogs:
-    post:
-      operationId: createWorklog
-      summary: Create Worklog
-      tags: [Worklogs]
-      requestBody:
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/WorklogInput'
-      responses:
-        "200":
-          description: SUCCESS
-components:
-  schemas:
-    WorklogInput:
-      type: object
-      required: [issueId, timeSpentSeconds]
-      properties:
-        issueId:
-          type: string
-        timeSpentSeconds:
-          type: integer
-"#,
-    )?;
+    cache_tempo_openapi(&cache)?;
 
     let output = command(&config)?
         .env("DRAG_CACHE_DIR", &cache)
@@ -739,6 +764,53 @@ components:
             ["timeSpentSeconds"]["type"],
         "integer"
     );
+    Ok(())
+}
+
+#[test]
+fn dotted_tempo_component_lookup_resolves_nested_component_references(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let config = directory.path().join("config.json");
+    let cache = directory.path().join("cache");
+    cache_tempo_openapi(&cache)?;
+
+    let output = command(&config)?
+        .env("DRAG_CACHE_DIR", &cache)
+        .args(["schema", "tempo.WorklogInput", "--resolve-refs"])
+        .output()?;
+
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    let body: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(body["data"]["path"], "tempo.WorklogInput");
+    assert_eq!(
+        body["data"]["schema"]["properties"]["author"]["type"],
+        "object"
+    );
+    Ok(())
+}
+
+#[test]
+fn unknown_tempo_component_reports_available_schema_names() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = TempDir::new()?;
+    let config = directory.path().join("config.json");
+    let cache = directory.path().join("cache");
+    cache_tempo_openapi(&cache)?;
+
+    let output = command(&config)?
+        .env("DRAG_CACHE_DIR", &cache)
+        .args(["schema", "tempo.Unknown"])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(body["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("Author, WorklogInput")));
     Ok(())
 }
 

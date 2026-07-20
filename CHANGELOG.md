@@ -7,6 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- JSON-first `schema` output in human terminals and dotted Tempo component
+  lookup alongside operation lookup, while retaining Drag's full local CLI
+  contract.
 - Dotted Tempo OpenAPI operation lookup through `drag schema`, with optional
   local reference resolution and a fixed-origin, bounded, ETag-aware cache.
 - Runtime-generated Tempo API v4 commands with OpenAPI-derived

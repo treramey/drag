@@ -5,10 +5,12 @@ use drag::schedule::ScheduleDetails;
 use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
 use serde_json::{json, Map, Value};
 
-use crate::cli::{Cli, DeleteInput, LogInput};
+use crate::cli::{Cli, DeleteInput, LogInput, SchemaArgs};
+use crate::error::CliError;
 use crate::output::Rendered;
+use crate::tempo_openapi;
 
-const SCHEMA_VERSION: u64 = 3;
+const SCHEMA_VERSION: u64 = 4;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -50,10 +52,15 @@ pub(crate) fn schema() -> Rendered {
         }
     });
 
-    Rendered::new(
-        data,
-        "Use `drag --output json schema` for the full CLI contract.".to_owned(),
-    )
+    let human = format!("{data:#}");
+    Rendered::new(data, human)
+}
+
+pub(crate) async fn run(args: SchemaArgs) -> Result<Rendered, CliError> {
+    match args.path {
+        Some(path) => tempo_openapi::schema(&path, args.resolve_refs).await,
+        None => Ok(schema()),
+    }
 }
 
 fn command_contract(command: &Command, path: &str) -> Value {
@@ -504,8 +511,9 @@ fn command_semantics(path: &str) -> CommandSemantics {
         },
         "schema" => CommandSemantics {
             success: json!({"oneOf": [
-                {"type": "object", "description": "The complete local Drag contract when no path is supplied."},
-                tempo_operation_schema_contract()
+                local_cli_contract_schema(),
+                tempo_operation_schema_contract(),
+                tempo_component_schema_contract()
             ]}),
             error_codes: [
                 local_errors,
@@ -647,7 +655,8 @@ fn command_behavior(path: &str) -> Value {
         "schema" => json!({
             "withoutPath": "returns the complete local Drag contract",
             "tempoPath": "returns one fixed-origin Tempo OpenAPI operation",
-            "pathSyntax": "tempo.<resource>.<method>",
+            "tempoComponentPath": "returns one fixed-origin Tempo OpenAPI component schema",
+            "pathSyntax": ["tempo.<Schema>", "tempo.<resource>.<method>"],
             "resolveRefs": "inlines bounded local OpenAPI component references"
         }),
         "tempo" => json!({
@@ -669,16 +678,46 @@ fn tempo_operation_schema_contract() -> Value {
         &["path", "source", "operation"],
         json!({
             "path": {"type": "string", "pattern": "^tempo\\.[a-z0-9-]+\\.[a-z0-9-]+$"},
-            "source": object_schema(
-                &["kind", "url", "openapi", "cached"],
-                json!({
-                    "kind": {"const": "tempoOpenApi"},
-                    "url": {"const": "https://apidocs.tempo.io/tempo-openapi.yaml"},
-                    "openapi": {"type": "string"},
-                    "cached": {"type": "boolean"}
-                }),
-            ),
+            "source": tempo_schema_source_contract(),
             "operation": {"type": "object"}
+        }),
+    )
+}
+
+fn local_cli_contract_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "The complete local Drag contract when no path is supplied.",
+        "required": ["schemaDialect", "schemaVersion", "cliVersion", "name", "commands"],
+        "properties": {
+            "schemaDialect": {"type": "string"},
+            "schemaVersion": {"type": "integer"},
+            "cliVersion": {"type": "string"},
+            "name": {"const": "drag"},
+            "commands": {"type": "object"}
+        }
+    })
+}
+
+fn tempo_component_schema_contract() -> Value {
+    object_schema(
+        &["path", "source", "schema"],
+        json!({
+            "path": {"type": "string", "pattern": "^tempo\\.[A-Za-z0-9_-]+$"},
+            "source": tempo_schema_source_contract(),
+            "schema": {"type": "object"}
+        }),
+    )
+}
+
+fn tempo_schema_source_contract() -> Value {
+    object_schema(
+        &["kind", "url", "openapi", "cached"],
+        json!({
+            "kind": {"const": "tempoOpenApi"},
+            "url": {"const": "https://apidocs.tempo.io/tempo-openapi.yaml"},
+            "openapi": {"type": "string"},
+            "cached": {"type": "boolean"}
         }),
     )
 }

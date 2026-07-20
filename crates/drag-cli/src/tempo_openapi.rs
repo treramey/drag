@@ -131,11 +131,22 @@ fn render_prepared_request(
     Ok(Rendered::new(data, human))
 }
 
-pub(crate) async fn operation_schema(
-    dotted_path: &str,
-    resolve_refs: bool,
-) -> Result<Rendered, CliError> {
+pub(crate) async fn schema(dotted_path: &str, resolve_refs: bool) -> Result<Rendered, CliError> {
+    let segments = dotted_path.split('.').collect::<Vec<_>>();
+    if segments.first() != Some(&"tempo")
+        || !matches!(segments.len(), 2 | 3)
+        || segments.iter().any(|segment| segment.is_empty())
+    {
+        return Err(CliError::InvalidInput(
+            "Tempo schema path must use tempo.<Schema> or tempo.<resource>.<method>".to_owned(),
+        ));
+    }
     let loaded = load_document().await?;
+
+    if segments.len() == 2 {
+        return component_schema(&loaded, dotted_path, segments[1], resolve_refs);
+    }
+
     let (http_method, api_path, mut operation) = find_operation(&loaded.value, dotted_path)?;
     if resolve_refs {
         let mut stack = HashSet::new();
@@ -147,23 +158,64 @@ pub(crate) async fn operation_schema(
     operation_object.insert("httpMethod".to_owned(), Value::String(http_method));
     operation_object.insert("path".to_owned(), Value::String(api_path));
 
+    let source = schema_source(&loaded)?;
+    let data = json!({
+        "path": dotted_path,
+        "source": source,
+        "operation": operation
+    });
+    let human = serde_json::to_string_pretty(&data)?;
+    Ok(Rendered::new(data, human))
+}
+
+fn component_schema(
+    loaded: &LoadedDocument,
+    dotted_path: &str,
+    schema_name: &str,
+    resolve_refs: bool,
+) -> Result<Rendered, CliError> {
+    let schemas = loaded
+        .value
+        .pointer("/components/schemas")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            CliError::Api("Tempo OpenAPI document has no component schemas".to_owned())
+        })?;
+    let mut selected = schemas.get(schema_name).cloned().ok_or_else(|| {
+        let mut available = schemas.keys().map(String::as_str).collect::<Vec<_>>();
+        available.sort_unstable();
+        CliError::InvalidInput(format!(
+            "unknown Tempo OpenAPI schema '{schema_name}'; available schemas: {}",
+            available.join(", ")
+        ))
+    })?;
+    if resolve_refs {
+        let mut stack = HashSet::new();
+        resolve_local_refs(&mut selected, &loaded.value, &mut stack, 0)?;
+    }
+
+    let source = schema_source(loaded)?;
+    let data = json!({
+        "path": dotted_path,
+        "source": source,
+        "schema": selected
+    });
+    let human = serde_json::to_string_pretty(&data)?;
+    Ok(Rendered::new(data, human))
+}
+
+fn schema_source(loaded: &LoadedDocument) -> Result<Value, CliError> {
     let openapi = loaded
         .value
         .get("openapi")
         .and_then(Value::as_str)
         .ok_or_else(|| CliError::Api("Tempo OpenAPI document has no version".to_owned()))?;
-    let data = json!({
-        "path": dotted_path,
-        "source": {
-            "kind": "tempoOpenApi",
-            "url": TEMPO_OPENAPI_URL,
-            "openapi": openapi,
-            "cached": loaded.cached
-        },
-        "operation": operation
-    });
-    let human = serde_json::to_string_pretty(&data)?;
-    Ok(Rendered::new(data, human))
+    Ok(json!({
+        "kind": "tempoOpenApi",
+        "url": TEMPO_OPENAPI_URL,
+        "openapi": openapi,
+        "cached": loaded.cached
+    }))
 }
 
 async fn load_document() -> Result<LoadedDocument, CliError> {

@@ -85,7 +85,7 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Call Tempo operations generated from the official OpenAPI document.
     Tempo(TempoArgs),
-    /// Describe the CLI contract or one Tempo OpenAPI operation.
+    /// Inspect the CLI contract or a Tempo OpenAPI operation or type.
     Schema(SchemaArgs),
 }
 
@@ -104,10 +104,11 @@ pub struct TempoArgs {
 
 #[derive(Debug, Args)]
 pub struct SchemaArgs {
-    /// Optional dotted Tempo operation, for example tempo.worklogs.create.
+    /// Optional dotted Tempo type or operation, such as tempo.Worklog or
+    /// tempo.worklogs.create.
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
-    /// Resolve local OpenAPI references in the selected operation.
+    /// Resolve local OpenAPI references in the selected schema.
     #[arg(long, requires = "path")]
     pub resolve_refs: bool,
 }

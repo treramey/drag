@@ -192,12 +192,15 @@ printf '%s' '{"worklogIds":[123456,123457]}' | drag delete --json -
 
 ### Inspect API schemas
 
-`drag schema` prints Drag's complete machine-readable CLI contract. Pass a
-dotted Tempo operation to inspect the official Tempo OpenAPI definition; add
-`--resolve-refs` to inline local component references:
+Schema output is JSON even in a human terminal. `drag schema` prints Drag's
+complete machine-readable CLI contract. Pass a dotted Tempo component or
+operation to inspect the official Tempo OpenAPI definition; add `--resolve-refs`
+to inline local component references:
 
 ```bash
-drag --output json schema tempo.worklogs.create --resolve-refs
+drag schema
+drag schema tempo.Worklog --resolve-refs
+drag schema tempo.worklogs.create --resolve-refs
 ```
 
 Tempo schemas come only from
@@ -342,7 +345,7 @@ Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 and NDJSON output stay machine-readable.
 
-`drag --output json schema` emits the versioned CLI contract. Schema version 3
+`drag --output json schema` emits the versioned CLI contract. Schema version 4
 includes the installed CLI version and every command, nested subcommand,
 shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
@@ -350,7 +353,8 @@ command also describes its JSON success data, possible structured error codes,
 side effects, network access, and dry-run behavior. The `--json` arguments for
 log and worklog deletion contain nested JSON Schemas generated
 from the same serde input types used at runtime, while command and option
-metadata is read from Clap's command model.
+metadata is read from Clap's command model. The schema command also documents
+its local-contract, Tempo component, and Tempo operation result variants.
 
 | Exit | Meaning |
 |---:|---|

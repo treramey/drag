@@ -30,7 +30,6 @@ use crate::output::{
     emit_error, emit_result, handle_parse_error, output_mode_from_args, resolve_mode,
 };
 pub(crate) use crate::output::{Rendered, ResolvedOutputMode};
-use crate::schema::schema;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -99,10 +98,7 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
                 tempo_openapi::CommandOutput::Plain(output) => return Ok(RunResult::Plain(output)),
             }
         }
-        Command::Schema(args) => match args.path {
-            Some(path) => tempo_openapi::operation_schema(&path, args.resolve_refs).await?,
-            None => schema(),
-        },
+        Command::Schema(args) => schema::run(args).await?,
     };
     Ok(RunResult::Rendered(rendered))
 }
