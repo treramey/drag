@@ -331,10 +331,7 @@ fn render_suspense(
         BrailleSpinner::new().color(crate::tui_theme::PRIMARY_COLOR),
         spinner,
     );
-    frame.render_widget(
-        Paragraph::new(" Loading entries…").style(Palette::text()),
-        label,
-    );
+    frame.render_widget(Paragraph::new(" Loading entries…"), label);
 }
 
 fn render_compact_loading_status(frame: &mut Frame<'_>, report_area: Rect) {
@@ -353,7 +350,7 @@ fn render_compact_loading_status(frame: &mut Frame<'_>, report_area: Rect) {
     } else {
         "…"
     };
-    frame.render_widget(Paragraph::new(label).style(Palette::text()), content);
+    frame.render_widget(Paragraph::new(label), content);
 }
 
 fn top_line(area: Rect) -> Rect {
@@ -1331,6 +1328,32 @@ mod tests {
             .collect()
     }
 
+    fn suspense_text_color(
+        report: &ListReport,
+        date: NaiveDate,
+        width: u16,
+        height: u16,
+        text: &str,
+    ) -> Option<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).ok()?;
+        let mut model = ListReportModel::new(report);
+        terminal
+            .draw(|frame| render_suspense(frame, date, &mut model))
+            .ok()?;
+        let buffer = terminal.backend().buffer();
+        for y in 0..height {
+            let line: String = (0..width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect();
+            if let Some(byte_index) = line.find(text) {
+                let x = u16::try_from(line[..byte_index].chars().count()).ok()?;
+                return buffer.cell((x, y)).map(|cell| cell.fg);
+            }
+        }
+        None
+    }
+
     fn calendar_day_style(
         report: &ListReport,
         row: &str,
@@ -1595,6 +1618,21 @@ mod tests {
 
         assert!(screen.contains("Wednesday, 2026-07-15"), "{screen}");
         assert!(screen.contains("Loading…"), "{screen}");
+    }
+
+    #[test]
+    fn suspense_loading_text_uses_the_terminal_foreground() {
+        let report = report(Vec::new(), true);
+        let next_date = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap_or(NaiveDate::MIN);
+
+        assert_eq!(
+            suspense_text_color(&report, next_date, 100, 24, "Loading entries…"),
+            Some(Color::Reset)
+        );
+        assert_eq!(
+            suspense_text_color(&report, next_date, 32, 20, "Loading…"),
+            Some(Color::Reset)
+        );
     }
 
     #[test]

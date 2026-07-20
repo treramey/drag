@@ -20,9 +20,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use tachyonfx::{
-    color_from_hsl, color_to_hsl, fx, CellFilter, Effect, Interpolatable, Interpolation, SimpleRng,
-};
+use tachyonfx::{fx, CellFilter, Effect, Interpolation, SimpleRng};
 
 use crate::config::normalize_jira_site;
 use crate::output::escape_terminal_data;
@@ -1952,52 +1950,23 @@ fn tint_focus_border_cell(buffer: &mut Buffer, position: Position, color_index: 
 }
 
 fn focus_border_color(index: usize) -> Color {
-    let (hue, saturation, lightness) = color_to_hsl(&PRIMARY_COLOR);
+    // Named ANSI colors are resolved by the terminal theme. Avoid deriving RGB
+    // values here, which would bypass the user's configured system palette.
     let stops = [
-        (4, color_from_hsl(hue, saturation, 40.0)),
-        (2, color_from_hsl(hue, saturation, 80.0)),
-        (
-            4,
-            color_from_hsl(
-                (hue - 25.0).rem_euclid(360.0),
-                saturation,
-                (lightness + 10.0).min(100.0),
-            ),
-        ),
-        (
-            7,
-            color_from_hsl(
-                hue,
-                (saturation - 20.0).max(0.0),
-                (lightness + 10.0).min(100.0),
-            ),
-        ),
-        (
-            7,
-            color_from_hsl(
-                (hue + 25.0).rem_euclid(360.0),
-                saturation,
-                (lightness + 10.0).min(100.0),
-            ),
-        ),
-        (
-            7,
-            color_from_hsl(
-                hue,
-                (saturation + 20.0).min(100.0),
-                (lightness + 10.0).min(100.0),
-            ),
-        ),
+        (4, PRIMARY_COLOR),
+        (2, Color::LightMagenta),
+        (4, PRIMARY_COLOR),
+        (7, Color::Blue),
+        (7, Color::Cyan),
+        (7, Color::LightMagenta),
     ];
     let cycle_length = stops.iter().map(|(length, _)| length).sum::<usize>();
     let mut offset = index % cycle_length;
-    let mut previous = PRIMARY_COLOR;
-    for (length, target) in stops {
+    for (length, color) in stops {
         if offset < length {
-            return previous.lerp(&target, offset as f32 / length as f32);
+            return color;
         }
         offset -= length;
-        previous = target;
     }
     PRIMARY_COLOR
 }
@@ -2351,16 +2320,10 @@ mod tests {
         let mut model = model();
         model.entrance_animation = BufferAnimation::entrance(true);
 
-        assert_eq!(
-            rendered_animation_color(&mut model, "█")?,
-            Color::Rgb(101, 92, 82)
-        );
+        assert_eq!(rendered_animation_color(&mut model, "█")?, Color::DarkGray);
 
         model.handle_onboarding_event(OnboardingEvent::Tick(std::time::Duration::from_millis(140)));
-        assert_eq!(
-            rendered_animation_color(&mut model, "█")?,
-            Color::Rgb(116, 39, 127)
-        );
+        assert_eq!(rendered_animation_color(&mut model, "█")?, Color::Magenta);
         assert!(!model.entrance_animation.is_active());
         Ok(())
     }
@@ -2390,7 +2353,7 @@ mod tests {
             assert!(rendered.contains("█▀▄  █▀█  ▄▀█  █▀▀"));
             assert!(rendered.contains(concat!("v", env!("CARGO_PKG_VERSION"))));
         }
-        assert_eq!(rendered_color(&branded, "█")?, Color::Rgb(116, 39, 127));
+        assert_eq!(rendered_color(&branded, "█")?, Color::Magenta);
         Ok(())
     }
 
@@ -2410,7 +2373,7 @@ mod tests {
             .buffer()
             .content
             .iter()
-            .filter(|cell| cell.bg == Color::Rgb(116, 39, 127))
+            .filter(|cell| cell.fg == Color::Magenta && cell.modifier.contains(Modifier::REVERSED))
             .count();
         assert!(highlighted > 0);
         assert!(highlighted < usize::from(super::MAX_CONTENT_WIDTH / 2));
@@ -2436,7 +2399,7 @@ mod tests {
         let focused_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
         assert!(focused_text.contains("Atlassian API token"));
         assert!(focused_text.contains("› Atlassian API token"));
-        assert_eq!(rendered_color(&focused, "›")?, Color::Rgb(116, 39, 127));
+        assert_eq!(rendered_color(&focused, "›")?, Color::Magenta);
 
         focused.error = Some("Atlassian API token is required.".to_owned());
         let invalid_text = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &focused)?;
@@ -2471,7 +2434,7 @@ mod tests {
         model.jira_status = ConnectionStatus::Connected;
         let connected = render_text(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT, &model)?;
         assert!(connected.contains("✓ Connect Jira connected"));
-        assert_eq!(rendered_color(&model, "✓")?, Color::Rgb(0, 121, 133));
+        assert_eq!(rendered_color(&model, "✓")?, Color::Cyan);
 
         model.jira_status = ConnectionStatus::NotConnected;
         model.error = Some("Could not connect to Jira".to_owned());

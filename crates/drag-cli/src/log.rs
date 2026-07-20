@@ -3,7 +3,7 @@ use std::path::Path;
 
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
-use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
+use drag::models::{AddWorklogRequest, WorkAttributeValue, Worklog, WorklogEntity};
 use drag::time::{
     clock_interval, format_duration, parse_clock, parse_duration_or_interval, select_date,
 };
@@ -126,6 +126,7 @@ fn build_log_request(
         description: input.description.clone(),
         remaining_estimate_seconds,
         author_account_id: Some(credentials.account_id.clone()),
+        attributes: input.attributes.clone(),
     })
 }
 
@@ -156,11 +157,33 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
             description: args.description,
             start: args.start,
             remaining_estimate: args.remaining_estimate,
+            attributes: args
+                .attributes
+                .iter()
+                .map(|attribute| parse_work_attribute(attribute))
+                .collect::<Result<Vec<_>, _>>()?,
         }
     };
     Ok(ResolvedLogInput {
         value,
         dry_run: args.dry_run,
+    })
+}
+
+fn parse_work_attribute(raw: &str) -> Result<WorkAttributeValue, CliError> {
+    let (key, value) = raw.split_once('=').ok_or_else(|| {
+        CliError::InvalidInput("work attributes must use KEY=VALUE form".to_owned())
+    })?;
+    let key = key.trim();
+    let value = value.trim();
+    if key.is_empty() || value.is_empty() {
+        return Err(CliError::InvalidInput(
+            "work attribute keys and values cannot be empty".to_owned(),
+        ));
+    }
+    Ok(WorkAttributeValue {
+        key: key.to_owned(),
+        value: value.to_owned(),
     })
 }
 
@@ -200,6 +223,9 @@ mod tests {
     use chrono::TimeZone;
     use drag::models::{Author, Issue};
     use tempfile::TempDir;
+    use url::Url;
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
 
@@ -315,6 +341,7 @@ mod tests {
             description: None,
             start: None,
             remaining_estimate: None,
+            attributes: Vec::new(),
             json: None,
             dry_run: false,
         }
@@ -373,6 +400,7 @@ mod tests {
                 description: Some("review".to_owned()),
                 start: None,
                 remaining_estimate: Some("2h".to_owned()),
+                attributes: vec!["_Worktype_=Development".to_owned()],
                 json: None,
                 dry_run: false,
             },
@@ -395,6 +423,10 @@ mod tests {
                     description: Some("review".to_owned()),
                     remaining_estimate_seconds: Some(7_200),
                     author_account_id: Some("account-1".to_owned()),
+                    attributes: vec![WorkAttributeValue {
+                        key: "_Worktype_".to_owned(),
+                        value: "Development".to_owned(),
+                    }],
                 }),
             ]
         );
@@ -403,6 +435,105 @@ mod tests {
             json!({
                 "id": "751393",
                 "interval": {"startTime": "12:30", "endTime": "13:45"},
+                "issueId": "10001",
+                "issueKey": "ABC-1",
+                "duration": "1h15m",
+                "description": "review",
+                "link": "https://example.atlassian.net/browse/ABC-1"
+            })
+        );
+        assert_eq!(
+            rendered.human,
+            "Successfully logged 1h15m to ABC-1, type `drag d 751393` to undo."
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adding_a_time_log_reaches_jira_and_tempo_end_to_end(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let config_path = configured_file(&directory)?;
+        let server = MockServer::start().await;
+        let expected_request = AddWorklogRequest {
+            issue_id: "10001".to_owned(),
+            time_spent_seconds: 4_500,
+            start_date: "2026-07-14".to_owned(),
+            start_time: "09:15:00".to_owned(),
+            description: Some("review".to_owned()),
+            remaining_estimate_seconds: Some(7_200),
+            author_account_id: Some("account-1".to_owned()),
+            attributes: vec![
+                WorkAttributeValue {
+                    key: "_Worktype_".to_owned(),
+                    value: "Development".to_owned(),
+                },
+                WorkAttributeValue {
+                    key: "_Test_".to_owned(),
+                    value: "RD".to_owned(),
+                },
+            ],
+        };
+
+        Mock::given(method("GET"))
+            .and(path("/rest/api/3/issue/ABC-1"))
+            .and(header(
+                "authorization",
+                "Basic cGVyc29uQGV4YW1wbGUuY29tOmF0bGFzc2lhbi1zZWNyZXQ=",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "10001"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/4/worklogs"))
+            .and(header("authorization", "Bearer tempo-secret"))
+            .and(body_json(&expected_request))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tempoWorklogId": "751393",
+                "startDate": "2026-07-14",
+                "startTime": "09:15:00",
+                "author": {"accountId": "account-1"},
+                "issue": {
+                    "self": "https://example.atlassian.net/rest/api/3/issue/10001",
+                    "id": "10001"
+                },
+                "description": "review",
+                "timeSpentSeconds": 4500
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tempo_base = Url::parse(&format!("{}/4/", server.uri()))?;
+        let atlassian_base = Url::parse(&format!("{}/rest/api/3/", server.uri()))?;
+        let rendered = run(
+            &config_path,
+            fixed_now()?,
+            LogArgs {
+                issue_key_or_alias: Some("abc-1".to_owned()),
+                duration_or_interval: Some("1h15m".to_owned()),
+                when: Some("2026-07-14".to_owned()),
+                description: Some("review".to_owned()),
+                start: Some("9:15".to_owned()),
+                remaining_estimate: Some("2h".to_owned()),
+                attributes: vec!["_Worktype_=Development".to_owned(), "_Test_=RD".to_owned()],
+                json: None,
+                dry_run: false,
+            },
+            |credentials| {
+                Ok(ApiLogGateway {
+                    api: ApiClient::with_bases(credentials, false, tempo_base, atlassian_base)?,
+                })
+            },
+        )
+        .await?;
+
+        assert_eq!(
+            rendered.data,
+            json!({
+                "id": "751393",
+                "interval": {"startTime": "09:15", "endTime": "10:30"},
                 "issueId": "10001",
                 "issueKey": "ABC-1",
                 "duration": "1h15m",

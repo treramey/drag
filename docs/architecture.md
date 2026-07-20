@@ -57,6 +57,10 @@ several peer submodules rather than a single implementation file.
   entered.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
   metadata and schemars schemas for shared serde input and result models.
+- `drag_cli::tempo_openapi`: fixed-origin Tempo OpenAPI discovery, bounded YAML
+  parsing, 24-hour ETag-aware caching, dotted operation lookup, local
+  component-reference resolution, generated read-only command trees, and
+  validated path/query request preparation.
 - `drag_cli::setup`: setup state and connection verification.
 - Unattended setup dry-runs use the same validated environment credentials and
   verifier boundary as execution, but emit a secret-free plan and never call
@@ -73,6 +77,13 @@ several peer submodules rather than a single implementation file.
 - Config parse errors are never converted into an empty config.
 - Config writes use mode `0600` on Unix and a temporary file before replace.
 - Authenticated pagination stays on `https://api.tempo.io`.
+- OpenAPI discovery stays on `https://apidocs.tempo.io/tempo-openapi.yaml`,
+  limits documents to 2 MiB, and atomically replaces its disposable cache.
+- Generated Tempo commands accept API v4 operations, build URLs from fixed
+  OpenAPI paths, encode path segments, validate declared parameters and JSON
+  request bodies, and keep bearer-authenticated requests on the configured
+  Tempo origin. Dry-runs stop before credential loading and API access, and the
+  shared transport retries GET requests but never mutations.
 - List retrieval defaults to 100 records and one page, exposes opaque
   continuations, and requires explicit all-pages traversal; even all-pages
   stops at 100 pages.

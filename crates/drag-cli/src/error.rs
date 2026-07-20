@@ -56,6 +56,8 @@ pub(crate) enum CliError {
     Core(#[from] drag::Error),
     #[error("{0}")]
     InvalidInput(String),
+    #[error("{0}")]
+    Usage(String),
     #[error("drag is not configured: {0}")]
     NotConfigured(String),
     #[error("configuration error: {message}")]
@@ -85,6 +87,7 @@ impl CliError {
         match self {
             Self::Core(error) => error.code(),
             Self::InvalidInput(_) => "invalid_input",
+            Self::Usage(_) => "usage",
             Self::NotConfigured(_) => "not_configured",
             Self::Config { .. } => "config_error",
             Self::Api(_) | Self::Remote(_) => "api_error",
@@ -100,6 +103,7 @@ impl CliError {
         match self {
             Self::Core(_)
             | Self::InvalidInput(_)
+            | Self::Usage(_)
             | Self::NotConfigured(_)
             | Self::Json(_)
             | Self::Url(_) => EXIT_USAGE,

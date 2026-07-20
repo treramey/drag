@@ -37,6 +37,8 @@ pub struct ApiClient {
     debug: bool,
     tempo_base: Url,
     tempo_origin: String,
+    #[cfg(test)]
+    atlassian_base: Option<Url>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,7 +82,21 @@ impl ApiClient {
             debug,
             tempo_base,
             tempo_origin,
+            #[cfg(test)]
+            atlassian_base: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_bases(
+        credentials: Credentials,
+        debug: bool,
+        tempo_base: Url,
+        atlassian_base: Url,
+    ) -> Result<Self, CliError> {
+        let mut client = Self::with_tempo_base(credentials, debug, tempo_base)?;
+        client.atlassian_base = Some(atlassian_base);
+        Ok(client)
     }
 
     pub async fn add_worklog(
@@ -91,6 +107,53 @@ impl ApiClient {
         let url = self.tempo_base.join("worklogs").map_err(CliError::Url)?;
         self.json(self.tempo(Method::POST, url).json(&request))
             .await
+    }
+
+    pub(crate) async fn execute_openapi_value(
+        &self,
+        method: Method,
+        url: Url,
+        body: Option<&Value>,
+    ) -> Result<Value, CliError> {
+        if url.origin().ascii_serialization() != self.tempo_origin {
+            return Err(CliError::InvalidInput(
+                "OpenAPI request must stay on the configured Tempo origin".to_owned(),
+            ));
+        }
+        let mut request = self.tempo(method, url);
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let request = request.build().map_err(CliError::Http)?;
+        let service = RemoteService::from_url(request.url());
+        if self.debug {
+            eprintln!("debug: {} {}", request.method(), request.url());
+        }
+        let response = transport::execute(&self.client, request).await?;
+        let status = response.status();
+        let bytes = response.bytes().await.map_err(CliError::Http)?;
+        if self.debug {
+            eprintln!("debug: response {status}");
+        }
+        if !status.is_success() {
+            return Err(api_error_for_service(
+                service,
+                status,
+                &bytes,
+                &self.redaction_secrets(),
+            ));
+        }
+        if bytes.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_slice(&bytes).map_err(|error| {
+            CliError::Remote(RemoteError {
+                service,
+                status: Some(status),
+                kind: RemoteErrorKind::InvalidResponse,
+                message: format!("returned malformed JSON: {error}"),
+            })
+        })
     }
 
     pub async fn get_worklog(&self, id: u64) -> Result<WorklogEntity, CliError> {
@@ -300,6 +363,10 @@ impl ApiClient {
     }
 
     fn atlassian_url(&self, endpoint: &str) -> Result<Url, CliError> {
+        #[cfg(test)]
+        if let Some(base) = &self.atlassian_base {
+            return base.join(endpoint).map_err(CliError::Url);
+        }
         let hostname = self.credentials.hostname.trim();
         if hostname.is_empty()
             || hostname
@@ -579,6 +646,7 @@ mod tests {
             description: Some("review".to_owned()),
             remaining_estimate_seconds: Some(7_200),
             author_account_id: None,
+            attributes: Vec::new(),
         }
     }
 

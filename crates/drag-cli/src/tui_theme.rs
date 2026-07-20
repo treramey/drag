@@ -6,10 +6,10 @@ use ratatui::text::{Line, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-pub(crate) const PRIMARY_COLOR: Color = Color::Rgb(116, 39, 127);
-pub(crate) const MUTED_COLOR: Color = Color::Rgb(101, 92, 82);
-pub(crate) const SUCCESS_COLOR: Color = Color::Rgb(0, 121, 133);
-pub(crate) const TEXT_COLOR: Color = Color::Rgb(243, 239, 230);
+// Keep the UI on the terminal's ANSI palette so it follows the user's theme.
+pub(crate) const PRIMARY_COLOR: Color = Color::Magenta;
+pub(crate) const MUTED_COLOR: Color = Color::DarkGray;
+pub(crate) const SUCCESS_COLOR: Color = Color::Cyan;
 pub(crate) const MAX_CONTENT_WIDTH: u16 = 115;
 pub(crate) const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀▀", "█▄▀  █▀▄  █▀█  █▄█"];
 
@@ -24,16 +24,12 @@ impl Palette {
         Style::new().fg(MUTED_COLOR)
     }
 
-    pub(crate) const fn text() -> Style {
-        Style::new().fg(TEXT_COLOR)
-    }
-
     pub(crate) const fn focus() -> Style {
         Self::primary()
     }
 
     pub(crate) const fn action_focus() -> Style {
-        Self::text().bg(PRIMARY_COLOR)
+        Self::primary().reversed()
     }
 
     pub(crate) const fn pending() -> Style {

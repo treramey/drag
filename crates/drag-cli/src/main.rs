@@ -14,6 +14,7 @@ mod output;
 mod schema;
 mod setup;
 mod setup_tui;
+mod tempo_openapi;
 mod transport;
 mod tui_theme;
 
@@ -55,6 +56,10 @@ async fn main() -> ExitCode {
             }
         }
         Ok(RunResult::Streamed) => ExitCode::SUCCESS,
+        Ok(RunResult::Plain(output)) => {
+            print!("{output}");
+            ExitCode::SUCCESS
+        }
         Err(error) => {
             emit_error(&error, mode);
             ExitCode::from(error.exit_code())
@@ -65,6 +70,7 @@ async fn main() -> ExitCode {
 enum RunResult {
     Rendered(Rendered),
     Streamed,
+    Plain(String),
 }
 
 async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> {
@@ -108,7 +114,16 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
             )
         }
         Command::Doctor(args) => app.doctor(args).await?,
-        Command::Schema => schema(),
+        Command::Tempo(args) => {
+            match tempo_openapi::run_command(args.arguments, &path, debug).await? {
+                tempo_openapi::CommandOutput::Rendered(rendered) => rendered,
+                tempo_openapi::CommandOutput::Plain(output) => return Ok(RunResult::Plain(output)),
+            }
+        }
+        Command::Schema(args) => match args.path {
+            Some(path) => tempo_openapi::operation_schema(&path, args.resolve_refs).await?,
+            None => schema(),
+        },
     };
     Ok(RunResult::Rendered(rendered))
 }

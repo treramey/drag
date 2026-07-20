@@ -36,6 +36,7 @@ pub(crate) fn schema() -> Rendered {
         "errors": error_contract(),
         "environment": {
             "DRAG_CONFIG": {"type": "path", "purpose": "Override the configuration file."},
+            "DRAG_CACHE_DIR": {"type": "path", "purpose": "Override the OpenAPI cache directory."},
             "DRAG_REDUCED_MOTION": {"type": "boolean-like", "purpose": "Reduce interactive setup motion."},
             "TEMPO_TOKEN": {"type": "secret", "purpose": "Override the stored Tempo token."},
             "TEMPO_ACCOUNT_ID": {"type": "string", "purpose": "Runtime compatibility override for the Tempo account ID."},
@@ -506,11 +507,58 @@ fn command_semantics(path: &str) -> CommandSemantics {
             network_access: json!({"default": {}, "remote": {"jira": "read", "tempo": "read"}}),
             dry_run: unsupported_dry_run(),
         },
+        "tempo" => CommandSemantics {
+            success: json!({"oneOf": [
+                {"description": "The selected Tempo API response."},
+                object_schema(
+                    &["dryRun", "operationId", "method", "url", "body"],
+                    json!({
+                        "dryRun": {"const": true},
+                        "operationId": {"type": "string"},
+                        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                        "url": {"type": "string", "format": "uri"},
+                        "body": {}
+                    }),
+                )
+            ]}),
+            error_codes: [
+                remote_errors,
+                vec!["usage", "invalid_input", "invalid_json"],
+            ]
+            .concat(),
+            side_effects: json!({
+                "readOperation": [],
+                "mutationOperation": ["selectedTempoApiMutation"],
+                "dryRun": []
+            }),
+            network_access: json!({
+                "readOperation": {"tempoOpenApi": "readOrCache", "tempo": "read"},
+                "mutationOperation": {"tempoOpenApi": "readOrCache", "tempo": "write"},
+                "dryRun": {"tempoOpenApi": "readOrCache", "tempo": "none"}
+            }),
+            dry_run: json!({
+                "supported": true,
+                "scope": "generatedMethod",
+                "sideEffects": false,
+                "networkAccess": {"tempoOpenApi": "readOrCache", "tempo": false}
+            }),
+        },
         "schema" => CommandSemantics {
-            success: json!({"type": "object", "description": "The contract document described by this schema command."}),
-            error_codes: local_errors,
+            success: json!({"oneOf": [
+                {"type": "object", "description": "The complete local Drag contract when no path is supplied."},
+                tempo_operation_schema_contract()
+            ]}),
+            error_codes: [
+                local_errors,
+                vec!["api_error", "http_error", "invalid_json", "invalid_url"],
+            ]
+            .concat(),
             side_effects: json!({"default": []}),
-            network_access: json!({"default": {}}),
+            network_access: json!({
+                "default": {},
+                "tempoPathCacheHit": {},
+                "tempoPathCacheMissOrStale": {"tempoOpenApi": "read"}
+            }),
             dry_run: unsupported_dry_run(),
         },
         "alias" => CommandSemantics {
@@ -544,6 +592,12 @@ fn command_behavior(path: &str) -> Value {
     match path {
         "log" => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
+            "workAttributes": {
+                "option": "attribute",
+                "syntax": "KEY=VALUE",
+                "repeatable": true,
+                "jsonShape": [{"key": "_Worktype_", "value": "Development"}]
+            },
             "durationOrInterval": {
                 "durationSyntax": ["15m", "1h", "1h15m"],
                 "intervalSyntax": ["11-14", "11-14:30", "11:35-14:20", "11.35-14.20"],
@@ -644,8 +698,43 @@ fn command_behavior(path: &str) -> Value {
             "remote": "opt-in read-only Jira and Tempo checks",
             "remoteStatuses": ["connected", "notConfigured", "failed"]
         }),
+        "schema" => json!({
+            "withoutPath": "returns the complete local Drag contract",
+            "tempoPath": "returns one fixed-origin Tempo OpenAPI operation",
+            "pathSyntax": "tempo.<resource>.<method>",
+            "resolveRefs": "inlines bounded local OpenAPI component references"
+        }),
+        "tempo" => json!({
+            "commandTree": "generatedAtRuntimeFromOfficialTempoOpenApi",
+            "currentMethods": "TempoApiV4Operations",
+            "resourceNames": "normalizedOpenApiTags",
+            "methodNames": "normalizedOperationIdsWithUnambiguousFriendlyAliases",
+            "parameters": "JSON object passed through --params and validated against OpenAPI",
+            "requestBody": "application/json body passed through --json and validated against OpenAPI",
+            "help": "generatedAfterOpenApiDiscovery",
+            "dryRun": "validatesAndPrintsWithoutTempoApiAccess"
+        }),
         _ => json!({}),
     }
+}
+
+fn tempo_operation_schema_contract() -> Value {
+    object_schema(
+        &["path", "source", "operation"],
+        json!({
+            "path": {"type": "string", "pattern": "^tempo\\.[a-z0-9-]+\\.[a-z0-9-]+$"},
+            "source": object_schema(
+                &["kind", "url", "openapi", "cached"],
+                json!({
+                    "kind": {"const": "tempoOpenApi"},
+                    "url": {"const": "https://apidocs.tempo.io/tempo-openapi.yaml"},
+                    "openapi": {"type": "string"},
+                    "cached": {"type": "boolean"}
+                }),
+            ),
+            "operation": {"type": "object"}
+        }),
+    )
 }
 
 fn object_schema(required: &[&str], properties: Value) -> Value {
@@ -1093,7 +1182,13 @@ mod tests {
             input_schema["required"],
             serde_json::json!(["issueKeyOrAlias", "durationOrInterval"])
         );
-        for field in ["when", "description", "start", "remainingEstimate"] {
+        for field in [
+            "when",
+            "description",
+            "start",
+            "remainingEstimate",
+            "attributes",
+        ] {
             assert!(
                 input_schema["properties"][field].is_object(),
                 "missing {field}"

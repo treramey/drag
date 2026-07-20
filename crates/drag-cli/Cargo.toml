@@ -27,6 +27,7 @@ ratatui-braille-bar = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml_ng = "0.10.0"
 schemars.workspace = true
 tachyonfx = { version = "0.25.1", default-features = false, features = ["sendable", "std-duration"] }
 drag = { version = "0.4.0", path = "../drag" }
