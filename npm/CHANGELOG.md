@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.5.0
+
+### Minor Changes
+
+- d55d365: Generate Tempo API v4 commands from the official OpenAPI document with schema inspection, validated generic JSON bodies and parameters, authenticated execution, caching, and dry-run previews.
+
 ## 0.4.0
 
 ### Minor Changes
