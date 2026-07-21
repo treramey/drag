@@ -17,7 +17,7 @@ use tachyonfx::{fx, CellFilter, Effect, Interpolation, SimpleRng};
 use crate::config::normalize_jira_site;
 use crate::output::escape_terminal_data;
 use crate::setup::{
-    setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
+    BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingScreen, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher,
 };
 use crate::terminal::{StderrTerminal, TerminalOptions};
@@ -265,13 +265,7 @@ impl OnboardingSession for RatatuiOnboardingSession {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum UiStage {
-    JiraDetails,
-    JiraToken,
-    Tempo,
-    Save,
-}
+type UiStage = OnboardingScreen;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConnectionStatus {
@@ -869,16 +863,12 @@ where
         }
         match model.handle_onboarding_event(event) {
             Action::None => {}
-            Action::Cancel => return Err(setup_cancelled()),
+            Action::Cancel => return Err(workflow.cancel()),
             Action::Continue => match model.stage {
                 UiStage::JiraDetails => {
                     if model.validate_jira_details() {
-                        transition_to(
-                            &mut model,
-                            &mut workflow,
-                            browser_launcher,
-                            UiStage::JiraToken,
-                        )?;
+                        workflow.continue_from_jira_details()?;
+                        transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
                     }
                 }
                 UiStage::JiraToken | UiStage::Tempo | UiStage::Save => {}
@@ -887,33 +877,24 @@ where
                 model.error = None;
                 model.warning = None;
                 match model.stage {
-                    UiStage::JiraDetails => return Err(setup_cancelled()),
+                    UiStage::JiraDetails => {}
                     UiStage::JiraToken => {
                         model.jira_token.clear();
-                        transition_to(
-                            &mut model,
-                            &mut workflow,
-                            browser_launcher,
-                            UiStage::JiraDetails,
-                        )?;
                     }
                     UiStage::Tempo => {
                         model.tempo_token.clear();
-                        transition_to(
-                            &mut model,
-                            &mut workflow,
-                            browser_launcher,
-                            UiStage::JiraToken,
-                        )?;
                     }
-                    UiStage::Save => {
-                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
-                    }
+                    UiStage::Save => {}
                 }
+                if workflow.back()?.is_none() {
+                    return Err(workflow.cancel());
+                }
+                transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
             }
             Action::ConnectJira => {
                 if model.jira_status == ConnectionStatus::Connected {
-                    transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
+                    workflow.continue_with_verified_jira()?;
+                    transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
                     continue;
                 }
 
@@ -937,6 +918,7 @@ where
                 };
                 workflow.invalidate_jira();
                 let outcome = {
+                    let cancellation = workflow.cancel();
                     let verification = workflow.connect_jira(hostname, email, token);
                     tokio::pin!(verification);
                     loop {
@@ -952,7 +934,7 @@ where
                                 if OnboardingModel::pending_cancel(&event)
                                     || OnboardingModel::pending_back(&event)
                                 {
-                                    return Err(setup_cancelled());
+                                    return Err(cancellation);
                                 }
                                 draw(terminal, &mut model, &mut observe)?;
                             }
@@ -975,7 +957,7 @@ where
                         model.warning = None;
                         model.start_connection_animation(ConnectedService::Jira);
                         animation_ticker.restart();
-                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
+                        transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
@@ -992,7 +974,8 @@ where
             }
             Action::ConnectTempo => {
                 if model.tempo_status == ConnectionStatus::Connected {
-                    transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Save)?;
+                    workflow.continue_with_verified_tempo()?;
+                    transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
                     continue;
                 }
 
@@ -1013,6 +996,7 @@ where
                 };
                 workflow.invalidate_tempo()?;
                 let outcome = {
+                    let cancellation = workflow.cancel();
                     let verification = workflow.connect_tempo(token);
                     tokio::pin!(verification);
                     loop {
@@ -1026,7 +1010,7 @@ where
                                     continue;
                                 }
                                 if OnboardingModel::pending_cancel(&event) {
-                                    return Err(setup_cancelled());
+                                    return Err(cancellation);
                                 }
                                 if OnboardingModel::pending_back(&event) {
                                     break None;
@@ -1044,12 +1028,8 @@ where
                 let Some(outcome) = outcome else {
                     model.tempo_token.clear();
                     model.tempo_status = ConnectionStatus::NotConnected;
-                    transition_to(
-                        &mut model,
-                        &mut workflow,
-                        browser_launcher,
-                        UiStage::JiraToken,
-                    )?;
+                    workflow.back()?;
+                    transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
                     continue;
                 };
 
@@ -1062,7 +1042,7 @@ where
                         model.start_connection_animation(ConnectedService::Tempo);
                         model.start_review_connector_animation();
                         animation_ticker.restart();
-                        transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Save)?;
+                        transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
                     }
                     Ok(ConnectionOutcome::Rejected(error))
                     | Err(error @ CliError::InvalidInput(_)) => {
@@ -1079,26 +1059,23 @@ where
             }
             Action::Save => return Ok(workflow),
             Action::EditJira => {
-                transition_to(
-                    &mut model,
-                    &mut workflow,
-                    browser_launcher,
-                    UiStage::JiraDetails,
-                )?;
+                workflow.edit_jira();
+                transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
             }
             Action::EditTempo => {
-                transition_to(&mut model, &mut workflow, browser_launcher, UiStage::Tempo)?;
+                workflow.edit_tempo()?;
+                transition_to_workflow_screen(&mut model, &mut workflow, browser_launcher)?;
             }
         }
     }
 }
 
-fn transition_to(
+fn transition_to_workflow_screen(
     model: &mut OnboardingModel,
     workflow: &mut OnboardingWorkflow<'_>,
     browser_launcher: &dyn BrowserLauncher,
-    stage: UiStage,
 ) -> Result<(), CliError> {
+    let stage = workflow.screen();
     model.set_stage(stage);
     enter_stage(model, workflow, browser_launcher, stage)
 }

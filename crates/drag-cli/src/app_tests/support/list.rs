@@ -79,7 +79,12 @@ async fn eligible_human_list_is_presented_by_the_injected_report_session() -> Re
         selected_dates: Arc::clone(&selected_dates),
     });
 
-    let rendered = app.finish_list(empty_list_report(false), true).await?;
+    let rendered = crate::list::present_report(
+        empty_list_report(false),
+        true,
+        app.list_report_session.as_ref(),
+    )
+    .await?;
 
     assert!(rendered.is_none());
     let dates = selected_dates
@@ -111,9 +116,12 @@ async fn explicit_json_or_ineligible_human_list_remains_non_interactive() -> Res
             selected_dates: Arc::clone(&selected_dates),
         });
 
-        let rendered = app
-            .finish_list(empty_list_report(false), interactive)
-            .await?;
+        let rendered = crate::list::present_report(
+            empty_list_report(false),
+            interactive,
+            app.list_report_session.as_ref(),
+        )
+        .await?;
 
         let rendered = rendered.ok_or_else(|| CliError::Api("missing plain result".to_owned()))?;
         assert_eq!(rendered.data["date"], "2026-07-14");
@@ -143,7 +151,12 @@ async fn eligible_verbose_human_list_is_presented_by_the_report_session() -> Res
         selected_dates: Arc::clone(&selected_dates),
     });
 
-    let rendered = app.finish_list(empty_list_report(true), true).await?;
+    let rendered = crate::list::present_report(
+        empty_list_report(true),
+        true,
+        app.list_report_session.as_ref(),
+    )
+    .await?;
 
     assert!(rendered.is_none());
     assert_eq!(

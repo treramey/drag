@@ -222,20 +222,12 @@ pub(crate) async fn schema(dotted_path: &str, resolve_refs: bool) -> Result<Rend
         return component_schema(&loaded, dotted_path, segments[1], resolve_refs);
     }
 
-    let (http_method, api_path, mut operation) = find_operation(&loaded.value, dotted_path)?;
-    let effect = operation_effect(
-        &http_method,
-        &api_path,
-        operation
-            .get("operationId")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        operation
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
-        &operation,
-    );
+    let operations = executable_operations(&loaded.value)?;
+    let descriptor = find_executable_operation(&operations, dotted_path)?;
+    let http_method = descriptor.http_method.clone();
+    let api_path = descriptor.api_path.clone();
+    let effect = descriptor.effect;
+    let mut operation = descriptor.definition.clone();
     if resolve_refs {
         let mut stack = HashSet::new();
         resolve_local_refs(&mut operation, &loaded.value, &mut stack, 0)?;
@@ -956,63 +948,26 @@ fn scalar_parameter_value(name: &str, value: &Value) -> Result<String, CliError>
     }
 }
 
-fn find_operation(
-    document: &Value,
+fn find_executable_operation<'a>(
+    operations: &'a [OperationDescriptor],
     dotted_path: &str,
-) -> Result<(String, String, Value), CliError> {
+) -> Result<&'a OperationDescriptor, CliError> {
     let segments = dotted_path.split('.').collect::<Vec<_>>();
     if segments.len() != 3 || segments[0] != "tempo" {
         return Err(CliError::InvalidInput(
             "Tempo schema path must use tempo.<resource>.<method>".to_owned(),
         ));
     }
-    let paths = document
-        .get("paths")
-        .and_then(Value::as_object)
-        .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI document has no paths"))?;
-    let mut matches = Vec::new();
-    for (api_path, item) in paths {
-        let Some(item) = item.as_object() else {
-            continue;
-        };
-        for method in OPENAPI_HTTP_METHODS {
-            let Some(operation) = item.get(method) else {
-                continue;
-            };
-            let Some(resource) = operation
-                .get("tags")
-                .and_then(Value::as_array)
-                .and_then(|tags| tags.first())
-                .and_then(Value::as_str)
-                .map(kebab_case)
-            else {
-                continue;
-            };
-            if resource != segments[1] {
-                continue;
-            }
-            let operation_id = operation
-                .get("operationId")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let canonical_method = kebab_case(operation_id);
-            let friendly_method = friendly_method_name(method, api_path, operation_id, &resource);
-            if segments[2] == canonical_method || friendly_method.as_deref() == Some(segments[2]) {
-                matches.push((method.to_uppercase(), api_path.clone(), operation.clone()));
-            }
-        }
-    }
-    match matches.len() {
-        1 => matches
-            .pop()
-            .ok_or_else(|| CliError::invariant("Tempo operation lookup failed")),
-        0 => Err(CliError::InvalidInput(format!(
-            "unknown Tempo OpenAPI operation '{dotted_path}'"
-        ))),
-        _ => Err(CliError::InvalidInput(format!(
-            "ambiguous Tempo OpenAPI operation '{dotted_path}'; use its operation ID"
-        ))),
-    }
+    operations
+        .iter()
+        .find(|operation| {
+            operation.resource == segments[1]
+                && (operation.method == segments[2]
+                    || operation.friendly_alias.as_deref() == Some(segments[2]))
+        })
+        .ok_or_else(|| {
+            CliError::InvalidInput(format!("unknown Tempo OpenAPI operation '{dotted_path}'"))
+        })
 }
 
 fn friendly_method_name(
@@ -1139,8 +1094,9 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::{
-        executable_operations, friendly_method_name, kebab_case, operation_effect, parse_document,
-        prepare_request_with_base, read_document, OperationEffect,
+        executable_operations, find_executable_operation, friendly_method_name, kebab_case,
+        operation_effect, parse_document, prepare_request_with_base, read_document,
+        OperationEffect,
     };
     use crate::api::ApiClient;
     use crate::config::Credentials;
@@ -1208,6 +1164,55 @@ mod tests {
             ),
             OperationEffect::Ambiguous
         );
+    }
+
+    #[test]
+    fn schema_lookup_uses_only_unambiguous_executable_v4_operations() -> Result<(), CliError> {
+        let document = serde_json::json!({
+            "paths": {
+                "/3/worklogs": {
+                    "get": {
+                        "operationId": "getLegacyWorklogs",
+                        "tags": ["Worklogs"]
+                    }
+                },
+                "/4/worklogs": {
+                    "get": {
+                        "operationId": "getWorklogs",
+                        "tags": ["Worklogs"]
+                    },
+                    "trace": {
+                        "operationId": "traceWorklogs",
+                        "tags": ["Worklogs"]
+                    }
+                },
+                "/4/worklogs/{id}": {
+                    "get": {
+                        "operationId": "getWorklog",
+                        "tags": ["Worklogs"]
+                    }
+                },
+                "/4/worklogs/by-key/{key}": {
+                    "get": {
+                        "operationId": "getWorklogByKey",
+                        "tags": ["Worklogs"]
+                    }
+                }
+            }
+        });
+        let operations = executable_operations(&document)?;
+
+        assert_eq!(
+            find_executable_operation(&operations, "tempo.worklogs.get-worklogs")?.operation_id,
+            "getWorklogs"
+        );
+        assert!(
+            find_executable_operation(&operations, "tempo.worklogs.get-legacy-worklogs").is_err()
+        );
+        assert!(find_executable_operation(&operations, "tempo.worklogs.trace-worklogs").is_err());
+        assert!(find_executable_operation(&operations, "tempo.worklogs.get").is_err());
+
+        Ok(())
     }
 
     #[tokio::test]

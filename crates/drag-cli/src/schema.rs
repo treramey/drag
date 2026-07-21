@@ -100,7 +100,7 @@ fn command_contract(command: &Command, path: &str) -> Value {
         .get_all_aliases()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let semantics = command_semantics(identity);
+    let descriptor = command_behavior_descriptor(identity);
 
     let mut contract = json!({
         "path": path,
@@ -109,13 +109,13 @@ fn command_contract(command: &Command, path: &str) -> Value {
         "hidden": command.is_hide_set(),
         "arguments": argument_contracts(command, path, false),
         "subcommands": subcommands,
-        "success": semantics.success,
-        "errorCodes": semantics.error_codes,
-        "sideEffects": semantics.side_effects,
-        "networkAccess": semantics.network_access,
-        "dryRun": semantics.dry_run,
-        "failureDetails": command_failure_details(identity),
-        "behavior": command_behavior(identity)
+        "success": descriptor.contract.success,
+        "errorCodes": descriptor.contract.error_codes,
+        "sideEffects": descriptor.contract.side_effects,
+        "networkAccess": descriptor.contract.network_access,
+        "dryRun": descriptor.contract.dry_run,
+        "failureDetails": descriptor.failure_details,
+        "behavior": descriptor.behavior
     });
     if identity == CommandIdentity::List {
         contract["successWithFieldSelection"] = schema_ref("ProjectedListResult");
@@ -411,6 +411,56 @@ struct CommandSemantics {
     dry_run: Value,
 }
 
+struct CommandBehaviorDescriptor {
+    contract: CommandSemantics,
+    behavior: Value,
+    failure_details: Value,
+    skill_policy: Option<CommandSkillPolicy>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CommandSkillPolicy {
+    pub(crate) heading: &'static str,
+    pub(crate) guidance: &'static str,
+}
+
+fn command_behavior_descriptor(identity: CommandIdentity) -> CommandBehaviorDescriptor {
+    CommandBehaviorDescriptor {
+        contract: command_semantics(identity),
+        behavior: command_behavior_contract(identity),
+        failure_details: command_failure_details(identity),
+        skill_policy: command_skill_policy(identity),
+    }
+}
+
+pub(crate) fn skill_policy_for_command(command_name: &str) -> Option<CommandSkillPolicy> {
+    let identity = CommandIdentity::from_path(command_name)?;
+    command_behavior_descriptor(identity).skill_policy
+}
+
+fn command_skill_policy(identity: CommandIdentity) -> Option<CommandSkillPolicy> {
+    match identity {
+        CommandIdentity::Log => Some(CommandSkillPolicy {
+            heading: "Mutation policy",
+            guidance: "`log` creates a Tempo worklog. Start with `--dry-run`, verify the normalized issue, date, time, duration, and description, then execute without `--dry-run` only when the user's request explicitly authorizes creating the worklog.",
+        }),
+        CommandIdentity::List => Some(CommandSkillPolicy {
+            heading: "Automation policy",
+            guidance: "Use `drag --output json list` explicitly so an interactive terminal never opens. Use `--fields` to reduce structured output, and preserve `pagination.next` when another segment may be needed. `list` is read-only; its interactive human view can open a Jira URL only after an explicit keypress.",
+        }),
+        CommandIdentity::Delete => Some(CommandSkillPolicy {
+            heading: "Destructive-operation policy",
+            guidance: "`delete` permanently removes Tempo worklogs and a multi-ID deletion is not atomic. First run the exact IDs with `--dry-run`. Execute without `--dry-run` only when the user explicitly authorizes deleting those IDs. Never infer IDs from position or stale output.",
+        }),
+        CommandIdentity::Setup
+        | CommandIdentity::Doctor
+        | CommandIdentity::Tempo
+        | CommandIdentity::Schema
+        | CommandIdentity::GenerateSkills
+        | CommandIdentity::Help => None,
+    }
+}
+
 fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
     let remote_errors = vec![
         "usage",
@@ -615,7 +665,7 @@ fn unsupported_dry_run() -> Value {
     json!({"supported": false})
 }
 
-fn command_behavior(identity: CommandIdentity) -> Value {
+fn command_behavior_contract(identity: CommandIdentity) -> Value {
     match identity {
         CommandIdentity::Help => json!({
             "target": "zero or more command names from the surrounding command tree",
@@ -1188,7 +1238,7 @@ mod tests {
     use drag::pagination::{DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
     use serde_json::Value;
 
-    use super::{schema, CommandIdentity, SCHEMA_VERSION};
+    use super::{command_behavior_descriptor, schema, CommandIdentity, SCHEMA_VERSION};
     use crate::cli::{Cli, LogInput};
     use crate::list_tui::{
         INTERRUPT_KEY, MOVE_DOWN_KEY, MOVE_UP_KEY, NEXT_DATE_KEY, OPEN_ISSUE_KEY,
@@ -1205,6 +1255,30 @@ mod tests {
                 command.get_name()
             );
         }
+    }
+
+    #[test]
+    fn safety_policy_and_machine_contract_share_command_descriptors() {
+        let log = command_behavior_descriptor(CommandIdentity::Log);
+        assert_eq!(
+            log.contract.side_effects["default"][0],
+            "createTempoWorklog"
+        );
+        assert!(log
+            .skill_policy
+            .is_some_and(|policy| policy.guidance.contains("Start with `--dry-run`")));
+
+        let list = command_behavior_descriptor(CommandIdentity::List);
+        assert_eq!(list.contract.network_access["default"]["tempo"], "read");
+        assert!(list
+            .skill_policy
+            .is_some_and(|policy| policy.guidance.contains("`list` is read-only")));
+
+        let delete = command_behavior_descriptor(CommandIdentity::Delete);
+        assert_eq!(delete.contract.side_effects["atomic"], false);
+        assert!(delete
+            .skill_policy
+            .is_some_and(|policy| policy.guidance.contains("not atomic")));
     }
 
     #[test]

@@ -393,21 +393,12 @@ fn render_examples(out: &mut String, command_name: &str) -> Result<(), CliError>
 }
 
 fn render_command_policy(out: &mut String, command_name: &str) {
-    match command_name {
-        "log" => {
-            out.push_str("## Mutation policy\n\n");
-            out.push_str("`log` creates a Tempo worklog. Start with `--dry-run`, verify the normalized issue, date, time, duration, and description, then execute without `--dry-run` only when the user's request explicitly authorizes creating the worklog.\n\n");
-        }
-        "list" => {
-            out.push_str("## Automation policy\n\n");
-            out.push_str("Use `drag --output json list` explicitly so an interactive terminal never opens. Use `--fields` to reduce structured output, and preserve `pagination.next` when another segment may be needed. `list` is read-only; its interactive human view can open a Jira URL only after an explicit keypress.\n\n");
-        }
-        "delete" => {
-            out.push_str("## Destructive-operation policy\n\n");
-            out.push_str("`delete` permanently removes Tempo worklogs and a multi-ID deletion is not atomic. First run the exact IDs with `--dry-run`. Execute without `--dry-run` only when the user explicitly authorizes deleting those IDs. Never infer IDs from position or stale output.\n\n");
-        }
-        _ => {}
-    }
+    let Some(policy) = crate::schema::skill_policy_for_command(command_name) else {
+        return;
+    };
+    out.push_str(&format!("## {}\n\n", policy.heading));
+    out.push_str(policy.guidance);
+    out.push_str("\n\n");
 }
 
 fn render_tempo_skill(catalog: &SkillCatalog) -> SkillFiles {
@@ -874,16 +865,43 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        markdown_code, markdown_text, render_tempo_skill, replace_artifacts, validate_output_dir,
-        StagedArtifact,
+        markdown_code, markdown_text, render_local_skills, render_tempo_skill, replace_artifacts,
+        validate_output_dir, StagedArtifact,
     };
     use crate::tempo_openapi::{OperationEffect, SkillCatalog, SkillOperation};
+    use crate::CliError;
 
     #[test]
     fn output_directory_rejects_absolute_and_parent_paths() {
         assert!(validate_output_dir(std::path::Path::new("/tmp/skills")).is_err());
         assert!(validate_output_dir(std::path::Path::new("../skills")).is_err());
         assert!(validate_output_dir(std::path::Path::new(".")).is_err());
+    }
+
+    #[test]
+    fn local_command_skills_render_policy_from_command_behavior_descriptors() -> Result<(), CliError>
+    {
+        let skills = render_local_skills()?;
+        let content = |name: &str| {
+            skills
+                .iter()
+                .find(|skill| skill.name == name)
+                .and_then(|skill| skill.files.first())
+                .map(|(_, content)| content.as_str())
+        };
+
+        assert!(content("drag-log").is_some_and(|skill| {
+            skill.contains("## Mutation policy") && skill.contains("`log` creates a Tempo worklog")
+        }));
+        assert!(content("drag-list").is_some_and(|skill| {
+            skill.contains("## Automation policy") && skill.contains("`list` is read-only")
+        }));
+        assert!(content("drag-delete").is_some_and(|skill| {
+            skill.contains("## Destructive-operation policy")
+                && skill.contains("multi-ID deletion is not atomic")
+        }));
+
+        Ok(())
     }
 
     #[test]

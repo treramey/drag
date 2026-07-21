@@ -24,16 +24,17 @@ use futures_util::FutureExt;
 use tempfile::TempDir;
 
 use super::super::{
-    debounce_list_fetch, normalize_jira_site, setup_cancelled, take_reusable_report,
-    AbortOnDropTask, App, BrowserLauncher, CachedListReport, Config, ConnectionEnvironment,
+    normalize_jira_site, setup_cancelled, App, BrowserLauncher, Config, ConnectionEnvironment,
     ConnectionOutcome, ConnectionVerifier, EnvironmentSetupPlan, JiraCredentials,
     NoopBrowserLauncher, OnboardingFuture, OnboardingSession, OnboardingWorkflow,
     RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
     VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::cli::{DoctorArgs, SetupArgs};
-use crate::list::ListReport;
-use crate::list_tui::{ListReportAction, ListReportSession};
+use crate::list::{
+    debounce_list_fetch, take_reusable_report, AbortOnDropTask, CachedListReport, ListReport,
+    ListReportAction, ListReportSession,
+};
 use crate::CliError;
 #[cfg(unix)]
 use crate::ResolvedOutputMode;
@@ -80,7 +81,7 @@ impl ListReportSession for FakeListReportSession {
         self.eligible
     }
 
-    fn run<'a>(&'a self, report: &'a ListReport) -> crate::list_tui::ListReportFuture<'a> {
+    fn run<'a>(&'a self, report: &'a ListReport) -> crate::list::ListReportFuture<'a> {
         Box::pin(async move {
             self.selected_dates
                 .lock()
@@ -250,6 +251,7 @@ impl OnboardingSession for ScriptedOnboardingSession {
     fn run<'a>(&'a self, mut workflow: OnboardingWorkflow<'a>) -> OnboardingFuture<'a> {
         let events = Arc::clone(&self.events);
         Box::pin(async move {
+            workflow.continue_from_jira_details()?;
             let jira_page = workflow.jira_token_page()?;
             events
                 .lock()
