@@ -10,7 +10,10 @@ use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use drag::field_selection::{project_list_result, ListField, ListFieldMask};
 use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
-use drag::pagination::{PaginationPlan, DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
+use drag::pagination::{
+    PaginationPlan, TraversalDecision, TraversalError, TraversalState, DEFAULT_PAGE_LIMIT,
+    DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT,
+};
 use drag::schedule::{create_schedule_details, ScheduleAccumulator, ScheduleDetails};
 use drag::time::{clock_interval, format_duration, month_bounds, select_date};
 use serde::{Deserialize, Serialize};
@@ -298,6 +301,55 @@ struct ListSelection {
     plan: PaginationPlan,
 }
 
+fn pagination_metadata(
+    selection: &ListSelection,
+    pages_retrieved: u16,
+    records_retrieved: usize,
+    records_returned: usize,
+    next: Option<String>,
+    complete: bool,
+) -> Result<ListPagination, CliError> {
+    let next = next
+        .map(|url| {
+            encode_continuation(&ListContinuation {
+                version: 1,
+                selected_date: selection.selected_date.to_string(),
+                month_start: selection.month_start.clone(),
+                month_end: selection.month_end.clone(),
+                url,
+                limit: selection.plan.record_limit(),
+                page_limit: selection.plan.page_limit(),
+                all_pages: selection.plan.is_all_pages(),
+            })
+        })
+        .transpose()?;
+    Ok(ListPagination {
+        selected_date: selection.selected_date.to_string(),
+        month_start: selection.month_start.clone(),
+        month_end: selection.month_end.clone(),
+        limit: selection.plan.record_limit(),
+        page_limit: selection.plan.page_limit(),
+        all_pages: selection.plan.is_all_pages(),
+        pages_retrieved,
+        records_retrieved,
+        records_returned,
+        next,
+        complete,
+        totals_complete: selection.continuation.is_none() && complete,
+    })
+}
+
+fn pagination_traversal_error(error: TraversalError) -> CliError {
+    match error {
+        TraversalError::HardPageLimitExceeded => {
+            CliError::Api("Tempo pagination exceeded the 100-page safety limit".to_owned())
+        }
+        TraversalError::AccountingOverflow => {
+            CliError::Api("Tempo pagination accounting overflowed".to_owned())
+        }
+    }
+}
+
 fn list_selection(now: DateTime<Tz>, args: &ListArgs) -> Result<ListSelection, CliError> {
     let fields = args
         .fields
@@ -379,36 +431,15 @@ async fn prepare(
         })
         .collect();
     let complete = next.is_none();
-    let totals_complete = selection.continuation.is_none() && complete;
     let records_returned = selected_entities.len();
-    let next = next
-        .map(|url| {
-            encode_continuation(&ListContinuation {
-                version: 1,
-                selected_date: selection.selected_date.to_string(),
-                month_start: selection.month_start.clone(),
-                month_end: selection.month_end.clone(),
-                url,
-                limit: selection.plan.record_limit(),
-                page_limit: selection.plan.page_limit(),
-                all_pages: selection.plan.is_all_pages(),
-            })
-        })
-        .transpose()?;
-    let pagination = ListPagination {
-        selected_date: selection.selected_date.to_string(),
-        month_start: selection.month_start,
-        month_end: selection.month_end,
-        limit: selection.plan.record_limit(),
-        page_limit: selection.plan.page_limit(),
-        all_pages: selection.plan.is_all_pages(),
+    let pagination = pagination_metadata(
+        &selection,
         pages_retrieved,
         records_retrieved,
         records_returned,
         next,
         complete,
-        totals_complete,
-    };
+    )?;
 
     Ok(PreparedList {
         fields: selection.fields,
@@ -498,8 +529,7 @@ pub(crate) async fn run_stream(
         .continuation
         .as_ref()
         .map(|value| value.url.clone());
-    let mut pages_retrieved = 0_u16;
-    let mut records_retrieved = 0_usize;
+    let mut traversal = TraversalState::new(selection.plan);
     let mut records_returned = 0_usize;
     let mut issue_keys: BTreeMap<String, String> = BTreeMap::new();
     let (next, complete) = loop {
@@ -509,11 +539,16 @@ pub(crate) async fn run_stream(
                 &selection.month_end,
                 selection.plan,
                 continuation.as_deref(),
-                records_retrieved,
+                traversal.records_retrieved(),
             )
             .await?;
-        pages_retrieved += page.pages_retrieved;
-        records_retrieved += page.results.len();
+        let decision = traversal
+            .consume_page(
+                page.pages_retrieved,
+                page.results.len(),
+                page.next.is_some(),
+            )
+            .map_err(pagination_traversal_error)?;
         schedule_totals.add_worklogs(&page.results);
 
         for entity in page.results.into_iter().filter(|entity| {
@@ -535,53 +570,27 @@ pub(crate) async fn run_stream(
             }
         }
 
-        let Some(next) = page.next else {
-            break (None, true);
-        };
-        if !selection
-            .plan
-            .should_follow(pages_retrieved, records_retrieved)
-        {
-            if selection.plan.is_all_pages() && pages_retrieved == HARD_PAGE_LIMIT {
+        match (decision, page.next) {
+            (TraversalDecision::Continue, Some(next)) => continuation = Some(next),
+            (TraversalDecision::Complete, _) => break (None, true),
+            (TraversalDecision::Bounded, next) => break (next, false),
+            (TraversalDecision::Continue, None) => {
                 return Err(CliError::Api(
-                    "Tempo pagination exceeded the 100-page safety limit".to_owned(),
+                    "Tempo pagination state was internally inconsistent".to_owned(),
                 ));
             }
-            break (Some(next), false);
         }
-        continuation = Some(next);
     };
 
-    let totals_complete = selection.continuation.is_none() && complete;
-    let next = next
-        .map(|url| {
-            encode_continuation(&ListContinuation {
-                version: 1,
-                selected_date: selection.selected_date.to_string(),
-                month_start: selection.month_start.clone(),
-                month_end: selection.month_end.clone(),
-                url,
-                limit: selection.plan.record_limit(),
-                page_limit: selection.plan.page_limit(),
-                all_pages: selection.plan.is_all_pages(),
-            })
-        })
-        .transpose()?;
     let details = schedule_totals.finish();
-    let pagination = ListPagination {
-        selected_date: selection.selected_date.to_string(),
-        month_start: selection.month_start,
-        month_end: selection.month_end,
-        limit: selection.plan.record_limit(),
-        page_limit: selection.plan.page_limit(),
-        all_pages: selection.plan.is_all_pages(),
-        pages_retrieved,
-        records_retrieved,
+    let pagination = pagination_metadata(
+        &selection,
+        traversal.pages_retrieved(),
+        traversal.records_retrieved(),
         records_returned,
         next,
         complete,
-        totals_complete,
-    };
+    )?;
     let projected = selection
         .fields
         .as_ref()

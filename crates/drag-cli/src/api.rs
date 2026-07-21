@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use drag::models::{AddWorklogRequest, ScheduleEntity, WorklogEntity};
-use drag::pagination::{PaginationPlan, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
+use drag::pagination::{
+    PaginationPlan, TraversalDecision, TraversalError, TraversalState, DEFAULT_RECORD_LIMIT,
+};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
@@ -188,36 +190,44 @@ impl ApiClient {
         continue_from: Option<&str>,
     ) -> Result<WorklogPage, CliError> {
         let mut results = Vec::new();
-        let mut pages_retrieved = 0_u16;
+        let mut traversal = TraversalState::new(plan);
         let mut continuation = continue_from.map(str::to_owned);
 
         loop {
             let mut page = self
                 .get_worklog_page(from, to, plan, continuation.as_deref(), results.len())
                 .await?;
+            let decision = traversal
+                .consume_page(
+                    page.pages_retrieved,
+                    page.results.len(),
+                    page.next.is_some(),
+                )
+                .map_err(pagination_traversal_error)?;
             results.append(&mut page.results);
-            pages_retrieved += page.pages_retrieved;
 
-            let Some(next) = page.next else {
-                return Ok(WorklogPage {
-                    results,
-                    next: None,
-                    pages_retrieved,
-                });
-            };
-            if !plan.should_follow(pages_retrieved, results.len()) {
-                if plan.is_all_pages() && pages_retrieved == HARD_PAGE_LIMIT {
+            match (decision, page.next) {
+                (TraversalDecision::Continue, Some(next)) => continuation = Some(next),
+                (TraversalDecision::Complete, _) => {
+                    return Ok(WorklogPage {
+                        results,
+                        next: None,
+                        pages_retrieved: traversal.pages_retrieved(),
+                    });
+                }
+                (TraversalDecision::Bounded, next) => {
+                    return Ok(WorklogPage {
+                        results,
+                        next,
+                        pages_retrieved: traversal.pages_retrieved(),
+                    });
+                }
+                (TraversalDecision::Continue, None) => {
                     return Err(CliError::Api(
-                        "Tempo pagination exceeded the 100-page safety limit".to_owned(),
+                        "Tempo pagination state was internally inconsistent".to_owned(),
                     ));
                 }
-                return Ok(WorklogPage {
-                    results,
-                    next: Some(next),
-                    pages_retrieved,
-                });
             }
-            continuation = Some(next);
         }
     }
 
@@ -466,6 +476,17 @@ impl ApiClient {
             self.credentials.atlassian_token.clone(),
             self.atlassian_basic_auth(),
         ]
+    }
+}
+
+fn pagination_traversal_error(error: TraversalError) -> CliError {
+    match error {
+        TraversalError::HardPageLimitExceeded => {
+            CliError::Api("Tempo pagination exceeded the 100-page safety limit".to_owned())
+        }
+        TraversalError::AccountingOverflow => {
+            CliError::Api("Tempo pagination accounting overflowed".to_owned())
+        }
     }
 }
 
