@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.7.0
+
+### Minor Changes
+
+- 3248fe0: Add portable coding-session worklog recipes and conservative Tempo operation effect labels.
+
 ## 0.6.0
 
 ### Minor Changes
