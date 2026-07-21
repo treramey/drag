@@ -530,7 +530,7 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
                     json!({
                         "dryRun": {"const": true},
                         "operationId": {"type": "string"},
-                        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE"]},
+                        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]},
                         "effect": {"type": "string", "enum": ["read", "mutation", "ambiguous"]},
                         "url": {"type": "string", "format": "uri"},
                         "body": {}

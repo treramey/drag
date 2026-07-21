@@ -71,7 +71,7 @@ jobs:
           DRAG_CACHE_DIR: ${{ runner.temp }}/drag-openapi
         run: |
           error_file="$(mktemp)"
-          if cargo run --locked -- --output json generate-skills --scope tempo --force 2>"$error_file"; then
+          if cargo run --quiet --locked -- --output json generate-skills --scope tempo --force 2>"$error_file"; then
             if ! git diff --quiet -- skills/drag-tempo; then
               echo "::warning::Tempo's OpenAPI catalog changed; the scheduled synchronization workflow will open a PR."
             fi

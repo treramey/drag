@@ -22,9 +22,8 @@ const ETAG_FILE: &str = "tempo-openapi.etag";
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REF_DEPTH: usize = 64;
-const OPENAPI_HTTP_METHODS: [&str; 8] = [
-    "get", "post", "put", "patch", "delete", "options", "head", "trace",
-];
+const OPENAPI_HTTP_METHODS: [&str; 7] =
+    ["get", "post", "put", "patch", "delete", "options", "head"];
 const EFFECT_EXTENSION: &str = "x-tempo-operation-effect";
 
 struct LoadedDocument {
@@ -1140,8 +1139,8 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::{
-        executable_operations, friendly_method_name, kebab_case, parse_document,
-        prepare_request_with_base, read_document,
+        executable_operations, friendly_method_name, kebab_case, operation_effect, parse_document,
+        prepare_request_with_base, read_document, OperationEffect,
     };
     use crate::api::ApiClient;
     use crate::config::Credentials;
@@ -1189,6 +1188,25 @@ mod tests {
             )
             .as_deref(),
             Some("list")
+        );
+    }
+
+    #[test]
+    fn unsupported_methods_have_ambiguous_effect_without_becoming_executable() {
+        let definition = serde_json::json!({
+            "operationId": "traceWorklogs",
+            "summary": "Trace Worklogs"
+        });
+
+        assert_eq!(
+            operation_effect(
+                "TRACE",
+                "/4/worklogs",
+                "traceWorklogs",
+                "Trace Worklogs",
+                &definition,
+            ),
+            OperationEffect::Ambiguous
         );
     }
 

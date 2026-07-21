@@ -272,12 +272,16 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     assert!(day.contains("unknown"));
     assert!(day.contains("pagination.next"));
     assert!(day.contains("exact worklog ID"));
+    assert!(day.contains("accumulate `worklogs.duration`"));
+    assert!(day.contains("ignore segment-local `schedule.dayLoggedDuration`"));
 
     let week = fs::read_to_string(directory.path().join("skills/recipe-audit-week/SKILL.md"))?;
     assert!(week.contains("Retrieve each date independently"));
     assert!(week.contains("required and logged totals"));
     assert!(week.contains("Jira issue and day"));
     assert!(week.contains("read-only"));
+    assert!(week.contains("accumulate `worklogs.duration`"));
+    assert!(week.contains("ignore segment-local `schedule.dayLoggedDuration`"));
 
     let correction = fs::read_to_string(
         directory
@@ -290,6 +294,12 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     assert!(correction.contains("create the replacement first"));
     assert!(correction.contains("recoverable duplicate"));
     assert!(correction.contains("original is not deleted"));
+    assert!(correction.contains("work attributes"));
+    assert!(correction.contains("billable seconds"));
+    assert!(correction.contains("uncertain runtime failure"));
+    assert!(correction.contains("re-fetch both exact IDs"));
+    assert!(correction.contains("Immediately before creation"));
+    assert!(correction.contains("Immediately before deletion"));
 
     let first_recipes = [
         ("recipe-log-coding-session", session),
@@ -490,11 +500,11 @@ fn tempo_skill_generation_materializes_the_cached_live_command_shape(
         "| `drag tempo worklogs replace-worklogs` | `replaceWorklogs` | `PUT` | `mutation` |",
         "| `drag tempo worklogs patch-worklogs` | `patchWorklogs` | `PATCH` | `mutation` |",
         "| `drag tempo worklogs delete-worklogs` | `deleteWorklogs` | `DELETE` | `mutation` |",
-        "| `drag tempo worklogs trace-worklogs` | `traceWorklogs` | `TRACE` | `ambiguous` |",
         "| `drag tempo worklogs create-authoritative-read` | `createAuthoritativeRead` | `POST` | `read` |",
     ] {
         assert!(resource.contains(expected), "missing row: {expected}");
     }
+    assert!(!resource.contains("trace-worklogs"));
     assert!(skill.contains("`read`, `mutation`, or `ambiguous`"));
     assert!(skill.contains("schema inspection, a dry run, and explicit authorization"));
     let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
