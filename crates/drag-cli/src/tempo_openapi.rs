@@ -479,6 +479,18 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
             });
         }
     }
+    let mut canonical_counts = HashMap::new();
+    for operation in &operations {
+        *canonical_counts
+            .entry((operation.resource.clone(), operation.method.clone()))
+            .or_insert(0_usize) += 1;
+    }
+    if let Some(((resource, method), _)) = canonical_counts.iter().find(|(_, count)| **count > 1) {
+        return Err(CliError::openapi_document(format!(
+            "Tempo OpenAPI resource '{resource}' has duplicate method '{method}'"
+        )));
+    }
+    let canonical_methods = canonical_counts.keys().cloned().collect::<HashSet<_>>();
     let mut alias_counts = HashMap::new();
     for operation in &operations {
         if let Some(alias) = &operation.friendly_alias {
@@ -494,6 +506,7 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
                 .copied()
                 .unwrap_or_default()
                 != 1
+                || canonical_methods.contains(&(operation.resource.clone(), alias.clone()))
         }) {
             operation.friendly_alias = None;
         }
@@ -958,16 +971,22 @@ fn find_executable_operation<'a>(
             "Tempo schema path must use tempo.<resource>.<method>".to_owned(),
         ));
     }
-    operations
-        .iter()
-        .find(|operation| {
-            operation.resource == segments[1]
-                && (operation.method == segments[2]
-                    || operation.friendly_alias.as_deref() == Some(segments[2]))
-        })
-        .ok_or_else(|| {
-            CliError::InvalidInput(format!("unknown Tempo OpenAPI operation '{dotted_path}'"))
-        })
+    let mut matches = operations.iter().filter(|operation| {
+        operation.resource == segments[1]
+            && (operation.method == segments[2]
+                || operation.friendly_alias.as_deref() == Some(segments[2]))
+    });
+    let Some(operation) = matches.next() else {
+        return Err(CliError::InvalidInput(format!(
+            "unknown Tempo OpenAPI operation '{dotted_path}'"
+        )));
+    };
+    if matches.next().is_some() {
+        return Err(CliError::InvalidInput(format!(
+            "ambiguous Tempo OpenAPI operation '{dotted_path}'; use its operation ID"
+        )));
+    }
+    Ok(operation)
 }
 
 fn friendly_method_name(
@@ -1212,6 +1231,49 @@ mod tests {
         assert!(find_executable_operation(&operations, "tempo.worklogs.trace-worklogs").is_err());
         assert!(find_executable_operation(&operations, "tempo.worklogs.get").is_err());
 
+        Ok(())
+    }
+
+    #[test]
+    fn executable_catalog_rejects_colliding_canonical_method_names() {
+        let document = serde_json::json!({
+            "paths": {
+                "/4/foos": {
+                    "get": {"operationId": "getFoo", "tags": ["Foos"]},
+                    "post": {"operationId": "get-foo", "tags": ["Foos"]}
+                }
+            }
+        });
+
+        let error = executable_operations(&document).err();
+
+        assert!(matches!(error, Some(CliError::OpenApiDocument(_))));
+        assert!(error.is_some_and(|error| error.to_string().contains("duplicate method 'get-foo'")));
+    }
+
+    #[test]
+    fn friendly_aliases_do_not_shadow_canonical_methods() -> Result<(), CliError> {
+        let document = serde_json::json!({
+            "paths": {
+                "/4/worklogs": {
+                    "get": {"operationId": "getWorklogs", "tags": ["Worklogs"]},
+                    "post": {"operationId": "list", "tags": ["Worklogs"]}
+                }
+            }
+        });
+
+        let operations = executable_operations(&document)?;
+        let list = operations
+            .iter()
+            .find(|operation| operation.operation_id == "getWorklogs")
+            .ok_or_else(|| CliError::invariant("missing getWorklogs test operation"))?;
+
+        assert_eq!(list.method, "get-worklogs");
+        assert_eq!(list.friendly_alias, None);
+        assert_eq!(
+            find_executable_operation(&operations, "tempo.worklogs.list")?.operation_id,
+            "list"
+        );
         Ok(())
     }
 

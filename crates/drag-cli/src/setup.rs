@@ -461,7 +461,6 @@ impl<'a> OnboardingWorkflow<'a> {
 
     pub(crate) fn continue_from_jira_details(&mut self) -> Result<OnboardingScreen, CliError> {
         self.require_screen(OnboardingScreen::JiraDetails)?;
-        self.invalidate_jira();
         self.screen = OnboardingScreen::JiraToken;
         Ok(self.screen)
     }
@@ -500,13 +499,12 @@ impl<'a> OnboardingWorkflow<'a> {
     }
 
     pub(crate) fn edit_jira(&mut self) -> OnboardingScreen {
-        self.invalidate_jira();
         self.screen = OnboardingScreen::JiraDetails;
         self.screen
     }
 
     pub(crate) fn edit_tempo(&mut self) -> Result<OnboardingScreen, CliError> {
-        self.invalidate_tempo()?;
+        self.require_stage(OnboardingStage::Complete)?;
         self.screen = OnboardingScreen::Tempo;
         Ok(self.screen)
     }
@@ -779,7 +777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn editing_jira_invalidates_both_verified_connections() -> Result<(), CliError> {
+    async fn reconnecting_jira_invalidates_both_verified_connections() -> Result<(), CliError> {
         let verifier = AcceptingVerifier;
         let mut workflow = OnboardingWorkflow::new(&Config::default(), &verifier, false, false);
         workflow.continue_from_jira_details()?;
@@ -796,8 +794,44 @@ mod tests {
 
         assert_eq!(workflow.edit_jira(), OnboardingScreen::JiraDetails);
         workflow.continue_from_jira_details()?;
+        workflow.invalidate_jira();
         assert!(workflow.finish().is_err());
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn navigation_and_review_editing_preserve_verification_until_submission(
+    ) -> Result<(), CliError> {
+        let verifier = AcceptingVerifier;
+        let mut workflow = OnboardingWorkflow::new(&Config::default(), &verifier, false, false);
+        workflow.continue_from_jira_details()?;
+        let _ = workflow
+            .connect_jira(
+                "example.atlassian.net".to_owned(),
+                "person@example.com".to_owned(),
+                SecretInput::Replace("jira-token".to_owned()),
+            )
+            .await?;
+        let _ = workflow
+            .connect_tempo(SecretInput::Replace("tempo-token".to_owned()))
+            .await?;
+
+        assert_eq!(workflow.back()?, Some(OnboardingScreen::Tempo));
+        assert_eq!(workflow.back()?, Some(OnboardingScreen::JiraToken));
+        assert_eq!(workflow.back()?, Some(OnboardingScreen::JiraDetails));
+        workflow.continue_from_jira_details()?;
+        workflow.continue_with_verified_jira()?;
+        workflow.continue_with_verified_tempo()?;
+
+        workflow.edit_jira();
+        workflow.continue_from_jira_details()?;
+        workflow.continue_with_verified_jira()?;
+        workflow.continue_with_verified_tempo()?;
+        workflow.edit_tempo()?;
+        workflow.continue_with_verified_tempo()?;
+
+        assert!(workflow.finish().is_ok());
         Ok(())
     }
 }
