@@ -8,7 +8,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
-use drag::field_selection::{project_list_result, ListField, ListFieldMask};
+use drag::field_selection::{project_list_result, ListField, ListFieldMask, ListProjectionPlan};
 use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
 use drag::pagination::{
     PaginationPlan, TraversalDecision, TraversalError, TraversalState, DEFAULT_PAGE_LIMIT,
@@ -170,7 +170,7 @@ impl ListDataSource for ApiListDataSource {
 }
 
 struct PreparedList {
-    fields: Option<ListFieldMask>,
+    projection: ListProjectionPlan,
     selected_date: NaiveDate,
     today: NaiveDate,
     details: ScheduleDetails,
@@ -189,7 +189,7 @@ pub(crate) struct ListReport {
     details: ScheduleDetails,
     pagination: ListPagination,
     verbose: bool,
-    fields: Option<ListFieldMask>,
+    projection: ListProjectionPlan,
 }
 
 impl ListReport {
@@ -207,12 +207,12 @@ impl ListReport {
             details,
             pagination,
             verbose,
-            fields: None,
+            projection: ListProjectionPlan::complete(),
         }
     }
 
-    fn with_fields(mut self, fields: Option<ListFieldMask>) -> Self {
-        self.fields = fields;
+    fn with_projection(mut self, projection: ListProjectionPlan) -> Self {
+        self.projection = projection;
         self
     }
 
@@ -262,38 +262,23 @@ impl ListReport {
         human
     }
 
-    fn structured_data(&self, fields: Option<&ListFieldMask>) -> serde_json::Value {
-        fields.map_or_else(
-            || {
-                json!({
-                    "date": self.selected_date(),
-                    "worklogs": self.worklogs(),
-                    "schedule": self.schedule(),
-                    "pagination": self.pagination(),
-                })
-            },
-            |mask| {
-                project_list_result(
-                    self.selected_date(),
-                    self.worklogs(),
-                    self.schedule(),
-                    self.pagination(),
-                    mask,
-                )
-            },
+    fn structured_data(&self) -> serde_json::Value {
+        project_list_result(
+            self.selected_date(),
+            self.worklogs(),
+            self.schedule(),
+            self.pagination(),
+            &self.projection,
         )
     }
 
     pub(crate) fn rendered(&self) -> Rendered {
-        Rendered::new(
-            self.structured_data(self.fields.as_ref()),
-            self.plain_text(),
-        )
+        Rendered::new(self.structured_data(), self.plain_text())
     }
 }
 
 struct ListSelection {
-    fields: Option<ListFieldMask>,
+    projection: ListProjectionPlan,
     selected_date: NaiveDate,
     month_start: String,
     month_end: String,
@@ -351,11 +336,12 @@ fn pagination_traversal_error(error: TraversalError) -> CliError {
 }
 
 fn list_selection(now: DateTime<Tz>, args: &ListArgs) -> Result<ListSelection, CliError> {
-    let fields = args
+    let projection = args
         .fields
         .as_deref()
         .map(ListFieldMask::parse)
-        .transpose()?;
+        .transpose()?
+        .map_or_else(ListProjectionPlan::complete, ListProjectionPlan::selected);
     let selected = select_date(now, args.when.as_deref())?;
     let (month_start, month_end) = month_bounds(selected.date);
     let month_start = month_start.to_string();
@@ -379,7 +365,7 @@ fn list_selection(now: DateTime<Tz>, args: &ListArgs) -> Result<ListSelection, C
         validate_tempo_continuation_input(&continuation.url, &month_start, &month_end, plan)?;
     }
     Ok(ListSelection {
-        fields,
+        projection,
         selected_date: selected.date,
         month_start,
         month_end,
@@ -442,7 +428,7 @@ async fn prepare(
     )?;
 
     Ok(PreparedList {
-        fields: selection.fields,
+        projection: selection.projection,
         selected_date: selection.selected_date,
         today: now.date_naive(),
         details,
@@ -501,7 +487,7 @@ pub(crate) async fn run_report(
         args.verbose,
     )
     .with_today(prepared.today)
-    .with_fields(prepared.fields))
+    .with_projection(prepared.projection))
 }
 
 pub(crate) async fn run_stream(
@@ -557,7 +543,7 @@ pub(crate) async fn run_stream(
             records_returned += 1;
             if let Some(worklog) = stream_worklog_value(
                 entity,
-                selection.fields.as_ref(),
+                &selection.projection,
                 now.timezone(),
                 source.as_ref(),
                 &mut issue_keys,
@@ -591,33 +577,27 @@ pub(crate) async fn run_stream(
         next,
         complete,
     )?;
-    let projected = selection
-        .fields
-        .as_ref()
-        .map(|mask| project_list_result(selection.selected_date, &[], &details, &pagination, mask));
+    let projected = project_list_result(
+        selection.selected_date,
+        &[],
+        &details,
+        &pagination,
+        &selection.projection,
+    );
     let mut summary = serde_json::Map::from_iter([("kind".to_owned(), json!("summary"))]);
-    if let Some(projected) = &projected {
-        if let Some(date) = projected.get("date") {
-            summary.insert("date".to_owned(), date.clone());
-        }
-        if let Some(schedule) = projected.get("schedule") {
-            summary.insert("schedule".to_owned(), schedule.clone());
-        }
-    } else {
-        summary.insert("date".to_owned(), json!(selection.selected_date));
-        summary.insert("schedule".to_owned(), json!(details));
+    if let Some(date) = projected.get("date") {
+        summary.insert("date".to_owned(), date.clone());
+    }
+    if let Some(schedule) = projected.get("schedule") {
+        summary.insert("schedule".to_owned(), schedule.clone());
     }
     if !write_stream_event(writer, &serde_json::Value::Object(summary))? {
         return Ok(());
     }
 
     let mut terminal = serde_json::Map::from_iter([("kind".to_owned(), json!("pagination"))]);
-    if let Some(projected) = &projected {
-        if let Some(pagination) = projected.get("pagination") {
-            terminal.insert("pagination".to_owned(), pagination.clone());
-        }
-    } else {
-        terminal.insert("pagination".to_owned(), json!(pagination));
+    if let Some(pagination) = projected.get("pagination") {
+        terminal.insert("pagination".to_owned(), pagination.clone());
     }
     let _ = write_stream_event(writer, &serde_json::Value::Object(terminal))?;
     Ok(())
@@ -625,32 +605,29 @@ pub(crate) async fn run_stream(
 
 async fn stream_worklog_value(
     entity: WorklogEntity,
-    fields: Option<&ListFieldMask>,
+    plan: &ListProjectionPlan,
     timezone: Tz,
     source: &dyn ListDataSource,
     issue_keys: &mut BTreeMap<String, String>,
 ) -> Result<Option<serde_json::Value>, CliError> {
-    let Some(fields) = fields else {
+    if plan.is_complete() {
         let issue_key = resolved_issue_key(source, issue_keys, &entity.issue.id).await?;
         return Ok(Some(json!(to_worklog(entity, issue_key, timezone)?)));
-    };
-    if !fields.selects_worklogs() {
+    }
+    if !plan.selects_worklogs() {
         return Ok(None);
     }
 
-    let needs_issue_key =
-        fields.includes(ListField::WorklogIssueKey) || fields.includes(ListField::WorklogLink);
-    let issue_key = if needs_issue_key {
+    let issue_key = if plan.requires_issue_key() {
         Some(resolved_issue_key(source, issue_keys, &entity.issue.id).await?)
     } else {
         None
     };
-    let needs_interval = fields.includes(ListField::WorklogIntervalStartTime)
-        || fields.includes(ListField::WorklogIntervalEndTime);
-    let interval = needs_interval
+    let interval = plan
+        .requires_interval()
         .then(|| worklog_interval(&entity, timezone))
         .transpose()?;
-    let link = if fields.includes(ListField::WorklogLink) {
+    let link = if plan.requires_link() {
         Some(worklog_link(
             &entity,
             issue_key
@@ -662,35 +639,35 @@ async fn stream_worklog_value(
     };
 
     let mut worklog = serde_json::Map::new();
-    if fields.includes(ListField::WorklogId) {
+    if plan.includes(ListField::WorklogId) {
         worklog.insert("id".to_owned(), json!(entity.tempo_worklog_id));
     }
     if let Some(interval) = interval {
         let interval = interval.map_or(serde_json::Value::Null, |interval| {
             let mut projected = serde_json::Map::new();
-            if fields.includes(ListField::WorklogIntervalStartTime) {
+            if plan.includes(ListField::WorklogIntervalStartTime) {
                 projected.insert("startTime".to_owned(), json!(interval.start_time));
             }
-            if fields.includes(ListField::WorklogIntervalEndTime) {
+            if plan.includes(ListField::WorklogIntervalEndTime) {
                 projected.insert("endTime".to_owned(), json!(interval.end_time));
             }
             serde_json::Value::Object(projected)
         });
         worklog.insert("interval".to_owned(), interval);
     }
-    if fields.includes(ListField::WorklogIssueId) {
+    if plan.includes(ListField::WorklogIssueId) {
         worklog.insert("issueId".to_owned(), json!(entity.issue.id));
     }
-    if fields.includes(ListField::WorklogIssueKey) {
+    if plan.includes(ListField::WorklogIssueKey) {
         worklog.insert("issueKey".to_owned(), json!(issue_key));
     }
-    if fields.includes(ListField::WorklogDuration) {
+    if plan.includes(ListField::WorklogDuration) {
         worklog.insert(
             "duration".to_owned(),
             json!(format_duration(entity.time_spent_seconds, false)),
         );
     }
-    if fields.includes(ListField::WorklogDescription) {
+    if plan.includes(ListField::WorklogDescription) {
         worklog.insert("description".to_owned(), json!(entity.description));
     }
     if let Some(link) = link {
@@ -1072,6 +1049,37 @@ mod tests {
             .map(serde_json::from_slice)
             .collect::<Result<_, _>>()
             .map_err(Into::into)
+    }
+
+    fn normalized_stream_result(events: &[serde_json::Value]) -> serde_json::Value {
+        let mut result = serde_json::Map::new();
+        let mut worklogs = Vec::new();
+        for event in events {
+            match event.get("kind").and_then(serde_json::Value::as_str) {
+                Some("worklog") => {
+                    if let Some(worklog) = event.get("worklog") {
+                        worklogs.push(worklog.clone());
+                    }
+                }
+                Some("summary") => {
+                    for key in ["date", "schedule"] {
+                        if let Some(value) = event.get(key) {
+                            result.insert(key.to_owned(), value.clone());
+                        }
+                    }
+                }
+                Some("pagination") => {
+                    if let Some(value) = event.get("pagination") {
+                        result.insert("pagination".to_owned(), value.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !worklogs.is_empty() {
+            result.insert("worklogs".to_owned(), serde_json::Value::Array(worklogs));
+        }
+        serde_json::Value::Object(result)
     }
 
     #[tokio::test]
@@ -1468,6 +1476,44 @@ mod tests {
                 json!({"kind": "pagination", "pagination": {"next": null}}),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn every_selected_leaf_has_json_and_ndjson_projection_parity() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let now = chrono_tz::UTC
+            .with_ymd_and_hms(2026, 7, 14, 12, 0, 0)
+            .single()
+            .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
+
+        for field in ListField::paths() {
+            let source = || FakeListDataSource {
+                worklogs: vec![worklog("visible", "2026-07-14", "me", "10")],
+                schedule: vec![ScheduleEntity {
+                    date: "2026-07-14".to_owned(),
+                    required_seconds: 28_800,
+                    kind: "WORKING_DAY".to_owned(),
+                }],
+                requests: Arc::new(Mutex::new(Requests::default())),
+                failing_issues: Vec::new(),
+                pagination_result: None,
+            };
+            let args = ListArgs {
+                fields: Some(field.to_owned()),
+                ..ListArgs::default()
+            };
+            let accumulated = run(&path, now, args.clone(), |_| Ok(Box::new(source()))).await?;
+            let mut output = Vec::new();
+            run_stream(&path, now, args, |_| Ok(Box::new(source())), &mut output).await?;
+            let normalized = normalized_stream_result(&ndjson_lines(&output)?);
+
+            assert_eq!(
+                accumulated.data, normalized,
+                "projection differed for {field}"
+            );
+        }
         Ok(())
     }
 
@@ -2154,10 +2200,10 @@ mod tests {
         assert_eq!(report.issue_label(&report.worklogs()[0]), "KEY-10");
         assert!(report.plain_text().contains("description visible"));
         assert_eq!(
-            report.structured_data(None)["worklogs"][0]["issueKey"],
+            report.structured_data()["worklogs"][0]["issueKey"],
             "KEY-10"
         );
-        assert!(report.structured_data(None)["worklogs"][0]
+        assert!(report.structured_data()["worklogs"][0]
             .get("issueLabel")
             .is_none());
         Ok(())

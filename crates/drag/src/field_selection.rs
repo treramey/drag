@@ -215,6 +215,64 @@ impl ListFieldMask {
     }
 }
 
+/// Canonical output and enrichment requirements derived from a list field mask.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListProjectionPlan {
+    mask: Option<ListFieldMask>,
+}
+
+impl ListProjectionPlan {
+    /// Selects the complete, unmasked list result.
+    #[must_use]
+    pub const fn complete() -> Self {
+        Self { mask: None }
+    }
+
+    /// Builds a selective projection from a validated mask.
+    #[must_use]
+    pub const fn selected(mask: ListFieldMask) -> Self {
+        Self { mask: Some(mask) }
+    }
+
+    /// Whether a canonical result field is selected.
+    #[must_use]
+    pub fn includes(&self, field: ListField) -> bool {
+        self.mask.as_ref().is_none_or(|mask| mask.includes(field))
+    }
+
+    /// Whether any worklog event or array entry should be emitted.
+    #[must_use]
+    pub fn selects_worklogs(&self) -> bool {
+        self.mask
+            .as_ref()
+            .is_none_or(ListFieldMask::selects_worklogs)
+    }
+
+    /// Whether Jira issue-key resolution is needed by selected worklog leaves.
+    #[must_use]
+    pub fn requires_issue_key(&self) -> bool {
+        self.includes(ListField::WorklogIssueKey) || self.includes(ListField::WorklogLink)
+    }
+
+    /// Whether a Jira browse URL must be constructed.
+    #[must_use]
+    pub fn requires_link(&self) -> bool {
+        self.includes(ListField::WorklogLink)
+    }
+
+    /// Whether clock interval parsing and calculation is needed.
+    #[must_use]
+    pub fn requires_interval(&self) -> bool {
+        self.includes(ListField::WorklogIntervalStartTime)
+            || self.includes(ListField::WorklogIntervalEndTime)
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.mask.is_none()
+    }
+}
+
 /// Invalid structured result field selection.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FieldSelectionError {
@@ -230,48 +288,56 @@ pub enum FieldSelectionError {
     Overlapping,
 }
 
-/// Projects a complete list report into the stable shape selected by `mask`.
+/// Projects a complete list report into the stable shape selected by `plan`.
 #[must_use]
 pub fn project_list_result(
     date: NaiveDate,
     worklogs: &[Worklog],
     details: &ScheduleDetails,
     pagination: &ListPagination,
-    mask: &ListFieldMask,
+    plan: &ListProjectionPlan,
 ) -> serde_json::Value {
+    if plan.is_complete() {
+        return json!({
+            "date": date,
+            "worklogs": worklogs,
+            "schedule": details,
+            "pagination": pagination,
+        });
+    }
     let mut result = serde_json::Map::new();
-    if mask.includes(ListField::Date) {
+    if plan.includes(ListField::Date) {
         result.insert("date".to_owned(), json!(date));
     }
-    if mask.selects_worklogs() {
+    if plan.selects_worklogs() {
         result.insert(
             "worklogs".to_owned(),
             serde_json::Value::Array(
                 worklogs
                     .iter()
-                    .map(|worklog| project_worklog(worklog, mask))
+                    .map(|worklog| project_worklog(worklog, plan))
                     .collect(),
             ),
         );
     }
-    if selects_schedule(mask) {
-        result.insert("schedule".to_owned(), project_schedule(details, mask));
+    if selects_schedule(plan) {
+        result.insert("schedule".to_owned(), project_schedule(details, plan));
     }
-    if selects_pagination(mask) {
+    if selects_pagination(plan) {
         result.insert(
             "pagination".to_owned(),
-            project_pagination(pagination, mask),
+            project_pagination(pagination, plan),
         );
     }
     serde_json::Value::Object(result)
 }
 
-fn project_worklog(worklog: &Worklog, mask: &ListFieldMask) -> serde_json::Value {
+fn project_worklog(worklog: &Worklog, plan: &ListProjectionPlan) -> serde_json::Value {
     let mut result = serde_json::Map::new();
-    insert_selected(&mut result, mask, ListField::WorklogId, "id", &worklog.id);
-    if mask.includes(ListField::WorklogInterval)
-        || mask.includes(ListField::WorklogIntervalStartTime)
-        || mask.includes(ListField::WorklogIntervalEndTime)
+    insert_selected(&mut result, plan, ListField::WorklogId, "id", &worklog.id);
+    if plan.includes(ListField::WorklogInterval)
+        || plan.includes(ListField::WorklogIntervalStartTime)
+        || plan.includes(ListField::WorklogIntervalEndTime)
     {
         let interval = worklog
             .interval
@@ -280,14 +346,14 @@ fn project_worklog(worklog: &Worklog, mask: &ListFieldMask) -> serde_json::Value
                 let mut projected = serde_json::Map::new();
                 insert_selected(
                     &mut projected,
-                    mask,
+                    plan,
                     ListField::WorklogIntervalStartTime,
                     "startTime",
                     &interval.start_time,
                 );
                 insert_selected(
                     &mut projected,
-                    mask,
+                    plan,
                     ListField::WorklogIntervalEndTime,
                     "endTime",
                     &interval.end_time,
@@ -298,35 +364,35 @@ fn project_worklog(worklog: &Worklog, mask: &ListFieldMask) -> serde_json::Value
     }
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::WorklogIssueId,
         "issueId",
         &worklog.issue_id,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::WorklogIssueKey,
         "issueKey",
         &worklog.issue_key,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::WorklogDuration,
         "duration",
         &worklog.duration,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::WorklogDescription,
         "description",
         &worklog.description,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::WorklogLink,
         "link",
         &worklog.link,
@@ -334,7 +400,7 @@ fn project_worklog(worklog: &Worklog, mask: &ListFieldMask) -> serde_json::Value
     serde_json::Value::Object(result)
 }
 
-fn selects_schedule(mask: &ListFieldMask) -> bool {
+fn selects_schedule(plan: &ListProjectionPlan) -> bool {
     [
         ListField::Schedule,
         ListField::ScheduleMonthRequiredDuration,
@@ -344,10 +410,10 @@ fn selects_schedule(mask: &ListFieldMask) -> bool {
         ListField::ScheduleDayLoggedDuration,
     ]
     .into_iter()
-    .any(|field| mask.includes(field))
+    .any(|field| plan.includes(field))
 }
 
-fn project_schedule(details: &ScheduleDetails, mask: &ListFieldMask) -> serde_json::Value {
+fn project_schedule(details: &ScheduleDetails, plan: &ListProjectionPlan) -> serde_json::Value {
     let mut result = serde_json::Map::new();
     for (field, name, value) in [
         (
@@ -376,12 +442,12 @@ fn project_schedule(details: &ScheduleDetails, mask: &ListFieldMask) -> serde_js
             &details.day_logged_duration,
         ),
     ] {
-        insert_selected(&mut result, mask, field, name, value);
+        insert_selected(&mut result, plan, field, name, value);
     }
     serde_json::Value::Object(result)
 }
 
-fn selects_pagination(mask: &ListFieldMask) -> bool {
+fn selects_pagination(plan: &ListProjectionPlan) -> bool {
     [
         ListField::Pagination,
         ListField::PaginationSelectedDate,
@@ -398,91 +464,91 @@ fn selects_pagination(mask: &ListFieldMask) -> bool {
         ListField::PaginationTotalsComplete,
     ]
     .into_iter()
-    .any(|field| mask.includes(field))
+    .any(|field| plan.includes(field))
 }
 
-fn project_pagination(pagination: &ListPagination, mask: &ListFieldMask) -> serde_json::Value {
+fn project_pagination(pagination: &ListPagination, plan: &ListProjectionPlan) -> serde_json::Value {
     let mut result = serde_json::Map::new();
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationSelectedDate,
         "selectedDate",
         &pagination.selected_date,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationMonthStart,
         "monthStart",
         &pagination.month_start,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationMonthEnd,
         "monthEnd",
         &pagination.month_end,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationLimit,
         "limit",
         pagination.limit,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationPageLimit,
         "pageLimit",
         pagination.page_limit,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationAllPages,
         "allPages",
         pagination.all_pages,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationPagesRetrieved,
         "pagesRetrieved",
         pagination.pages_retrieved,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationRecordsRetrieved,
         "recordsRetrieved",
         pagination.records_retrieved,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationRecordsReturned,
         "recordsReturned",
         pagination.records_returned,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationNext,
         "next",
         &pagination.next,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationComplete,
         "complete",
         pagination.complete,
     );
     insert_selected(
         &mut result,
-        mask,
+        plan,
         ListField::PaginationTotalsComplete,
         "totalsComplete",
         pagination.totals_complete,
@@ -492,12 +558,39 @@ fn project_pagination(pagination: &ListPagination, mask: &ListFieldMask) -> serd
 
 fn insert_selected<T: serde::Serialize>(
     result: &mut serde_json::Map<String, serde_json::Value>,
-    mask: &ListFieldMask,
+    plan: &ListProjectionPlan,
     field: ListField,
     name: &str,
     value: T,
 ) {
-    if mask.includes(field) {
+    if plan.includes(field) {
         result.insert(name.to_owned(), json!(value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_plan_derives_worklog_enrichment_requirements() -> Result<(), FieldSelectionError>
+    {
+        let tempo_only = ListProjectionPlan::selected(ListFieldMask::parse("worklogs.id")?);
+        assert!(tempo_only.selects_worklogs());
+        assert!(!tempo_only.requires_issue_key());
+        assert!(!tempo_only.requires_link());
+        assert!(!tempo_only.requires_interval());
+
+        let interval = ListProjectionPlan::selected(ListFieldMask::parse("worklogs.interval")?);
+        assert!(interval.requires_interval());
+        assert!(!interval.requires_issue_key());
+
+        let link = ListProjectionPlan::selected(ListFieldMask::parse("worklogs.link")?);
+        assert!(link.requires_issue_key());
+        assert!(link.requires_link());
+
+        let pagination = ListProjectionPlan::selected(ListFieldMask::parse("pagination.next")?);
+        assert!(!pagination.selects_worklogs());
+        Ok(())
     }
 }
