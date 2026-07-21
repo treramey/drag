@@ -223,7 +223,7 @@ impl ApiClient {
                     });
                 }
                 (TraversalDecision::Continue, None) => {
-                    return Err(CliError::Api(
+                    return Err(CliError::invariant(
                         "Tempo pagination state was internally inconsistent".to_owned(),
                     ));
                 }
@@ -257,8 +257,10 @@ impl ApiClient {
         };
         let page: Page<WorklogEntity> = self.json(request).await?;
         if page.results.len() > request_limit {
-            return Err(CliError::Api(
-                "Tempo returned more worklogs than the requested record limit".to_owned(),
+            return Err(CliError::invalid_response(
+                RemoteService::Tempo,
+                None,
+                "returned more worklogs than the requested record limit",
             ));
         }
         if let Some(next) = &page.metadata.next {
@@ -280,17 +282,25 @@ impl ApiClient {
     ) -> Result<Url, CliError> {
         parse_tempo_continuation(value, &self.tempo_origin, from, to, plan).map_err(|kind| {
             match kind {
-                ContinuationError::Malformed => {
-                    CliError::Api("Tempo returned a malformed pagination URL".to_owned())
-                }
-                ContinuationError::Unsafe => {
-                    CliError::Api("Tempo returned an unsafe pagination URL".to_owned())
-                }
-                ContinuationError::Range => CliError::Api(
-                    "Tempo returned pagination for an unexpected date range".to_owned(),
+                ContinuationError::Malformed => CliError::invalid_response(
+                    RemoteService::Tempo,
+                    None,
+                    "returned a malformed pagination URL",
                 ),
-                ContinuationError::Limit => CliError::Api(
-                    "Tempo returned pagination with an unsafe record limit".to_owned(),
+                ContinuationError::Unsafe => CliError::invalid_response(
+                    RemoteService::Tempo,
+                    None,
+                    "returned an unsafe pagination URL",
+                ),
+                ContinuationError::Range => CliError::invalid_response(
+                    RemoteService::Tempo,
+                    None,
+                    "returned pagination for an unexpected date range",
+                ),
+                ContinuationError::Limit => CliError::invalid_response(
+                    RemoteService::Tempo,
+                    None,
+                    "returned pagination with an unsafe record limit",
                 ),
             }
         })
@@ -343,8 +353,10 @@ impl ApiClient {
         let response: CurrentUser = self.json(self.atlassian_current_user()?).await?;
         let account_id = response.account_id.trim();
         if account_id.is_empty() {
-            return Err(CliError::Api(
-                "Jira returned an empty account ID".to_owned(),
+            return Err(CliError::invalid_response(
+                RemoteService::Jira,
+                None,
+                "returned an empty account ID",
             ));
         }
         Ok(account_id.to_owned())
@@ -481,11 +493,13 @@ impl ApiClient {
 
 fn pagination_traversal_error(error: TraversalError) -> CliError {
     match error {
-        TraversalError::HardPageLimitExceeded => {
-            CliError::Api("Tempo pagination exceeded the 100-page safety limit".to_owned())
-        }
+        TraversalError::HardPageLimitExceeded => CliError::invalid_response(
+            RemoteService::Tempo,
+            None,
+            "pagination exceeded the 100-page safety limit",
+        ),
         TraversalError::AccountingOverflow => {
-            CliError::Api("Tempo pagination accounting overflowed".to_owned())
+            CliError::invariant("Tempo pagination accounting overflowed")
         }
     }
 }
@@ -636,7 +650,7 @@ mod tests {
     use drag::models::AddWorklogRequest;
 
     use super::{api_error, safe_segment, ApiClient, PaginationPlan};
-    use crate::{config::Credentials, CliError};
+    use crate::{config::Credentials, CliError, RemoteErrorKind};
 
     fn credentials() -> Credentials {
         Credentials {
@@ -1166,7 +1180,10 @@ mod tests {
             .err()
             .ok_or("malformed continuation unexpectedly succeeded")?;
 
-        assert!(matches!(&error, CliError::Api(_)));
+        assert!(matches!(
+            &error,
+            CliError::Remote(remote) if remote.kind == RemoteErrorKind::InvalidResponse
+        ));
         assert_eq!(error.exit_code(), 1);
         assert!(!error.to_string().contains("tempo-secret"));
         Ok(())

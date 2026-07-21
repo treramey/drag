@@ -271,12 +271,57 @@ fn write_json(writer: &mut impl Write, value: &impl Serialize) -> Result<(), Cli
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use reqwest::StatusCode;
     use serde_json::json;
 
     use crate::{CliError, RemoteError, RemoteErrorKind, RemoteService};
 
-    use super::{error_for_terminal, escape_terminal_data, sanitize_for_terminal, write_json};
+    use super::{
+        error_for_terminal, escape_terminal_data, sanitize_for_terminal, write_json, ErrorBody,
+        Failure,
+    };
+
+    fn structured_error(error: &CliError) -> Result<serde_json::Value, serde_json::Error> {
+        let message = error.to_string();
+        serde_json::to_value(Failure {
+            ok: false,
+            error: ErrorBody {
+                code: error.code(),
+                message: &message,
+            },
+        })
+    }
+
+    #[test]
+    fn refined_internal_errors_keep_the_public_envelope_and_exit_mapping(
+    ) -> Result<(), serde_json::Error> {
+        for (error, code, exit_code) in [
+            (
+                CliError::openapi_document("Tempo returned invalid OpenAPI YAML"),
+                "api_error",
+                1,
+            ),
+            (
+                CliError::invariant("Tempo pagination state was internally inconsistent"),
+                "api_error",
+                1,
+            ),
+            (
+                CliError::openapi_cache(io::Error::other("cache write failed")),
+                "io_error",
+                1,
+            ),
+        ] {
+            let envelope = structured_error(&error)?;
+            assert_eq!(envelope["ok"], false);
+            assert_eq!(envelope["error"]["code"], code);
+            assert!(envelope["error"]["message"].is_string());
+            assert_eq!(error.exit_code(), exit_code);
+        }
+        Ok(())
+    }
 
     #[test]
     fn terminal_sanitizer_removes_escape_and_bidi_control_characters() {

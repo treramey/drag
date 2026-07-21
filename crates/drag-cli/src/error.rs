@@ -69,6 +69,10 @@ pub(crate) enum CliError {
     #[error("API request failed: {0}")]
     Api(String),
     #[error("API request failed: {0}")]
+    OpenApiDocument(String),
+    #[error("API request failed: {0}")]
+    Invariant(String),
+    #[error("API request failed: {0}")]
     Remote(RemoteError),
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -78,6 +82,8 @@ pub(crate) enum CliError {
     Json(#[from] serde_json::Error),
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("I/O failed: {0}")]
+    OpenApiCache(io::Error),
 }
 
 impl CliError {
@@ -88,11 +94,13 @@ impl CliError {
             Self::Usage(_) => "usage",
             Self::NotConfigured(_) => "not_configured",
             Self::Config { .. } => "config_error",
-            Self::Api(_) | Self::Remote(_) => "api_error",
+            Self::Api(_) | Self::OpenApiDocument(_) | Self::Invariant(_) | Self::Remote(_) => {
+                "api_error"
+            }
             Self::Http(_) => "http_error",
             Self::Url(_) => "invalid_url",
             Self::Json(_) => "invalid_json",
-            Self::Io(_) => "io_error",
+            Self::Io(_) | Self::OpenApiCache(_) => "io_error",
         }
     }
 
@@ -104,14 +112,44 @@ impl CliError {
             | Self::NotConfigured(_)
             | Self::Json(_)
             | Self::Url(_) => EXIT_USAGE,
-            Self::Config { .. } | Self::Api(_) | Self::Remote(_) | Self::Http(_) | Self::Io(_) => {
-                EXIT_FAILURE
-            }
+            Self::Config { .. }
+            | Self::Api(_)
+            | Self::OpenApiDocument(_)
+            | Self::Invariant(_)
+            | Self::Remote(_)
+            | Self::Http(_)
+            | Self::Io(_)
+            | Self::OpenApiCache(_) => EXIT_FAILURE,
         }
     }
 
     pub(crate) fn is_authentication(&self) -> bool {
         matches!(self, Self::Remote(error) if error.kind == RemoteErrorKind::Authentication)
+    }
+
+    pub(crate) fn invalid_response(
+        service: RemoteService,
+        status: Option<StatusCode>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::Remote(RemoteError {
+            service,
+            status,
+            kind: RemoteErrorKind::InvalidResponse,
+            message: message.into(),
+        })
+    }
+
+    pub(crate) fn openapi_document(message: impl Into<String>) -> Self {
+        Self::OpenApiDocument(message.into())
+    }
+
+    pub(crate) fn openapi_cache(error: io::Error) -> Self {
+        Self::OpenApiCache(error)
+    }
+
+    pub(crate) fn invariant(message: impl Into<String>) -> Self {
+        Self::Invariant(message.into())
     }
 
     #[cfg(test)]

@@ -75,7 +75,7 @@ pub(crate) async fn skill_catalog() -> Result<SkillCatalog, CliError> {
         .value
         .get("openapi")
         .and_then(Value::as_str)
-        .ok_or_else(|| CliError::Api("Tempo OpenAPI document has no version".to_owned()))?
+        .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI document has no version"))?
         .to_owned();
     let operations = executable_operations(&loaded.value)?
         .into_iter()
@@ -152,8 +152,9 @@ pub(crate) async fn run_command(
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
     let api = ApiClient::new(credentials, debug)?;
-    let method = reqwest::Method::from_bytes(prepared.method.as_bytes())
-        .map_err(|error| CliError::Api(format!("Tempo OpenAPI method is invalid: {error}")))?;
+    let method = reqwest::Method::from_bytes(prepared.method.as_bytes()).map_err(|error| {
+        CliError::openapi_document(format!("Tempo OpenAPI method is invalid: {error}"))
+    })?;
     let response = api
         .execute_openapi_value(method, prepared.url.clone(), prepared.body.as_ref())
         .await?;
@@ -203,7 +204,7 @@ pub(crate) async fn schema(dotted_path: &str, resolve_refs: bool) -> Result<Rend
     }
     let operation_object = operation
         .as_object_mut()
-        .ok_or_else(|| CliError::Api("Tempo OpenAPI operation is not an object".to_owned()))?;
+        .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI operation is not an object"))?;
     operation_object.insert("httpMethod".to_owned(), Value::String(http_method));
     operation_object.insert("path".to_owned(), Value::String(api_path));
 
@@ -228,7 +229,7 @@ fn component_schema(
         .pointer("/components/schemas")
         .and_then(Value::as_object)
         .ok_or_else(|| {
-            CliError::Api("Tempo OpenAPI document has no component schemas".to_owned())
+            CliError::openapi_document("Tempo OpenAPI document has no component schemas")
         })?;
     let mut selected = schemas.get(schema_name).cloned().ok_or_else(|| {
         let mut available = schemas.keys().map(String::as_str).collect::<Vec<_>>();
@@ -258,7 +259,7 @@ fn schema_source(loaded: &LoadedDocument) -> Result<Value, CliError> {
         .value
         .get("openapi")
         .and_then(Value::as_str)
-        .ok_or_else(|| CliError::Api("Tempo OpenAPI document has no version".to_owned()))?;
+        .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI document has no version"))?;
     Ok(json!({
         "kind": "tempoOpenApi",
         "url": TEMPO_OPENAPI_URL,
@@ -291,7 +292,7 @@ async fn load_document() -> Result<LoadedDocument, CliError> {
     }
     let response = request.send().await?;
     if response.status() == StatusCode::NOT_MODIFIED {
-        let bytes = fs::read(&cache_path)?;
+        let bytes = fs::read(&cache_path).map_err(CliError::openapi_cache)?;
         write_cache(&cache_path, &bytes)?;
         return Ok(LoadedDocument {
             value: parse_document(&bytes)?,
@@ -299,10 +300,11 @@ async fn load_document() -> Result<LoadedDocument, CliError> {
         });
     }
     if !response.status().is_success() {
-        return Err(CliError::Api(format!(
-            "Tempo OpenAPI discovery returned {}",
-            response.status()
-        )));
+        return Err(CliError::invalid_response(
+            crate::RemoteService::Tempo,
+            Some(response.status()),
+            format!("OpenAPI discovery returned {}", response.status()),
+        ));
     }
     if response
         .headers()
@@ -311,8 +313,8 @@ async fn load_document() -> Result<LoadedDocument, CliError> {
         .and_then(|value| value.parse::<u64>().ok())
         .is_some_and(|length| length > MAX_DOCUMENT_BYTES)
     {
-        return Err(CliError::Api(
-            "Tempo OpenAPI document exceeds the 2 MiB safety limit".to_owned(),
+        return Err(CliError::openapi_document(
+            "Tempo OpenAPI document exceeds the 2 MiB safety limit",
         ));
     }
     let etag = response
@@ -322,15 +324,15 @@ async fn load_document() -> Result<LoadedDocument, CliError> {
         .map(str::to_owned);
     let bytes = response.bytes().await?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_DOCUMENT_BYTES {
-        return Err(CliError::Api(
-            "Tempo OpenAPI document exceeds the 2 MiB safety limit".to_owned(),
+        return Err(CliError::openapi_document(
+            "Tempo OpenAPI document exceeds the 2 MiB safety limit",
         ));
     }
     let value = parse_document(&bytes)?;
-    fs::create_dir_all(&cache_dir)?;
+    fs::create_dir_all(&cache_dir).map_err(CliError::openapi_cache)?;
     write_cache(&cache_path, &bytes)?;
     if let Some(etag) = etag {
-        fs::write(etag_path, etag)?;
+        fs::write(etag_path, etag).map_err(CliError::openapi_cache)?;
     }
     Ok(LoadedDocument {
         value,
@@ -359,27 +361,28 @@ fn cache_is_fresh(path: &Path) -> bool {
 }
 
 fn read_document(path: &Path) -> Result<Value, CliError> {
-    parse_document(&fs::read(path)?)
+    parse_document(&fs::read(path).map_err(CliError::openapi_cache)?)
 }
 
 fn parse_document(bytes: &[u8]) -> Result<Value, CliError> {
-    serde_yaml_ng::from_slice(bytes)
-        .map_err(|error| CliError::Api(format!("Tempo returned invalid OpenAPI YAML: {error}")))
+    serde_yaml_ng::from_slice(bytes).map_err(|error| {
+        CliError::openapi_document(format!("Tempo returned invalid OpenAPI YAML: {error}"))
+    })
 }
 
 fn write_cache(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent).map_err(CliError::openapi_cache)?;
     }
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary, bytes)?;
+    fs::write(&temporary, bytes).map_err(CliError::openapi_cache)?;
     #[cfg(windows)]
     if path.exists() {
-        fs::remove_file(path)?;
+        fs::remove_file(path).map_err(CliError::openapi_cache)?;
     }
     if let Err(error) = fs::rename(&temporary, path) {
         let _ = fs::remove_file(&temporary);
-        return Err(error.into());
+        return Err(CliError::openapi_cache(error));
     }
     Ok(())
 }
@@ -388,7 +391,7 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
     let paths = document
         .get("paths")
         .and_then(Value::as_object)
-        .ok_or_else(|| CliError::Api("Tempo OpenAPI document has no paths".to_owned()))?;
+        .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI document has no paths"))?;
     let mut operations = Vec::new();
     for (api_path, path_item) in paths {
         if !api_path.starts_with("/4/") {
@@ -588,8 +591,8 @@ fn prepare_request_with_base(
                 })?;
                 segments.push(value);
             } else if segment.contains(['{', '}']) {
-                return Err(CliError::Api(
-                    "Tempo OpenAPI path contains an unsupported parameter template".to_owned(),
+                return Err(CliError::openapi_document(
+                    "Tempo OpenAPI path contains an unsupported parameter template",
                 ));
             } else {
                 segments.push(segment);
@@ -648,7 +651,7 @@ fn request_body(
         .pointer("/content/application~1json/schema")
         .cloned()
         .ok_or_else(|| {
-            CliError::Api("Tempo OpenAPI request body has no application/json schema".to_owned())
+            CliError::openapi_document("Tempo OpenAPI request body has no application/json schema")
         })?;
     let mut stack = HashSet::new();
     resolve_local_refs(&mut schema, document, &mut stack, 0)?;
@@ -777,7 +780,7 @@ fn parameter_definitions(
         let name = parameter
             .get("name")
             .and_then(Value::as_str)
-            .ok_or_else(|| CliError::Api("Tempo OpenAPI parameter has no name".to_owned()))?;
+            .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI parameter has no name"))?;
         definitions.insert(name.to_owned(), parameter);
     }
     Ok(definitions)
@@ -849,7 +852,7 @@ fn find_operation(
     let paths = document
         .get("paths")
         .and_then(Value::as_object)
-        .ok_or_else(|| CliError::Api("Tempo OpenAPI document has no paths".to_owned()))?;
+        .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI document has no paths"))?;
     let mut matches = Vec::new();
     for (api_path, item) in paths {
         let Some(item) = item.as_object() else {
@@ -885,7 +888,7 @@ fn find_operation(
     match matches.len() {
         1 => matches
             .pop()
-            .ok_or_else(|| CliError::Api("Tempo operation lookup failed".to_owned())),
+            .ok_or_else(|| CliError::invariant("Tempo operation lookup failed")),
         0 => Err(CliError::InvalidInput(format!(
             "unknown Tempo OpenAPI operation '{dotted_path}'"
         ))),
@@ -965,8 +968,8 @@ fn resolve_local_refs(
     depth: usize,
 ) -> Result<(), CliError> {
     if depth > MAX_REF_DEPTH {
-        return Err(CliError::Api(
-            "Tempo OpenAPI reference depth exceeds the safety limit".to_owned(),
+        return Err(CliError::openapi_document(
+            "Tempo OpenAPI reference depth exceeds the safety limit",
         ));
     }
     match value {
@@ -981,8 +984,8 @@ fn resolve_local_refs(
                         return Ok(());
                     }
                     let mut resolved = document.pointer(pointer).cloned().ok_or_else(|| {
-                        CliError::Api(
-                            "Tempo OpenAPI document contains an invalid reference".to_owned(),
+                        CliError::openapi_document(
+                            "Tempo OpenAPI document contains an invalid reference",
                         )
                     })?;
                     resolve_local_refs(&mut resolved, document, stack, depth + 1)?;
@@ -1020,10 +1023,27 @@ mod tests {
 
     use super::{
         executable_operations, friendly_method_name, kebab_case, parse_document,
-        prepare_request_with_base,
+        prepare_request_with_base, read_document,
     };
     use crate::api::ApiClient;
     use crate::config::Credentials;
+    use crate::CliError;
+
+    #[test]
+    fn malformed_yaml_is_classified_as_an_openapi_document_failure() {
+        let error = parse_document(b"openapi: [").err();
+
+        assert!(matches!(error, Some(CliError::OpenApiDocument(_))));
+    }
+
+    #[test]
+    fn failed_cache_reads_are_classified_as_openapi_cache_failures() {
+        let missing =
+            std::env::temp_dir().join(format!("drag-missing-openapi-cache-{}", std::process::id()));
+        let error = read_document(&missing).err();
+
+        assert!(matches!(error, Some(CliError::OpenApiCache(_))));
+    }
 
     #[test]
     fn openapi_names_have_stable_cli_forms() {

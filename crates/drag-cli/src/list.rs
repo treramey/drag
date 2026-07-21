@@ -24,7 +24,7 @@ use crate::api::{validate_tempo_continuation_input, ApiClient, WorklogPage};
 use crate::cli::ListArgs;
 use crate::config::{Config, Credentials};
 use crate::output::escape_terminal_data;
-use crate::{CliError, Rendered};
+use crate::{CliError, RemoteService, Rendered};
 
 type ListFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
 
@@ -326,11 +326,13 @@ fn pagination_metadata(
 
 fn pagination_traversal_error(error: TraversalError) -> CliError {
     match error {
-        TraversalError::HardPageLimitExceeded => {
-            CliError::Api("Tempo pagination exceeded the 100-page safety limit".to_owned())
-        }
+        TraversalError::HardPageLimitExceeded => CliError::invalid_response(
+            RemoteService::Tempo,
+            None,
+            "pagination exceeded the 100-page safety limit",
+        ),
         TraversalError::AccountingOverflow => {
-            CliError::Api("Tempo pagination accounting overflowed".to_owned())
+            CliError::invariant("Tempo pagination accounting overflowed")
         }
     }
 }
@@ -475,7 +477,7 @@ pub(crate) async fn run_report(
             let issue_key = issue_keys
                 .get(entity.issue.id.as_str())
                 .cloned()
-                .ok_or_else(|| CliError::Api("Atlassian did not return an issue key".to_owned()))?;
+                .ok_or_else(|| CliError::invariant("Atlassian issue-key cache was incomplete"))?;
             to_worklog(entity, issue_key, prepared.timezone)
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -561,7 +563,7 @@ pub(crate) async fn run_stream(
             (TraversalDecision::Complete, _) => break (None, true),
             (TraversalDecision::Bounded, next) => break (next, false),
             (TraversalDecision::Continue, None) => {
-                return Err(CliError::Api(
+                return Err(CliError::invariant(
                     "Tempo pagination state was internally inconsistent".to_owned(),
                 ));
             }
@@ -632,7 +634,7 @@ async fn stream_worklog_value(
             &entity,
             issue_key
                 .as_deref()
-                .ok_or_else(|| CliError::Api("Atlassian did not return an issue key".to_owned()))?,
+                .ok_or_else(|| CliError::invariant("Atlassian issue key was not resolved"))?,
         )?)
     } else {
         None
@@ -709,8 +711,9 @@ fn worklog_interval(
     entity: &WorklogEntity,
     timezone: Tz,
 ) -> Result<Option<drag::models::ClockInterval>, CliError> {
-    let date = NaiveDate::parse_from_str(&entity.start_date, "%Y-%m-%d")
-        .map_err(|_| CliError::Api("Tempo returned an invalid start date".to_owned()))?;
+    let date = NaiveDate::parse_from_str(&entity.start_date, "%Y-%m-%d").map_err(|_| {
+        CliError::invalid_response(RemoteService::Tempo, None, "returned an invalid start date")
+    })?;
     Ok(clock_interval(
         entity.time_spent_seconds,
         &entity.start_time,
@@ -723,7 +726,9 @@ fn worklog_link(entity: &WorklogEntity, issue_key: &str) -> Result<String, CliEr
     let hostname = Url::parse(&entity.issue.self_url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
-        .ok_or_else(|| CliError::Api("Tempo returned an invalid issue URL".to_owned()))?;
+        .ok_or_else(|| {
+            CliError::invalid_response(RemoteService::Tempo, None, "returned an invalid issue URL")
+        })?;
     Ok(format!("https://{hostname}/browse/{issue_key}"))
 }
 
