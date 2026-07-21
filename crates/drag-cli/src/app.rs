@@ -582,5 +582,5 @@ pub fn default_timezone(explicit: Option<&str>) -> Result<Tz, CliError> {
 }
 
 #[cfg(test)]
-#[path = "app_tests.rs"]
+#[path = "app_tests/mod.rs"]
 mod tests;
