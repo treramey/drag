@@ -3,17 +3,9 @@
 use std::io::{self, IsTerminal};
 use std::time::Duration;
 
-use crossterm::cursor::Show;
-use crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
-    KeyEventKind, KeyModifiers,
-};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::{Stream, StreamExt};
-use ratatui::backend::{Backend, CrosstermBackend};
+use ratatui::backend::Backend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style, Stylize};
@@ -28,6 +20,7 @@ use crate::setup::{
     setup_cancelled, BrowserLauncher, ConnectionOutcome, OnboardingFuture, OnboardingSession,
     OnboardingWorkflow, SecretInput, SystemBrowserLauncher,
 };
+use crate::terminal::{StderrTerminal, TerminalOptions};
 use crate::tui_theme::{
     constrain_content_width, footer_divider, render_brand_header, Palette, MAX_CONTENT_WIDTH,
     MUTED_COLOR, PRIMARY_COLOR, SUCCESS_COLOR,
@@ -187,7 +180,7 @@ impl RatatuiOnboardingSession {
         &'a self,
         workflow: OnboardingWorkflow<'a>,
     ) -> Result<OnboardingWorkflow<'a>, CliError> {
-        let mut terminal = StderrTerminal::new()?;
+        let mut terminal = StderrTerminal::new(TerminalOptions::bracketed_paste())?;
         let mut events = EventStream::new();
         let mut animation_ticker = AnimationTicker::terminal();
         let reduced_motion = reduced_motion_requested();
@@ -269,71 +262,6 @@ impl OnboardingSession for RatatuiOnboardingSession {
 
             self.run_terminal(workflow).await
         })
-    }
-}
-
-struct StderrTerminal {
-    terminal: Terminal<CrosstermBackend<io::Stderr>>,
-    restored: bool,
-}
-
-impl StderrTerminal {
-    fn new() -> Result<Self, CliError> {
-        enable_raw_mode()?;
-        let mut stderr = io::stderr();
-        if let Err(error) = execute!(stderr, EnterAlternateScreen, EnableBracketedPaste) {
-            let _ = execute!(stderr, DisableBracketedPaste, LeaveAlternateScreen, Show);
-            let _ = disable_raw_mode();
-            return Err(CliError::Io(error));
-        }
-
-        match Terminal::new(CrosstermBackend::new(stderr)) {
-            Ok(terminal) => Ok(Self {
-                terminal,
-                restored: false,
-            }),
-            Err(error) => {
-                let mut stderr = io::stderr();
-                let _ = execute!(stderr, DisableBracketedPaste, LeaveAlternateScreen, Show);
-                let _ = disable_raw_mode();
-                Err(CliError::Io(error))
-            }
-        }
-    }
-
-    fn terminal_mut(&mut self) -> &mut Terminal<CrosstermBackend<io::Stderr>> {
-        &mut self.terminal
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        if self.restored {
-            return Ok(());
-        }
-        self.restored = true;
-
-        let mut first_error = None;
-        if let Err(error) = self.terminal.show_cursor() {
-            first_error = Some(error);
-        }
-        if let Err(error) = execute!(
-            self.terminal.backend_mut(),
-            DisableBracketedPaste,
-            LeaveAlternateScreen,
-            Show
-        ) {
-            first_error.get_or_insert(error);
-        }
-        if let Err(error) = disable_raw_mode() {
-            first_error.get_or_insert(error);
-        }
-
-        first_error.map_or(Ok(()), Err)
-    }
-}
-
-impl Drop for StderrTerminal {
-    fn drop(&mut self) {
-        let _ = self.restore();
     }
 }
 

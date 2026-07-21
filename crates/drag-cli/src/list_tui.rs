@@ -6,25 +6,20 @@ use std::io::{self, IsTerminal};
 use std::pin::Pin;
 
 use chrono::Datelike;
-use crossterm::cursor::Show;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use futures_util::StreamExt;
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::calendar::{CalendarEventStore, Monthly};
 use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
-use ratatui::{Frame, Terminal};
+use ratatui::Frame;
 use ratatui_braille_bar::BrailleSpinner;
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
 use crate::list::ListReport;
 use crate::output::escape_terminal_data;
+use crate::terminal::{StderrTerminal, TerminalOptions};
 use crate::tui_theme::{constrain_content_width, footer_divider, render_brand_header, Palette};
 use crate::update;
 use crate::CliError;
@@ -232,7 +227,7 @@ async fn run_suspense(
     model.available_update = available_update.get().cloned().flatten();
     loop {
         terminal
-            .terminal
+            .terminal_mut()
             .draw(|frame| render_suspense(frame, date, &mut model))?;
         tokio::select! {
             loaded = &mut report => {
@@ -367,60 +362,6 @@ fn top_line(area: Rect) -> Rect {
     Rect::new(area.x, area.y, area.width, area.height.min(1))
 }
 
-struct StderrTerminal {
-    terminal: Terminal<CrosstermBackend<io::Stderr>>,
-    restored: bool,
-}
-
-impl StderrTerminal {
-    fn new() -> Result<Self, CliError> {
-        enable_raw_mode()?;
-        let mut stderr = io::stderr();
-        if let Err(error) = execute!(stderr, EnterAlternateScreen) {
-            let _ = execute!(stderr, LeaveAlternateScreen, Show);
-            let _ = disable_raw_mode();
-            return Err(error.into());
-        }
-        Terminal::new(CrosstermBackend::new(stderr))
-            .map(|terminal| Self {
-                terminal,
-                restored: false,
-            })
-            .map_err(|error| {
-                let mut stderr = io::stderr();
-                let _ = execute!(stderr, LeaveAlternateScreen, Show);
-                let _ = disable_raw_mode();
-                CliError::Io(error)
-            })
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        if self.restored {
-            return Ok(());
-        }
-        let mut first_error = self.terminal.show_cursor().err();
-        if let Err(error) = execute!(self.terminal.backend_mut(), LeaveAlternateScreen, Show) {
-            first_error.get_or_insert(error);
-        }
-        if let Err(error) = disable_raw_mode() {
-            first_error.get_or_insert(error);
-        }
-        match first_error {
-            Some(error) => Err(error),
-            None => {
-                self.restored = true;
-                Ok(())
-            }
-        }
-    }
-}
-
-impl Drop for StderrTerminal {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
-}
-
 async fn run_terminal(
     report: &ListReport,
     browser_launcher: &dyn BrowserLauncher,
@@ -429,7 +370,7 @@ async fn run_terminal(
 ) -> Result<ListReportAction, CliError> {
     let mut terminal_state = terminal_state.lock().await;
     if terminal_state.is_none() {
-        *terminal_state = Some(StderrTerminal::new()?);
+        *terminal_state = Some(StderrTerminal::new(TerminalOptions::default())?);
     }
     let terminal = terminal_state
         .as_mut()
@@ -441,7 +382,9 @@ async fn run_terminal(
     let update_check = available_update.get_or_init(update::available_version);
     tokio::pin!(update_check);
     loop {
-        terminal.terminal.draw(|frame| render(frame, &mut model))?;
+        terminal
+            .terminal_mut()
+            .draw(|frame| render(frame, &mut model))?;
         let event = if checking_for_update {
             tokio::select! {
                 biased;

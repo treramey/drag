@@ -15,6 +15,7 @@ mod schema;
 mod setup;
 mod setup_tui;
 mod tempo_openapi;
+mod terminal;
 mod transport;
 mod tui_theme;
 mod update;
