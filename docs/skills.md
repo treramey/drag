@@ -8,4 +8,8 @@
 | [`drag-log`](../skills/drag-log/SKILL.md) | Log time to Tempo Cloud with Drag. Use when the user asks to add or preview a worklog using a duration, clock interval, date, description, or remaining estimate. |
 | [`drag-list`](../skills/drag-list/SKILL.md) | List and inspect Tempo Cloud worklogs with Drag. Use when the user asks to review time entries, retrieve worklogs for a date, paginate results, or select structured output fields. |
 | [`drag-delete`](../skills/drag-delete/SKILL.md) | Delete Tempo Cloud worklogs with Drag. Use when the user explicitly asks to preview or delete one or more worklogs by numeric ID. |
+| [`recipe-log-coding-session`](../skills/recipe-log-coding-session/SKILL.md) | Log one completed coding session with Drag. Use when the user asks an agent to turn trustworthy session, repository, Git, and issue evidence into one reviewed Tempo worklog. |
+| [`recipe-audit-day`](../skills/recipe-audit-day/SKILL.md) | Audit one day of Tempo worklogs with Drag. Use when the user asks for a read-only, evidence-qualified daily review and proposed corrections. |
+| [`recipe-audit-week`](../skills/recipe-audit-week/SKILL.md) | Audit one week of Tempo worklogs with Drag. Use when the user asks for a read-only weekly review of daily totals, issue allocation, evidence, and proposed corrections. |
+| [`recipe-correct-worklog`](../skills/recipe-correct-worklog/SKILL.md) | Correct one Tempo worklog with Drag. Use when the user asks to replace an exact numeric worklog ID through an explicitly authorized, create-first non-atomic workflow. |
 | [`drag-tempo`](../skills/drag-tempo/SKILL.md) | Call operations from Tempo's live OpenAPI catalog with Drag. Use when the user needs a Tempo API operation beyond Drag's log, list, or delete commands. |

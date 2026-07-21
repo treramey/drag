@@ -109,10 +109,54 @@ paths:
       operationId: createWorklog
       summary: Create Worklog
       tags: [Worklogs]
+      x-unrecognized-effect: read
       requestBody:
         content:
           application/json:
             schema: {type: object}
+      responses:
+        "200": {description: SUCCESS}
+    put:
+      operationId: replaceWorklogs
+      summary: List Worklogs Despite A Mutating Method
+      tags: [Worklogs]
+      responses:
+        "200": {description: SUCCESS}
+    patch:
+      operationId: patchWorklogs
+      summary: Search Worklogs Despite A Mutating Method
+      tags: [Worklogs]
+      responses:
+        "200": {description: SUCCESS}
+    delete:
+      operationId: deleteWorklogs
+      summary: Report Worklogs Despite A Mutating Method
+      tags: [Worklogs]
+      responses:
+        "200": {description: SUCCESS}
+    trace:
+      operationId: traceWorklogs
+      summary: Trace Worklogs
+      tags: [Worklogs]
+      responses:
+        "200": {description: SUCCESS}
+  /4/worklogs/search:
+    post:
+      operationId: searchWorklogs
+      summary: Search Worklogs
+      tags: [Worklogs]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object}
+      responses:
+        "200": {description: SUCCESS}
+  /4/worklogs/authoritative-read:
+    post:
+      operationId: createAuthoritativeRead
+      summary: Create an authoritative read
+      tags: [Worklogs]
+      x-tempo-operation-effect: read
       responses:
         "200": {description: SUCCESS}
 components: {schemas: {}}
@@ -178,7 +222,7 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     );
     let body: Value = serde_json::from_slice(&first.stdout)?;
     assert_eq!(body["data"]["scope"], "local");
-    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(4));
+    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(8));
 
     let log_path = directory.path().join("skills/drag-log/SKILL.md");
     let delete_path = directory.path().join("skills/drag-delete/SKILL.md");
@@ -189,11 +233,81 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     assert!(delete.contains("permanently removes Tempo worklogs"));
     let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
     assert!(!index.contains("drag-tempo"));
+    for recipe in [
+        "recipe-log-coding-session",
+        "recipe-audit-day",
+        "recipe-audit-week",
+        "recipe-correct-worklog",
+    ] {
+        assert!(index.contains(recipe), "missing {recipe} from index");
+    }
     assert!(!first_log.contains("../drag/SKILL.md"));
+
+    let shared = fs::read_to_string(directory.path().join("skills/drag/SKILL.md"))?;
+    assert!(shared.contains("recipe-log-coding-session"));
+    assert!(shared.contains("recipe-correct-worklog"));
+
+    let session = fs::read_to_string(
+        directory
+            .path()
+            .join("skills/recipe-log-coding-session/SKILL.md"),
+    )?;
+    assert!(session.contains("drag --output json list"));
+    assert!(session.contains("pagination.next"));
+    assert!(session.contains("--continue-from"));
+    assert!(session.contains("drag --output json log --json - --dry-run"));
+    assert!(session.contains("drag --output json log --json -"));
+    assert!(session.contains("commit count"));
+    assert!(session.contains("diff size"));
+    assert!(session.contains("likely duplicate"));
+    assert!(session.contains("overlap"));
+    assert!(session.contains("audit, draft, preview, or suggestion"));
+    assert!(session.contains("exit code `2`"));
+    assert!(session.contains("exit code `1`"));
+
+    let day = fs::read_to_string(directory.path().join("skills/recipe-audit-day/SKILL.md"))?;
+    assert!(day.contains("read-only"));
+    assert!(day.contains("verified"));
+    assert!(day.contains("likely"));
+    assert!(day.contains("unknown"));
+    assert!(day.contains("pagination.next"));
+    assert!(day.contains("exact worklog ID"));
+
+    let week = fs::read_to_string(directory.path().join("skills/recipe-audit-week/SKILL.md"))?;
+    assert!(week.contains("Retrieve each date independently"));
+    assert!(week.contains("required and logged totals"));
+    assert!(week.contains("Jira issue and day"));
+    assert!(week.contains("read-only"));
+
+    let correction = fs::read_to_string(
+        directory
+            .path()
+            .join("skills/recipe-correct-worklog/SKILL.md"),
+    )?;
+    assert!(correction.contains("exact numeric ID"));
+    assert!(correction.contains("drag --output json log --json - --dry-run"));
+    assert!(correction.contains("drag --output json delete --json - --dry-run"));
+    assert!(correction.contains("create the replacement first"));
+    assert!(correction.contains("recoverable duplicate"));
+    assert!(correction.contains("original is not deleted"));
+
+    let first_recipes = [
+        ("recipe-log-coding-session", session),
+        ("recipe-audit-day", day),
+        ("recipe-audit-week", week),
+        ("recipe-correct-worklog", correction),
+    ];
 
     let second = run()?;
     assert!(second.status.success());
     assert_eq!(fs::read_to_string(log_path)?, first_log);
+    for (name, first_recipe) in first_recipes {
+        assert_eq!(
+            fs::read_to_string(directory.path().join("skills").join(name).join("SKILL.md"))?,
+            first_recipe,
+            "{name} changed between identical generation runs"
+        );
+    }
     Ok(())
 }
 
@@ -369,7 +483,20 @@ fn tempo_skill_generation_materializes_the_cached_live_command_shape(
     assert!(!skill.contains("../drag/SKILL.md"));
     assert!(resource.contains("drag tempo worklogs get-worklogs"));
     assert!(resource.contains("drag tempo worklogs create-worklog"));
-    assert!(resource.contains("`POST`"));
+    for expected in [
+        "| `drag tempo worklogs get-worklogs` | `getWorklogs` | `GET` | `read` |",
+        "| `drag tempo worklogs create-worklog` | `createWorklog` | `POST` | `mutation` |",
+        "| `drag tempo worklogs search-worklogs` | `searchWorklogs` | `POST` | `ambiguous` |",
+        "| `drag tempo worklogs replace-worklogs` | `replaceWorklogs` | `PUT` | `mutation` |",
+        "| `drag tempo worklogs patch-worklogs` | `patchWorklogs` | `PATCH` | `mutation` |",
+        "| `drag tempo worklogs delete-worklogs` | `deleteWorklogs` | `DELETE` | `mutation` |",
+        "| `drag tempo worklogs trace-worklogs` | `traceWorklogs` | `TRACE` | `ambiguous` |",
+        "| `drag tempo worklogs create-authoritative-read` | `createAuthoritativeRead` | `POST` | `read` |",
+    ] {
+        assert!(resource.contains(expected), "missing row: {expected}");
+    }
+    assert!(skill.contains("`read`, `mutation`, or `ambiguous`"));
+    assert!(skill.contains("schema inspection, a dry run, and explicit authorization"));
     let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
     assert!(index.contains("drag-tempo"));
     assert!(!index.contains("drag-log"));
@@ -399,7 +526,7 @@ fn failed_tempo_discovery_preserves_the_existing_generated_catalog(
 
     assert_eq!(output.status.code(), Some(1));
     let body: Value = serde_json::from_slice(&output.stderr)?;
-    assert_eq!(body["error"]["code"], "api_error");
+    assert_eq!(body["error"]["code"], "openapi_document_error");
     assert_eq!(fs::read_to_string(skill_path)?, "existing catalog");
     Ok(())
 }
@@ -740,7 +867,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 5);
+    assert_eq!(contract["schemaVersion"], 6);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -1046,6 +1173,7 @@ fn dotted_tempo_schema_lookup_uses_the_cached_official_openapi_contract(
     assert_eq!(data["source"]["openapi"], "3.0.3");
     assert_eq!(data["operation"]["operationId"], "createWorklog");
     assert_eq!(data["operation"]["httpMethod"], "POST");
+    assert_eq!(data["operation"]["effect"], "mutation");
     assert_eq!(data["operation"]["path"], "/worklogs");
     assert_eq!(
         data["operation"]["requestBody"]["content"]["application/json"]["schema"]["type"],
@@ -1183,6 +1311,7 @@ components: {schemas: {}}
     assert_eq!(body["data"]["dryRun"], true);
     assert_eq!(body["data"]["operationId"], "getWorkAttributes");
     assert_eq!(body["data"]["method"], "GET");
+    assert_eq!(body["data"]["effect"], "read");
     assert_eq!(
         body["data"]["url"],
         "https://api.tempo.io/4/work-attributes?limit=25"
@@ -1206,6 +1335,7 @@ components: {schemas: {}}
     assert_eq!(mutation["data"]["dryRun"], true);
     assert_eq!(mutation["data"]["operationId"], "createWorklog");
     assert_eq!(mutation["data"]["method"], "POST");
+    assert_eq!(mutation["data"]["effect"], "mutation");
     assert_eq!(
         mutation["data"]["body"],
         serde_json::json!({

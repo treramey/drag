@@ -94,9 +94,8 @@ impl CliError {
             Self::Usage(_) => "usage",
             Self::NotConfigured(_) => "not_configured",
             Self::Config { .. } => "config_error",
-            Self::Api(_) | Self::OpenApiDocument(_) | Self::Invariant(_) | Self::Remote(_) => {
-                "api_error"
-            }
+            Self::OpenApiDocument(_) => "openapi_document_error",
+            Self::Api(_) | Self::Invariant(_) | Self::Remote(_) => "api_error",
             Self::Http(_) => "http_error",
             Self::Url(_) => "invalid_url",
             Self::Json(_) => "invalid_json",

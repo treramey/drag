@@ -11,6 +11,7 @@ mod list;
 mod list_tui;
 mod log;
 mod output;
+mod recipe_registry;
 mod schema;
 mod setup;
 mod setup_tui;

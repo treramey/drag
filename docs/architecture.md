@@ -59,8 +59,9 @@ several peer submodules rather than a single implementation file.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
   metadata and schemars schemas for shared serde input and result models.
 - `drag_cli::generate_skills`: deterministic local Agent Skill rendering from
-  the machine contract plus progressively disclosed Tempo resource references
-  from the official OpenAPI operation catalog.
+  the machine contract and curated portable recipe registry, plus progressively
+  disclosed, effect-classified Tempo resource references from the official
+  OpenAPI operation catalog.
 - `drag_cli::tempo_openapi`: fixed-origin Tempo OpenAPI discovery, bounded YAML
   parsing, 24-hour ETag-aware caching, dotted operation lookup, local
   component-reference resolution, generated read-only command trees, and

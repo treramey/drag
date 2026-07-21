@@ -22,6 +22,10 @@ const ETAG_FILE: &str = "tempo-openapi.etag";
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_DOCUMENT_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_REF_DEPTH: usize = 64;
+const OPENAPI_HTTP_METHODS: [&str; 8] = [
+    "get", "post", "put", "patch", "delete", "options", "head", "trace",
+];
+const EFFECT_EXTENSION: &str = "x-tempo-operation-effect";
 
 struct LoadedDocument {
     value: Value,
@@ -35,9 +39,27 @@ struct OperationDescriptor {
     friendly_alias: Option<String>,
     operation_id: String,
     http_method: String,
+    effect: OperationEffect,
     api_path: String,
     path_parameters: Vec<Value>,
     definition: Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OperationEffect {
+    Read,
+    Mutation,
+    Ambiguous,
+}
+
+impl OperationEffect {
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Mutation => "mutation",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +69,7 @@ pub(crate) struct SkillOperation {
     pub(crate) friendly_alias: Option<String>,
     pub(crate) operation_id: String,
     pub(crate) http_method: String,
+    pub(crate) effect: OperationEffect,
     pub(crate) summary: String,
     pub(crate) has_request_body: bool,
 }
@@ -60,6 +83,7 @@ pub(crate) struct SkillCatalog {
 struct PreparedRequest {
     operation_id: String,
     method: String,
+    effect: OperationEffect,
     url: Url,
     body: Option<Value>,
 }
@@ -85,6 +109,7 @@ pub(crate) async fn skill_catalog() -> Result<SkillCatalog, CliError> {
             friendly_alias: operation.friendly_alias,
             operation_id: operation.operation_id,
             http_method: operation.http_method,
+            effect: operation.effect,
             summary: operation
                 .definition
                 .get("summary")
@@ -171,6 +196,7 @@ fn render_prepared_request(
             "dryRun": true,
             "operationId": prepared.operation_id,
             "method": prepared.method,
+            "effect": prepared.effect.as_str(),
             "url": prepared.url.as_str(),
             "body": prepared.body
         })
@@ -198,6 +224,19 @@ pub(crate) async fn schema(dotted_path: &str, resolve_refs: bool) -> Result<Rend
     }
 
     let (http_method, api_path, mut operation) = find_operation(&loaded.value, dotted_path)?;
+    let effect = operation_effect(
+        &http_method,
+        &api_path,
+        operation
+            .get("operationId")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        operation
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        &operation,
+    );
     if resolve_refs {
         let mut stack = HashSet::new();
         resolve_local_refs(&mut operation, &loaded.value, &mut stack, 0)?;
@@ -206,6 +245,10 @@ pub(crate) async fn schema(dotted_path: &str, resolve_refs: bool) -> Result<Rend
         .as_object_mut()
         .ok_or_else(|| CliError::openapi_document("Tempo OpenAPI operation is not an object"))?;
     operation_object.insert("httpMethod".to_owned(), Value::String(http_method));
+    operation_object.insert(
+        "effect".to_owned(),
+        Value::String(effect.as_str().to_owned()),
+    );
     operation_object.insert("path".to_owned(), Value::String(api_path));
 
     let source = schema_source(&loaded)?;
@@ -397,7 +440,7 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
         if !api_path.starts_with("/4/") {
             continue;
         }
-        for http_method in ["get", "post", "put", "patch", "delete"] {
+        for http_method in OPENAPI_HTTP_METHODS {
             let Some(operation) = path_item.get(http_method) else {
                 continue;
             };
@@ -413,6 +456,16 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
             let Some(operation_id) = operation.get("operationId").and_then(Value::as_str) else {
                 continue;
             };
+            let effect = operation_effect(
+                http_method,
+                api_path,
+                operation_id,
+                operation
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                operation,
+            );
             operations.push(OperationDescriptor {
                 resource: resource.clone(),
                 method: kebab_case(operation_id),
@@ -424,6 +477,7 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
                 ),
                 operation_id: operation_id.to_owned(),
                 http_method: http_method.to_ascii_uppercase(),
+                effect,
                 api_path: api_path.clone(),
                 path_parameters: path_item
                     .get("parameters")
@@ -457,6 +511,69 @@ fn executable_operations(document: &Value) -> Result<Vec<OperationDescriptor>, C
         (&left.resource, &left.method).cmp(&(&right.resource, &right.method))
     });
     Ok(operations)
+}
+
+fn operation_effect(
+    http_method: &str,
+    api_path: &str,
+    operation_id: &str,
+    summary: &str,
+    definition: &Value,
+) -> OperationEffect {
+    if let Some(effect) = definition
+        .get(EFFECT_EXTENSION)
+        .and_then(Value::as_str)
+        .and_then(explicit_operation_effect)
+    {
+        return effect;
+    }
+
+    match http_method.to_ascii_uppercase().as_str() {
+        "GET" => OperationEffect::Read,
+        "PUT" | "PATCH" | "DELETE" => OperationEffect::Mutation,
+        "POST" if post_has_read_like_signal(api_path, operation_id, summary) => {
+            OperationEffect::Ambiguous
+        }
+        "POST" => OperationEffect::Mutation,
+        _ => OperationEffect::Ambiguous,
+    }
+}
+
+fn explicit_operation_effect(value: &str) -> Option<OperationEffect> {
+    match value {
+        "read" => Some(OperationEffect::Read),
+        "mutation" => Some(OperationEffect::Mutation),
+        "ambiguous" => Some(OperationEffect::Ambiguous),
+        _ => None,
+    }
+}
+
+fn post_has_read_like_signal(api_path: &str, operation_id: &str, summary: &str) -> bool {
+    const READ_ACTIONS: [&str; 7] = [
+        "search",
+        "get",
+        "retrieve",
+        "list",
+        "lookup",
+        "calculate",
+        "report",
+    ];
+
+    let operation = kebab_case(operation_id);
+    let summary = kebab_case(summary);
+    let action_prefix = |value: &str| {
+        READ_ACTIONS
+            .iter()
+            .any(|action| value == *action || value.starts_with(&format!("{action}-")))
+            || (value.starts_with("generate-") && value.split('-').any(|word| word == "report"))
+    };
+    let path_signal = api_path.split('/').map(kebab_case).any(|segment| {
+        READ_ACTIONS
+            .iter()
+            .any(|action| segment == *action || segment == format!("{action}s"))
+    });
+
+    action_prefix(&operation) || action_prefix(&summary) || path_signal
 }
 
 fn build_command(operations: &[OperationDescriptor]) -> clap::Command {
@@ -619,6 +736,7 @@ fn prepare_request_with_base(
     Ok(PreparedRequest {
         operation_id: operation.operation_id.clone(),
         method: operation.http_method.clone(),
+        effect: operation.effect,
         url,
         body,
     })
@@ -858,7 +976,7 @@ fn find_operation(
         let Some(item) = item.as_object() else {
             continue;
         };
-        for method in ["get", "post", "put", "patch", "delete"] {
+        for method in OPENAPI_HTTP_METHODS {
             let Some(operation) = item.get(method) else {
                 continue;
             };

@@ -33,3 +33,12 @@ Use `drag` to work with Tempo Cloud through stable structured output and explici
 ## Output contract
 
 Successful JSON uses `{"ok":true,"data":...}`. Errors use `{"ok":false,"error":{"code":...,"message":...}}` on stderr. Treat exit code 2 as invalid input or usage and exit code 1 as a runtime failure.
+
+## Portable recipes
+
+| Recipe | Description |
+|---|---|
+| [`recipe-log-coding-session`](../recipe-log-coding-session/SKILL.md) | Log one completed coding session with Drag. Use when the user asks an agent to turn trustworthy session, repository, Git, and issue evidence into one reviewed Tempo worklog. |
+| [`recipe-audit-day`](../recipe-audit-day/SKILL.md) | Audit one day of Tempo worklogs with Drag. Use when the user asks for a read-only, evidence-qualified daily review and proposed corrections. |
+| [`recipe-audit-week`](../recipe-audit-week/SKILL.md) | Audit one week of Tempo worklogs with Drag. Use when the user asks for a read-only weekly review of daily totals, issue allocation, evidence, and proposed corrections. |
+| [`recipe-correct-worklog`](../recipe-correct-worklog/SKILL.md) | Correct one Tempo worklog with Drag. Use when the user asks to replace an exact numeric worklog ID through an explicitly authorized, create-first non-atomic workflow. |

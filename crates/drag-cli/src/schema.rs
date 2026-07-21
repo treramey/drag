@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 5;
+const SCHEMA_VERSION: u64 = 6;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -418,6 +418,7 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
         "not_configured",
         "config_error",
         "api_error",
+        "openapi_document_error",
         "http_error",
         "invalid_url",
         "invalid_json",
@@ -525,11 +526,12 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             success: json!({"oneOf": [
                 {"description": "The selected Tempo API response."},
                 object_schema(
-                    &["dryRun", "operationId", "method", "url", "body"],
+                    &["dryRun", "operationId", "method", "effect", "url", "body"],
                     json!({
                         "dryRun": {"const": true},
                         "operationId": {"type": "string"},
-                        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
+                        "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD", "TRACE"]},
+                        "effect": {"type": "string", "enum": ["read", "mutation", "ambiguous"]},
                         "url": {"type": "string", "format": "uri"},
                         "body": {}
                     }),
@@ -543,11 +545,13 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             side_effects: json!({
                 "readOperation": [],
                 "mutationOperation": ["selectedTempoApiMutation"],
+                "ambiguousOperation": ["selectedTempoApiOperationMayMutate"],
                 "dryRun": []
             }),
             network_access: json!({
                 "readOperation": {"tempoOpenApi": "readOrCache", "tempo": "read"},
                 "mutationOperation": {"tempoOpenApi": "readOrCache", "tempo": "write"},
+                "ambiguousOperation": {"tempoOpenApi": "readOrCache", "tempo": "unknown"},
                 "dryRun": {"tempoOpenApi": "readOrCache", "tempo": "none"}
             }),
             dry_run: json!({
@@ -565,7 +569,13 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             ]}),
             error_codes: [
                 local_errors,
-                vec!["api_error", "http_error", "invalid_json", "invalid_url"],
+                vec![
+                    "api_error",
+                    "openapi_document_error",
+                    "http_error",
+                    "invalid_json",
+                    "invalid_url",
+                ],
             ]
             .concat(),
             side_effects: json!({"default": []}),
@@ -585,7 +595,11 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
                     "skills": {"type": "array", "items": {"type": "string"}}
                 }),
             ),
-            error_codes: [local_errors, vec!["api_error", "http_error"]].concat(),
+            error_codes: [
+                local_errors,
+                vec!["api_error", "openapi_document_error", "http_error"],
+            ]
+            .concat(),
             side_effects: json!({"default": ["writeGeneratedSkillFiles"]}),
             network_access: json!({
                 "local": {},
@@ -1157,6 +1171,7 @@ fn error_contract() -> Value {
             "invalid_json": 2,
             "config_error": 1,
             "api_error": 1,
+            "openapi_document_error": 1,
             "http_error": 1,
             "io_error": 1,
             "remote_check_failed": {

@@ -13,6 +13,7 @@ on:
       - "crates/drag-cli/Cargo.toml"
       - "crates/drag-cli/src/cli.rs"
       - "crates/drag-cli/src/generate_skills.rs"
+      - "crates/drag-cli/src/recipe_registry.rs"
       - "crates/drag-cli/src/schema.rs"
       - "crates/drag-cli/src/tempo_openapi.rs"
       - ".github/workflows/generate-skills.yml"
@@ -98,6 +99,6 @@ jobs:
         run: |
           git config user.name "drag-release-bot"
           git config user.email "drag-release-bot@users.noreply.github.com"
-          git add skills/drag skills/drag-log skills/drag-list skills/drag-delete docs/skills.md
+          git add skills/drag skills/drag-log skills/drag-list skills/drag-delete skills/recipe-* docs/skills.md
           git commit -m "chore: regenerate local agent skills"
           git push

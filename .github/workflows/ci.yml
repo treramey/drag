@@ -60,17 +60,27 @@ jobs:
             skills/drag-log \
             skills/drag-list \
             skills/drag-delete \
+            skills/recipe-log-coding-session \
+            skills/recipe-audit-day \
+            skills/recipe-audit-week \
+            skills/recipe-correct-worklog \
             docs/skills.md
 
       - name: Check the external Tempo catalog
         env:
           DRAG_CACHE_DIR: ${{ runner.temp }}/drag-openapi
         run: |
-          if cargo run --locked -- generate-skills --scope tempo --force; then
+          error_file="$(mktemp)"
+          if cargo run --locked -- --output json generate-skills --scope tempo --force 2>"$error_file"; then
             if ! git diff --quiet -- skills/drag-tempo; then
               echo "::warning::Tempo's OpenAPI catalog changed; the scheduled synchronization workflow will open a PR."
             fi
+          elif jq -e '.error.code == "openapi_document_error"' <"$error_file" >/dev/null; then
+            cat "$error_file" >&2
+            echo "::error::Tempo's OpenAPI document was invalid or unsafe; generated files were not replaced."
+            exit 1
           else
+            cat "$error_file" >&2
             echo "::warning::Tempo's OpenAPI catalog could not be checked; external availability does not block CI."
           fi
 

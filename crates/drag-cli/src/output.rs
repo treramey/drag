@@ -300,7 +300,7 @@ mod tests {
         for (error, code, exit_code) in [
             (
                 CliError::openapi_document("Tempo returned invalid OpenAPI YAML"),
-                "api_error",
+                "openapi_document_error",
                 1,
             ),
             (

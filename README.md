@@ -349,7 +349,7 @@ Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 and NDJSON output stay machine-readable.
 
-`drag --output json schema` emits the versioned CLI contract. Schema version 5
+`drag --output json schema` emits the versioned CLI contract. Schema version 6
 includes the installed CLI version and every command, nested subcommand,
 shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
@@ -383,9 +383,11 @@ npx skills add https://github.com/treramey/drag/tree/main/skills/drag-tempo
 ```
 
 The local skills document `log`, `list`, and `delete` directly from Drag's Clap
-and `drag schema` metadata. `drag-tempo` includes resource references generated
-from the live Tempo OpenAPI operation catalog. See the complete
-[skills index](docs/skills.md).
+and `drag schema` metadata. Four host-neutral recipes cover logging a coding
+session, auditing a day or week, and safely correcting one exact worklog with a
+create-first replacement. `drag-tempo` includes resource references generated
+from the live Tempo OpenAPI operation catalog, with every HTTP operation marked
+`read`, `mutation`, or `ambiguous`. See the complete [skills index](docs/skills.md).
 
 Maintainers can regenerate repository-controlled skills without network access,
 refresh only Tempo's external catalog, or refresh both:

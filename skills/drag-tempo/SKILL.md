@@ -24,7 +24,7 @@ This catalog was generated from the official Tempo OpenAPI 3.0.3 document at `ht
 2. Confirm the current command with `drag tempo <resource> --help`.
 3. Inspect required parameters and request bodies with `drag schema tempo.<resource>.<method> --resolve-refs`.
 4. Use `--params` for declared path/query values and `--json` for a declared JSON request body.
-5. Run every unfamiliar operation with `--dry-run` first. For POST, PUT, PATCH, or DELETE, execute live only when the user's request explicitly authorizes that mutation.
+5. Check the generated effect and run every unfamiliar operation with `--dry-run` first. Execute mutations and ambiguous operations live only when the user's request explicitly authorizes the intended operation.
 
 ## Resources
 
@@ -78,6 +78,8 @@ This catalog was generated from the official Tempo OpenAPI 3.0.3 document at `ht
 
 ## Safety
 
-- GET operations are treated as reads. POST, PUT, PATCH, and DELETE are treated as mutations.
+- Every operation is classified as `read`, `mutation`, or `ambiguous`. GET is read; PUT, PATCH, and DELETE are mutations; POST defaults to mutation.
+- A read-like POST remains ambiguous rather than being asserted safe. Ambiguous operations require schema inspection, a dry run, and explicit authorization matching the intended operation.
+- The documented upstream extension `x-tempo-operation-effect` may explicitly provide `read`, `mutation`, or `ambiguous` and takes precedence. Unknown extensions and unsupported values are ignored.
 - `--dry-run` validates and normalizes a request without calling the Tempo API.
 - Do not send undeclared parameters, expose tokens, or execute a mutation based only on a guessed method name.
