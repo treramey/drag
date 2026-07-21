@@ -1,11 +1,8 @@
-use std::collections::BTreeMap;
 use std::env;
-use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Duration;
 
-use chrono::{DateTime, Days, Utc};
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::json;
 
@@ -14,11 +11,8 @@ use crate::cli::{DeleteArgs, DoctorArgs, ListArgs, LogArgs, SetupArgs};
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
 use crate::delete::{self, ApiDeleteGateway};
-use crate::list::{self, ApiListDataSource};
-use crate::list_tui::{
-    ListReportAction, ListReportSession, ListReportSuspenseOutcome, PendingListReportFuture,
-    RatatuiListReportSession,
-};
+use crate::list::{self, ApiListDataSource, ListReportSession};
+use crate::list_tui::RatatuiListReportSession;
 use crate::log::{self, ApiLogGateway};
 #[cfg(test)]
 use crate::setup::LineOnboardingSession;
@@ -33,8 +27,6 @@ use crate::setup::{
 };
 use crate::setup_tui::RatatuiOnboardingSession;
 use crate::{CliError, Rendered};
-
-const LIST_FETCH_DEBOUNCE: Duration = Duration::from_millis(150);
 
 pub struct App {
     path: PathBuf,
@@ -52,68 +44,6 @@ pub(crate) trait ConnectionEnvironment: Send + Sync {
 }
 
 struct ProcessConnectionEnvironment;
-
-struct AbortOnDropTask<T> {
-    handle: tokio::task::JoinHandle<T>,
-}
-
-impl<T> AbortOnDropTask<T> {
-    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
-        Self { handle }
-    }
-
-    fn is_finished(&self) -> bool {
-        self.handle.is_finished()
-    }
-
-    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
-        (&mut self.handle).await
-    }
-}
-
-impl<T> Drop for AbortOnDropTask<T> {
-    fn drop(&mut self) {
-        self.handle.abort();
-    }
-}
-
-struct CachedListReport {
-    report: list::ListReport,
-    reusable: bool,
-}
-
-fn take_reusable_report(
-    reports: &mut BTreeMap<chrono::NaiveDate, CachedListReport>,
-    date: chrono::NaiveDate,
-) -> Option<list::ListReport> {
-    if !reports.get(&date).is_some_and(|cached| cached.reusable) {
-        return None;
-    }
-    reports.remove(&date).map(|cached| cached.report)
-}
-
-fn date_for_list_action(
-    date: chrono::NaiveDate,
-    action: ListReportAction,
-) -> Result<Option<chrono::NaiveDate>, CliError> {
-    let date = match action {
-        ListReportAction::Close => return Ok(None),
-        ListReportAction::PreviousDate => date.checked_sub_days(Days::new(1)),
-        ListReportAction::NextDate => date.checked_add_days(Days::new(1)),
-    }
-    .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
-    Ok(Some(date))
-}
-
-fn adjacent_dates(date: chrono::NaiveDate) -> Result<[chrono::NaiveDate; 2], CliError> {
-    let previous = date
-        .checked_sub_days(Days::new(1))
-        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
-    let next = date
-        .checked_add_days(Days::new(1))
-        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
-    Ok([previous, next])
-}
 
 impl ConnectionEnvironment for ProcessConnectionEnvironment {
     fn value(&self, name: &str) -> Option<String> {
@@ -371,132 +301,18 @@ impl App {
 
     pub async fn list(
         &self,
-        mut args: ListArgs,
-        interactive: bool,
-    ) -> Result<Option<Rendered>, CliError> {
-        if !interactive || !self.list_report_session.is_eligible() {
-            let report = self.load_list_report(args).await?;
-            return Ok(Some(report.rendered()));
-        }
-
-        let mut reports: BTreeMap<chrono::NaiveDate, CachedListReport> = BTreeMap::new();
-        let mut prefetches: BTreeMap<
-            chrono::NaiveDate,
-            AbortOnDropTask<Result<list::ListReport, CliError>>,
-        > = BTreeMap::new();
-        let initial_report = self.load_list_report(args.clone()).await?;
-        let mut requested_date = initial_report.selected_date();
-        let mut displayed_date = requested_date;
-        let mut initial_report = Some((initial_report, args.continue_from.is_none()));
-        loop {
-            let (report, reusable) = if let Some(initial_report) = initial_report.take() {
-                initial_report
-            } else if let Some(report) = take_reusable_report(&mut reports, requested_date) {
-                (report, true)
-            } else {
-                let (ready, load): (bool, PendingListReportFuture<'_>) =
-                    if let Some(task) = prefetches.remove(&requested_date) {
-                        let ready = task.is_finished();
-                        (ready, Box::pin(await_list_report_task(task)))
-                    } else {
-                        let load = self.load_list_report(args.clone());
-                        (
-                            false,
-                            Box::pin(debounce_list_fetch(
-                                tokio::time::sleep(LIST_FETCH_DEBOUNCE),
-                                load,
-                            )),
-                        )
-                    };
-                let report = if ready {
-                    load.await?
-                } else {
-                    let background = reports
-                        .get(&displayed_date)
-                        .map(|cached| &cached.report)
-                        .ok_or_else(|| {
-                            CliError::Io(std::io::Error::other(
-                                "displayed list report was not cached",
-                            ))
-                        })?;
-                    match self
-                        .list_report_session
-                        .suspense(requested_date, background, load)
-                        .await?
-                    {
-                        ListReportSuspenseOutcome::Loaded(report) => *report,
-                        ListReportSuspenseOutcome::Action(action) => {
-                            let Some(next_date) = date_for_list_action(requested_date, action)?
-                            else {
-                                return Ok(None);
-                            };
-                            requested_date = next_date;
-                            args.when = Some(requested_date.to_string());
-                            args.continue_from = None;
-                            continue;
-                        }
-                    }
-                };
-                (report, true)
-            };
-            let selected_date = report.selected_date();
-            displayed_date = selected_date;
-
-            for date in adjacent_dates(selected_date)? {
-                if reports.contains_key(&date) || prefetches.contains_key(&date) {
-                    continue;
-                }
-                let mut adjacent_args = args.clone();
-                adjacent_args.when = Some(date.to_string());
-                adjacent_args.continue_from = None;
-                prefetches.insert(date, self.spawn_list_report(adjacent_args));
-            }
-
-            let action = self.list_report_session.run(&report).await?;
-            let Some(next_date) = date_for_list_action(selected_date, action)? else {
-                return Ok(None);
-            };
-            reports.insert(selected_date, CachedListReport { report, reusable });
-            requested_date = next_date;
-            args.when = Some(requested_date.to_string());
-            args.continue_from = None;
-        }
-    }
-
-    fn spawn_list_report(
-        &self,
         args: ListArgs,
-    ) -> AbortOnDropTask<Result<list::ListReport, CliError>> {
-        let path = self.path.clone();
-        let now = self.now();
-        let debug = self.debug;
-        AbortOnDropTask::new(tokio::spawn(async move {
-            list::run_report(&path, now, args, |credentials| {
-                Ok(Box::new(ApiListDataSource::new(credentials, debug)?))
-            })
-            .await
-        }))
-    }
-
-    async fn load_list_report(&self, args: ListArgs) -> Result<list::ListReport, CliError> {
-        list::run_report(&self.path, self.now(), args, |credentials| {
-            Ok(Box::new(ApiListDataSource::new(credentials, self.debug)?))
-        })
-        .await
-    }
-
-    #[cfg(test)]
-    async fn finish_list(
-        &self,
-        report: list::ListReport,
         interactive: bool,
     ) -> Result<Option<Rendered>, CliError> {
-        if interactive && self.list_report_session.is_eligible() {
-            self.list_report_session.run(&report).await?;
-            Ok(None)
-        } else {
-            Ok(Some(report.rendered()))
-        }
+        list::run_command(
+            &self.path,
+            self.now(),
+            args,
+            interactive,
+            self.debug,
+            self.list_report_session.as_ref(),
+        )
+        .await
     }
 
     pub async fn list_stream(
@@ -524,25 +340,6 @@ impl App {
     fn now(&self) -> DateTime<Tz> {
         Utc::now().with_timezone(&self.timezone)
     }
-}
-
-async fn await_list_report_task(
-    task: AbortOnDropTask<Result<list::ListReport, CliError>>,
-) -> Result<list::ListReport, CliError> {
-    task.join().await.map_err(|error| {
-        CliError::Io(std::io::Error::other(format!(
-            "list prefetch failed: {error}"
-        )))
-    })?
-}
-
-async fn debounce_list_fetch<Q, F, T>(quiet_period: Q, load: F) -> T
-where
-    Q: Future<Output = ()>,
-    F: Future<Output = T>,
-{
-    quiet_period.await;
-    load.await
 }
 
 fn required_setup_environment(

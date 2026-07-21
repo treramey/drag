@@ -1,9 +1,7 @@
 //! Ratatui presentation for completed list reports.
 
 use std::borrow::Cow;
-use std::future::Future;
 use std::io::{self, IsTerminal};
-use std::pin::Pin;
 
 use chrono::Datelike;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -17,7 +15,10 @@ use ratatui_braille_bar::BrailleSpinner;
 use tokio::sync::{Mutex, OnceCell};
 
 use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
-use crate::list::ListReport;
+use crate::list::{
+    ListReport, ListReportAction, ListReportFuture, ListReportSession, ListReportSuspenseOutcome,
+    PendingListReportFuture, SuspenseFuture,
+};
 use crate::output::escape_terminal_data;
 use crate::terminal::{StderrTerminal, TerminalOptions};
 use crate::tui_theme::{constrain_content_width, footer_divider, render_brand_header, Palette};
@@ -44,44 +45,6 @@ const COMPACT_HEADER_HEIGHT: u16 = 2;
 const MIN_COMPACT_HEADER_HEIGHT: u16 = 20;
 const MIN_SPACIOUS_HEADER_HEIGHT: u16 = 28;
 const MIN_DIVIDED_FOOTER_HEIGHT: u16 = 16;
-
-pub(crate) type ListReportFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ListReportAction, CliError>> + Send + 'a>>;
-pub(crate) type PendingListReportFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ListReport, CliError>> + Send + 'a>>;
-pub(crate) type SuspenseFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ListReportSuspenseOutcome, CliError>> + Send + 'a>>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ListReportAction {
-    Close,
-    PreviousDate,
-    NextDate,
-}
-
-pub(crate) enum ListReportSuspenseOutcome {
-    Loaded(Box<ListReport>),
-    Action(ListReportAction),
-}
-
-pub(crate) trait ListReportSession: Send + Sync {
-    fn is_eligible(&self) -> bool;
-    fn run<'a>(&'a self, report: &'a ListReport) -> ListReportFuture<'a>;
-
-    fn suspense<'a>(
-        &'a self,
-        _date: chrono::NaiveDate,
-        _background: &'a ListReport,
-        report: PendingListReportFuture<'a>,
-    ) -> SuspenseFuture<'a> {
-        Box::pin(async move {
-            report
-                .await
-                .map(Box::new)
-                .map(ListReportSuspenseOutcome::Loaded)
-        })
-    }
-}
 
 pub(crate) struct RatatuiListReportSession {
     browser_launcher: Box<dyn BrowserLauncher>,

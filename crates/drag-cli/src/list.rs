@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, Days, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use drag::field_selection::{project_list_result, ListField, ListFieldMask, ListProjectionPlan};
@@ -27,6 +28,75 @@ use crate::output::escape_terminal_data;
 use crate::{CliError, RemoteService, Rendered};
 
 type ListFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
+
+const FETCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+pub(crate) type ListReportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ListReportAction, CliError>> + Send + 'a>>;
+pub(crate) type PendingListReportFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ListReport, CliError>> + Send + 'a>>;
+pub(crate) type SuspenseFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ListReportSuspenseOutcome, CliError>> + Send + 'a>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ListReportAction {
+    Close,
+    PreviousDate,
+    NextDate,
+}
+
+pub(crate) enum ListReportSuspenseOutcome {
+    Loaded(Box<ListReport>),
+    Action(ListReportAction),
+}
+
+pub(crate) trait ListReportSession: Send + Sync {
+    fn is_eligible(&self) -> bool;
+    fn run<'a>(&'a self, report: &'a ListReport) -> ListReportFuture<'a>;
+
+    fn suspense<'a>(
+        &'a self,
+        _date: NaiveDate,
+        _background: &'a ListReport,
+        report: PendingListReportFuture<'a>,
+    ) -> SuspenseFuture<'a> {
+        Box::pin(async move {
+            report
+                .await
+                .map(Box::new)
+                .map(ListReportSuspenseOutcome::Loaded)
+        })
+    }
+}
+
+pub(crate) struct AbortOnDropTask<T> {
+    handle: tokio::task::JoinHandle<T>,
+}
+
+impl<T> AbortOnDropTask<T> {
+    pub(crate) fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self { handle }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.handle.is_finished()
+    }
+
+    async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        (&mut self.handle).await
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+pub(crate) struct CachedListReport {
+    pub(crate) report: ListReport,
+    pub(crate) reusable: bool,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -490,6 +560,185 @@ pub(crate) async fn run_report(
     )
     .with_today(prepared.today)
     .with_projection(prepared.projection))
+}
+
+pub(crate) async fn run_command(
+    config_path: &Path,
+    now: DateTime<Tz>,
+    mut args: ListArgs,
+    interactive: bool,
+    debug: bool,
+    session: &dyn ListReportSession,
+) -> Result<Option<Rendered>, CliError> {
+    if !interactive || !session.is_eligible() {
+        let report = load_api_report(config_path, now, args, debug).await?;
+        return Ok(Some(report.rendered()));
+    }
+
+    let mut reports: BTreeMap<NaiveDate, CachedListReport> = BTreeMap::new();
+    let mut prefetches: BTreeMap<NaiveDate, AbortOnDropTask<Result<ListReport, CliError>>> =
+        BTreeMap::new();
+    let initial_report = load_api_report(config_path, now, args.clone(), debug).await?;
+    let mut requested_date = initial_report.selected_date();
+    let mut displayed_date = requested_date;
+    let mut initial_report = Some((initial_report, args.continue_from.is_none()));
+
+    loop {
+        let (report, reusable) = if let Some(initial_report) = initial_report.take() {
+            initial_report
+        } else if let Some(report) = take_reusable_report(&mut reports, requested_date) {
+            (report, true)
+        } else {
+            let (ready, load): (bool, PendingListReportFuture<'_>) =
+                if let Some(task) = prefetches.remove(&requested_date) {
+                    let ready = task.is_finished();
+                    (ready, Box::pin(await_list_report_task(task)))
+                } else {
+                    let load = load_api_report(config_path, now, args.clone(), debug);
+                    (
+                        false,
+                        Box::pin(debounce_list_fetch(
+                            tokio::time::sleep(FETCH_DEBOUNCE),
+                            load,
+                        )),
+                    )
+                };
+            let report = if ready {
+                load.await?
+            } else {
+                let background = reports
+                    .get(&displayed_date)
+                    .map(|cached| &cached.report)
+                    .ok_or_else(|| {
+                        CliError::Io(io::Error::other("displayed list report was not cached"))
+                    })?;
+                match session.suspense(requested_date, background, load).await? {
+                    ListReportSuspenseOutcome::Loaded(report) => *report,
+                    ListReportSuspenseOutcome::Action(action) => {
+                        let Some(next_date) = date_for_list_action(requested_date, action)? else {
+                            return Ok(None);
+                        };
+                        requested_date = next_date;
+                        args.when = Some(requested_date.to_string());
+                        args.continue_from = None;
+                        continue;
+                    }
+                }
+            };
+            (report, true)
+        };
+        let selected_date = report.selected_date();
+        displayed_date = selected_date;
+
+        for date in adjacent_dates(selected_date)? {
+            if reports.contains_key(&date) || prefetches.contains_key(&date) {
+                continue;
+            }
+            let mut adjacent_args = args.clone();
+            adjacent_args.when = Some(date.to_string());
+            adjacent_args.continue_from = None;
+            prefetches.insert(
+                date,
+                spawn_api_list_report(config_path.to_path_buf(), now, adjacent_args, debug),
+            );
+        }
+
+        let action = session.run(&report).await?;
+        let Some(next_date) = date_for_list_action(selected_date, action)? else {
+            return Ok(None);
+        };
+        reports.insert(selected_date, CachedListReport { report, reusable });
+        requested_date = next_date;
+        args.when = Some(requested_date.to_string());
+        args.continue_from = None;
+    }
+}
+
+async fn load_api_report(
+    config_path: &Path,
+    now: DateTime<Tz>,
+    args: ListArgs,
+    debug: bool,
+) -> Result<ListReport, CliError> {
+    run_report(config_path, now, args, |credentials| {
+        Ok(Box::new(ApiListDataSource::new(credentials, debug)?))
+    })
+    .await
+}
+
+fn spawn_api_list_report(
+    config_path: PathBuf,
+    now: DateTime<Tz>,
+    args: ListArgs,
+    debug: bool,
+) -> AbortOnDropTask<Result<ListReport, CliError>> {
+    AbortOnDropTask::new(tokio::spawn(async move {
+        load_api_report(&config_path, now, args, debug).await
+    }))
+}
+
+pub(crate) fn take_reusable_report(
+    reports: &mut BTreeMap<NaiveDate, CachedListReport>,
+    date: NaiveDate,
+) -> Option<ListReport> {
+    if !reports.get(&date).is_some_and(|cached| cached.reusable) {
+        return None;
+    }
+    reports.remove(&date).map(|cached| cached.report)
+}
+
+fn date_for_list_action(
+    date: NaiveDate,
+    action: ListReportAction,
+) -> Result<Option<NaiveDate>, CliError> {
+    let date = match action {
+        ListReportAction::Close => return Ok(None),
+        ListReportAction::PreviousDate => date.checked_sub_days(Days::new(1)),
+        ListReportAction::NextDate => date.checked_add_days(Days::new(1)),
+    }
+    .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
+    Ok(Some(date))
+}
+
+fn adjacent_dates(date: NaiveDate) -> Result<[NaiveDate; 2], CliError> {
+    let previous = date
+        .checked_sub_days(Days::new(1))
+        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
+    let next = date
+        .checked_add_days(Days::new(1))
+        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
+    Ok([previous, next])
+}
+
+async fn await_list_report_task(
+    task: AbortOnDropTask<Result<ListReport, CliError>>,
+) -> Result<ListReport, CliError> {
+    task.join()
+        .await
+        .map_err(|error| CliError::Io(io::Error::other(format!("list prefetch failed: {error}"))))?
+}
+
+pub(crate) async fn debounce_list_fetch<Q, F, T>(quiet_period: Q, load: F) -> T
+where
+    Q: Future<Output = ()>,
+    F: Future<Output = T>,
+{
+    quiet_period.await;
+    load.await
+}
+
+#[cfg(test)]
+pub(crate) async fn present_report(
+    report: ListReport,
+    interactive: bool,
+    session: &dyn ListReportSession,
+) -> Result<Option<Rendered>, CliError> {
+    if interactive && session.is_eligible() {
+        session.run(&report).await?;
+        Ok(None)
+    } else {
+        Ok(Some(report.rendered()))
+    }
 }
 
 pub(crate) async fn run_stream(

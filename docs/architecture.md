@@ -49,29 +49,37 @@ several peer submodules rather than a single implementation file.
 - `drag_cli::list`: retrieval and enrichment produce one immutable list report
   containing the selected date, worklogs, schedule and pagination details,
   issue labels, and verbose state. Plain text and structured JSON
-  are projections of that completed report.
+  are projections of that completed report. The list feature also owns
+  interactive date navigation, reusable-report caching, adjacent-date
+  prefetch, debounce, and cancellation of obsolete fetches.
 - `drag_cli::list_tui`: eligibility checks, focused row state, bounded keyboard
   navigation, responsive stderr Ratatui rendering, scrolling, verbose focused
   details, recoverable opening of the focused worklog's resolved Jira URL,
   quit-event handling, and restoration of terminal state for
-  interactive list reports. Retrieval completes before this boundary is
-  entered.
+  interactive list reports. The initial report is complete before this
+  boundary is entered; later date navigation may render that report as a
+  suspense background while the list workflow retrieves another date.
 - `drag_cli::schema`: the versioned machine contract, derived from Clap command
-  metadata and schemars schemas for shared serde input and result models.
+  metadata, schemars schemas for shared serde input and result models, and one
+  typed command-behavior descriptor for side effects, network access, dry-run
+  behavior, failures, and generated local skill policy.
 - `drag_cli::generate_skills`: deterministic local Agent Skill rendering from
-  the machine contract and curated portable recipe registry, plus progressively
-  disclosed, effect-classified Tempo resource references from the official
-  OpenAPI operation catalog.
+  the machine contract and its command-behavior descriptors plus the curated
+  portable recipe registry, with progressively disclosed, effect-classified
+  Tempo resource references from the executable OpenAPI operation catalog.
 - `drag_cli::tempo_openapi`: fixed-origin Tempo OpenAPI discovery, bounded YAML
   parsing, 24-hour ETag-aware caching, dotted operation lookup, local
-  component-reference resolution, generated read-only command trees, and
-  validated path/query request preparation.
-- `drag_cli::setup`: setup state and connection verification.
+  component-reference resolution, one API v4 executable operation catalog for
+  command trees, dotted operation lookup, and generated skills, plus validated
+  path/query request preparation.
+- `drag_cli::setup`: setup screens, navigation and invalidation transitions,
+  retained-secret state, and connection verification.
 - Unattended setup dry-runs use the same validated environment credentials and
   verifier boundary as execution, but emit a secret-free plan and never call
   configuration persistence; remote verification requires explicit opt-in.
-- `drag_cli::setup_tui`: Ratatui rendering, Crossterm events, and the
-  stderr terminal lifecycle for interactive setup.
+- `drag_cli::setup_tui`: translation of Crossterm events into setup actions,
+  Ratatui rendering, animation state, browser effects, and the stderr terminal
+  lifecycle for interactive setup.
 - `drag_cli::app`: dependency composition and thin use-case routing.
 
 ## Safety invariants

@@ -55,7 +55,7 @@ info:
   title: Tempo API
   version: "4"
 paths:
-  /worklogs:
+  /4/worklogs:
     post:
       operationId: createWorklog
       summary: Create Worklog
@@ -1184,7 +1184,7 @@ fn dotted_tempo_schema_lookup_uses_the_cached_official_openapi_contract(
     assert_eq!(data["operation"]["operationId"], "createWorklog");
     assert_eq!(data["operation"]["httpMethod"], "POST");
     assert_eq!(data["operation"]["effect"], "mutation");
-    assert_eq!(data["operation"]["path"], "/worklogs");
+    assert_eq!(data["operation"]["path"], "/4/worklogs");
     assert_eq!(
         data["operation"]["requestBody"]["content"]["application/json"]["schema"]["type"],
         "object"
