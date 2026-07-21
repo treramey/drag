@@ -16,7 +16,7 @@
   },
   "packageManager": "pnpm@11.13.1",
   "scripts": {
-    "test": "cargo test",
+    "test": "cargo test --workspace --locked",
     "prepare": "lefthook install",
     "changeset": "changeset",
     "version-sync": "bash scripts/version-sync.sh",

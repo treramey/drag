@@ -3,17 +3,17 @@ pre-commit:
   commands:
     fmt:
       glob: "*.rs"
-      run: cargo fmt -- --check
+      run: cargo fmt --all -- --check
     clippy:
       glob: "*.rs"
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 pre-push:
   parallel: true
   commands:
     test:
       glob: "*.rs"
-      run: cargo test
+      run: cargo test --workspace --locked
     check:
       glob: "*.rs"
-      run: cargo check
+      run: cargo check --workspace --locked

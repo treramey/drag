@@ -7,8 +7,8 @@ behavior or compatibility changes in an issue before implementation.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked
 ```
 
 If installed, also run `cargo deny check`. Never run integration experiments

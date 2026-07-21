@@ -411,8 +411,8 @@ pagination cannot redirect an authenticated request away from
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace --locked
 cargo install cargo-deny
 cargo deny check
 ```
