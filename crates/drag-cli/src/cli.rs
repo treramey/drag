@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use drag::pagination::{HARD_PAGE_LIMIT, MAX_RECORD_LIMIT};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -211,14 +212,14 @@ pub struct ListArgs {
     /// Maximum worklogs to retrieve and return (1-1000; default: 100).
     #[arg(
         long,
-        value_parser = clap::value_parser!(u16).range(1..=1000),
+        value_parser = clap::value_parser!(u16).range(1..=MAX_RECORD_LIMIT as i64),
         conflicts_with = "all_pages"
     )]
     pub limit: Option<u16>,
     /// Maximum Tempo pages to retrieve (1-100; default: 1).
     #[arg(
         long,
-        value_parser = clap::value_parser!(u16).range(1..=100),
+        value_parser = clap::value_parser!(u16).range(1..=HARD_PAGE_LIMIT as i64),
         conflicts_with = "all_pages"
     )]
     pub page_limit: Option<u16>,

@@ -16,6 +16,7 @@ use crate::config::Config;
 use crate::{transport, CliError, Rendered};
 
 pub(crate) const TEMPO_OPENAPI_URL: &str = "https://apidocs.tempo.io/tempo-openapi.yaml";
+pub(crate) const CACHE_DIR_ENV: &str = "DRAG_CACHE_DIR";
 const CACHE_FILE: &str = "tempo-openapi.yaml";
 const ETAG_FILE: &str = "tempo-openapi.etag";
 const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -338,7 +339,7 @@ async fn load_document() -> Result<LoadedDocument, CliError> {
 }
 
 fn cache_dir() -> Result<PathBuf, CliError> {
-    if let Some(path) = env::var_os("DRAG_CACHE_DIR") {
+    if let Some(path) = env::var_os(CACHE_DIR_ENV) {
         return Ok(PathBuf::from(path));
     }
     dirs::cache_dir()

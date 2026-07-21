@@ -1,14 +1,26 @@
 use clap::{Arg, ArgAction, Command, CommandFactory};
 use drag::field_selection::ListField;
 use drag::models::{AddWorklogRequest, ListPagination, Worklog};
+use drag::pagination::{
+    DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT, MAX_RECORD_LIMIT,
+};
 use drag::schedule::ScheduleDetails;
 use schemars::{generate::SchemaSettings, schema_for, JsonSchema};
 use serde_json::{json, Map, Value};
 
 use crate::cli::{Cli, DeleteInput, LogInput, SchemaArgs};
+use crate::config::{
+    ATLASSIAN_EMAIL_ENV, ATLASSIAN_HOST_ENV, ATLASSIAN_TOKEN_ENV, DRAG_CONFIG_ENV,
+    TEMPO_ACCOUNT_ID_ENV, TEMPO_TOKEN_ENV,
+};
 use crate::error::CliError;
+use crate::list_tui::{
+    INTERRUPT_KEY, MOVE_DOWN_KEY, MOVE_UP_KEY, NEXT_DATE_KEY, OPEN_ISSUE_KEY, PREVIOUS_DATE_KEY,
+    QUIT_KEY,
+};
 use crate::output::Rendered;
-use crate::tempo_openapi;
+use crate::setup_tui::REDUCED_MOTION_ENV;
+use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
 const SCHEMA_VERSION: u64 = 5;
 
@@ -36,14 +48,14 @@ pub(crate) fn schema() -> Rendered {
         "output": output_contract(),
         "errors": error_contract(),
         "environment": {
-            "DRAG_CONFIG": {"type": "path", "purpose": "Override the configuration file."},
-            "DRAG_CACHE_DIR": {"type": "path", "purpose": "Override the OpenAPI cache directory."},
-            "DRAG_REDUCED_MOTION": {"type": "boolean-like", "purpose": "Reduce interactive setup motion."},
-            "TEMPO_TOKEN": {"type": "secret", "purpose": "Override the stored Tempo token."},
-            "TEMPO_ACCOUNT_ID": {"type": "string", "purpose": "Runtime compatibility override for the Tempo account ID."},
-            "ATLASSIAN_EMAIL": {"type": "string", "purpose": "Override the stored Atlassian email."},
-            "ATLASSIAN_TOKEN": {"type": "secret", "purpose": "Override the stored Atlassian API token."},
-            "ATLASSIAN_HOST": {"type": "https-host", "purpose": "Override the stored Atlassian host."}
+            (DRAG_CONFIG_ENV): {"type": "path", "purpose": "Override the configuration file."},
+            (CACHE_DIR_ENV): {"type": "path", "purpose": "Override the OpenAPI cache directory."},
+            (REDUCED_MOTION_ENV): {"type": "boolean-like", "purpose": "Reduce interactive setup motion."},
+            (TEMPO_TOKEN_ENV): {"type": "secret", "purpose": "Override the stored Tempo token."},
+            (TEMPO_ACCOUNT_ID_ENV): {"type": "string", "purpose": "Runtime compatibility override for the Tempo account ID."},
+            (ATLASSIAN_EMAIL_ENV): {"type": "string", "purpose": "Override the stored Atlassian email."},
+            (ATLASSIAN_TOKEN_ENV): {"type": "secret", "purpose": "Override the stored Atlassian API token."},
+            (ATLASSIAN_HOST_ENV): {"type": "https-host", "purpose": "Override the stored Atlassian host."}
         },
         "syntax": {
             "date": ["YYYY-MM-DD", "y", "yesterday", "t+N", "t-N", "today+N", "today-N"],
@@ -64,6 +76,12 @@ pub(crate) async fn run(args: SchemaArgs) -> Result<Rendered, CliError> {
 }
 
 fn command_contract(command: &Command, path: &str) -> Value {
+    let Some(identity) = CommandIdentity::from_path(path) else {
+        return json!({
+            "path": path,
+            "metadataError": "missingExplicitCommandIdentity"
+        });
+    };
     let subcommands = if command.get_name() == "help" {
         Map::new()
     } else {
@@ -82,7 +100,7 @@ fn command_contract(command: &Command, path: &str) -> Value {
         .get_all_aliases()
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let semantics = command_semantics(path);
+    let semantics = command_semantics(identity);
 
     let mut contract = json!({
         "path": path,
@@ -96,10 +114,10 @@ fn command_contract(command: &Command, path: &str) -> Value {
         "sideEffects": semantics.side_effects,
         "networkAccess": semantics.network_access,
         "dryRun": semantics.dry_run,
-        "failureDetails": command_failure_details(path),
-        "behavior": command_behavior(path)
+        "failureDetails": command_failure_details(identity),
+        "behavior": command_behavior(identity)
     });
-    if path == "list" {
+    if identity == CommandIdentity::List {
         contract["successWithFieldSelection"] = schema_ref("ProjectedListResult");
         contract["ndjson"] = list_stream_contract();
     }
@@ -113,6 +131,36 @@ fn command_contract(command: &Command, path: &str) -> Value {
         };
     }
     contract
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandIdentity {
+    Log,
+    List,
+    Delete,
+    Setup,
+    Doctor,
+    Tempo,
+    Schema,
+    GenerateSkills,
+    Help,
+}
+
+impl CommandIdentity {
+    fn from_path(path: &str) -> Option<Self> {
+        match path {
+            "log" => Some(Self::Log),
+            "list" => Some(Self::List),
+            "delete" => Some(Self::Delete),
+            "setup" => Some(Self::Setup),
+            "doctor" => Some(Self::Doctor),
+            "tempo" => Some(Self::Tempo),
+            "schema" => Some(Self::Schema),
+            "generate-skills" => Some(Self::GenerateSkills),
+            "help" => Some(Self::Help),
+            _ => None,
+        }
+    }
 }
 
 fn help_targets(command: &Command) -> Vec<String> {
@@ -278,8 +326,8 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
 
 fn documented_default(path: &str, id: &str) -> Option<Value> {
     match (path, id) {
-        ("list", "limit") => Some(json!(100)),
-        ("list", "page_limit") => Some(json!(1)),
+        ("list", "limit") => Some(json!(DEFAULT_RECORD_LIMIT)),
+        ("list", "page_limit") => Some(json!(DEFAULT_PAGE_LIMIT)),
         _ => None,
     }
 }
@@ -306,8 +354,8 @@ fn argument_type(path: &str, argument: &Arg, possible_values: &[String]) -> &'st
 
 fn numeric_bounds(path: &str, id: &str) -> Option<(u64, u64)> {
     match (path, id) {
-        ("list", "limit") => Some((1, 1_000)),
-        ("list", "page_limit") => Some((1, 100)),
+        ("list", "limit") => Some((1, MAX_RECORD_LIMIT as u64)),
+        ("list", "page_limit") => Some((1, u64::from(HARD_PAGE_LIMIT))),
         _ => None,
     }
 }
@@ -363,7 +411,7 @@ struct CommandSemantics {
     dry_run: Value,
 }
 
-fn command_semantics(path: &str) -> CommandSemantics {
+fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
     let remote_errors = vec![
         "usage",
         "invalid_input",
@@ -376,17 +424,15 @@ fn command_semantics(path: &str) -> CommandSemantics {
         "io_error",
     ];
     let local_errors = vec!["usage", "invalid_input", "config_error", "io_error"];
-    if path == "help" || path.ends_with(" help") {
-        return CommandSemantics {
+    match identity {
+        CommandIdentity::Help => CommandSemantics {
             success: json!({"type": "string", "format": "clapHelpText", "envelope": false}),
             error_codes: vec!["usage"],
             side_effects: json!({"default": []}),
             network_access: json!({"default": {}}),
             dry_run: unsupported_dry_run(),
-        };
-    }
-    match path {
-        "log" => CommandSemantics {
+        },
+        CommandIdentity::Log => CommandSemantics {
             success: json!({"oneOf": [schema_ref("Worklog"), object_schema(
                 &["dryRun", "issueKey", "request"],
                 json!({"dryRun": {"const": true}, "issueKey": {"type": "string"}, "request": schema_ref("AddWorklogRequest")})
@@ -405,7 +451,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
             network_access: json!({"default": {"jira": "read", "tempo": "write"}, "dryRun": {}}),
             dry_run: json!({"supported": true, "option": "dryRun", "sideEffects": false, "networkAccess": false}),
         },
-        "list" => CommandSemantics {
+        CommandIdentity::List => CommandSemantics {
             success: object_schema(
                 &["date", "worklogs", "schedule", "pagination"],
                 json!({
@@ -426,7 +472,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
             }),
             dry_run: unsupported_dry_run(),
         },
-        "delete" => CommandSemantics {
+        CommandIdentity::Delete => CommandSemantics {
             success: object_schema(
                 &["dryRun", "worklogs"],
                 json!({"dryRun": {"type": "boolean"}, "worklogs": {"type": "array", "items": schema_ref("Worklog")}}),
@@ -442,7 +488,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
             network_access: json!({"default": {"jira": "read", "tempo": "read-write"}, "dryRun": {"jira": "read", "tempo": "read"}}),
             dry_run: json!({"supported": true, "option": "dryRun", "sideEffects": false, "networkAccess": "read-only"}),
         },
-        "setup" => CommandSemantics {
+        CommandIdentity::Setup => CommandSemantics {
             success: setup_success_schema(),
             error_codes: remote_errors,
             side_effects: json!({
@@ -468,14 +514,14 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "networkAccess": {"default": false, "verify": "read-only"}
             }),
         },
-        "doctor" => CommandSemantics {
+        CommandIdentity::Doctor => CommandSemantics {
             success: doctor_success_schema(),
             error_codes: [remote_errors, vec!["remote_check_failed"]].concat(),
             side_effects: json!({"default": []}),
             network_access: json!({"default": {}, "remote": {"jira": "read", "tempo": "read"}}),
             dry_run: unsupported_dry_run(),
         },
-        "tempo" => CommandSemantics {
+        CommandIdentity::Tempo => CommandSemantics {
             success: json!({"oneOf": [
                 {"description": "The selected Tempo API response."},
                 object_schema(
@@ -511,7 +557,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
                 "networkAccess": {"tempoOpenApi": "readOrCache", "tempo": false}
             }),
         },
-        "schema" => CommandSemantics {
+        CommandIdentity::Schema => CommandSemantics {
             success: json!({"oneOf": [
                 local_cli_contract_schema(),
                 tempo_operation_schema_contract(),
@@ -530,7 +576,7 @@ fn command_semantics(path: &str) -> CommandSemantics {
             }),
             dry_run: unsupported_dry_run(),
         },
-        "generate-skills" => CommandSemantics {
+        CommandIdentity::GenerateSkills => CommandSemantics {
             success: object_schema(
                 &["outputDir", "scope", "skills"],
                 json!({
@@ -548,13 +594,6 @@ fn command_semantics(path: &str) -> CommandSemantics {
             }),
             dry_run: unsupported_dry_run(),
         },
-        _ => CommandSemantics {
-            success: Value::Null,
-            error_codes: local_errors,
-            side_effects: json!({"default": []}),
-            network_access: json!({"default": {}}),
-            dry_run: unsupported_dry_run(),
-        },
     }
 }
 
@@ -562,15 +601,13 @@ fn unsupported_dry_run() -> Value {
     json!({"supported": false})
 }
 
-fn command_behavior(path: &str) -> Value {
-    if path == "help" || path.ends_with(" help") {
-        return json!({
+fn command_behavior(identity: CommandIdentity) -> Value {
+    match identity {
+        CommandIdentity::Help => json!({
             "target": "zero or more command names from the surrounding command tree",
             "output": "Clap help text on stdout without a JSON envelope"
-        });
-    }
-    match path {
-        "generate-skills" => json!({
+        }),
+        CommandIdentity::GenerateSkills => json!({
             "sourceOfTruth": {
                 "local": "clapAndDragSchema",
                 "tempo": "officialTempoOpenApi"
@@ -578,7 +615,7 @@ fn command_behavior(path: &str) -> Value {
             "failure": "renderBeforeWrite; Tempo discovery failure leaves generated files unchanged",
             "outputDirectory": "relativePathWithinCurrentWorkingDirectory"
         }),
-        "log" => json!({
+        CommandIdentity::Log => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
             "durationOrInterval": {
                 "durationSyntax": ["15m", "1h", "1h15m"],
@@ -586,7 +623,7 @@ fn command_behavior(path: &str) -> Value {
                 "overnight": "endAtOrBeforeStartUsesNextLocalDay"
             }
         }),
-        "list" => json!({
+        CommandIdentity::List => json!({
             "dateDefault": "todayInConfiguredLocalTimeZone",
             "verbose": "adds descriptions and Jira URLs to human output only",
             "interactive": {
@@ -597,12 +634,12 @@ fn command_behavior(path: &str) -> Value {
                 "renderStream": "stderr",
                 "fallback": "completedPlainTextReport",
                 "controls": {
-                    "previousDate": "h",
-                    "nextDate": "l",
-                    "moveUp": ["up", "k"],
-                    "moveDown": ["down", "j"],
-                    "openFocusedJiraIssue": "o",
-                    "quit": ["q", "escape", "ctrl-c"]
+                    "previousDate": PREVIOUS_DATE_KEY,
+                    "nextDate": NEXT_DATE_KEY,
+                    "moveUp": ["up", MOVE_UP_KEY],
+                    "moveDown": ["down", MOVE_DOWN_KEY],
+                    "openFocusedJiraIssue": OPEN_ISSUE_KEY,
+                    "quit": [QUIT_KEY, "escape", format!("ctrl-{INTERRUPT_KEY}")]
                 },
                 "browser": {
                     "trigger": "explicitOpenFocusedJiraIssue",
@@ -638,11 +675,11 @@ fn command_behavior(path: &str) -> Value {
                 "allowedFields": ListField::paths().collect::<Vec<_>>()
             },
             "pagination": {
-                "defaultRecordLimit": 100,
-                "defaultPageLimit": 1,
+                "defaultRecordLimit": DEFAULT_RECORD_LIMIT,
+                "defaultPageLimit": DEFAULT_PAGE_LIMIT,
                 "continuationOption": "continueFrom",
                 "allPagesOption": "allPages",
-                "allPagesSafetyCeiling": 100,
+                "allPagesSafetyCeiling": HARD_PAGE_LIMIT,
                 "boundedTotals": "schedule calculations use the retrieved segment; totalsComplete reports whether they cover the whole month",
                 "selectionBinding": "continueFrom is an opaque token bound to the selected date, month range, and effective pagination plan; omitted bounds are restored and explicit mismatches fail before networking"
             },
@@ -652,18 +689,18 @@ fn command_behavior(path: &str) -> Value {
                 "terminalEvent": "pagination"
             }
         }),
-        "setup" => json!({
+        CommandIdentity::Setup => json!({
             "interactive": {
                 "interface": "ratatui",
                 "terminalRequired": true,
                 "renderStream": "stderr",
                 "events": "asynchronousCrossterm",
                 "stages": ["jiraAccountDetails", "atlassianApiToken", "tempoAccount", "reviewAndSave"],
-                "reducedMotionEnvironment": "DRAG_REDUCED_MOTION"
+                "reducedMotionEnvironment": REDUCED_MOTION_ENV
             },
             "fromEnv": {
                 "interactive": false,
-                "requiredEnvironment": ["ATLASSIAN_HOST", "ATLASSIAN_EMAIL", "ATLASSIAN_TOKEN", "TEMPO_TOKEN"],
+                "requiredEnvironment": [ATLASSIAN_HOST_ENV, ATLASSIAN_EMAIL_ENV, ATLASSIAN_TOKEN_ENV, TEMPO_TOKEN_ENV],
                 "secretTransport": "environmentOnly",
                 "dryRun": "validateAndPlanWithoutWriting",
                 "dryRunVerification": "plannedUnlessVerifyIsSet",
@@ -678,22 +715,22 @@ fn command_behavior(path: &str) -> Value {
             },
             "accountId": {
                 "setup": "derivedFromVerifiedJiraUser",
-                "runtimeCompatibilityEnvironment": "TEMPO_ACCOUNT_ID"
+                "runtimeCompatibilityEnvironment": TEMPO_ACCOUNT_ID_ENV
             },
             "writesConfiguration": "onceAfterVerification"
         }),
-        "doctor" => json!({
+        CommandIdentity::Doctor => json!({
             "remote": "opt-in read-only Jira and Tempo checks",
             "remoteStatuses": ["connected", "notConfigured", "failed"]
         }),
-        "schema" => json!({
+        CommandIdentity::Schema => json!({
             "withoutPath": "returns the complete local Drag contract",
             "tempoPath": "returns one fixed-origin Tempo OpenAPI operation",
             "tempoComponentPath": "returns one fixed-origin Tempo OpenAPI component schema",
             "pathSyntax": ["tempo.<Schema>", "tempo.<resource>.<method>"],
             "resolveRefs": "inlines bounded local OpenAPI component references"
         }),
-        "tempo" => json!({
+        CommandIdentity::Tempo => json!({
             "commandTree": "generatedAtRuntimeFromOfficialTempoOpenApi",
             "currentMethods": "TempoApiV4Operations",
             "resourceNames": "normalizedOpenApiTags",
@@ -703,7 +740,7 @@ fn command_behavior(path: &str) -> Value {
             "help": "generatedAfterOpenApiDiscovery",
             "dryRun": "validatesAndPrintsWithoutTempoApiAccess"
         }),
-        _ => json!({}),
+        CommandIdentity::Delete => json!({}),
     }
 }
 
@@ -895,10 +932,10 @@ fn add_list_projection_definitions(definitions: &mut Map<String, Value>) {
             "selectedDate": {"type": "string", "format": "date"},
             "monthStart": {"type": "string", "format": "date"},
             "monthEnd": {"type": "string", "format": "date"},
-            "limit": nullable_schema(json!({"type": "integer", "minimum": 1, "maximum": 1_000})),
-            "pageLimit": {"type": "integer", "minimum": 1, "maximum": 100},
+            "limit": nullable_schema(json!({"type": "integer", "minimum": 1, "maximum": MAX_RECORD_LIMIT})),
+            "pageLimit": {"type": "integer", "minimum": 1, "maximum": HARD_PAGE_LIMIT},
             "allPages": {"type": "boolean"},
-            "pagesRetrieved": {"type": "integer", "minimum": 1, "maximum": 100},
+            "pagesRetrieved": {"type": "integer", "minimum": 1, "maximum": HARD_PAGE_LIMIT},
             "recordsRetrieved": {"type": "integer", "minimum": 0},
             "recordsReturned": {"type": "integer", "minimum": 0},
             "next": nullable_schema(json!({"type": "string"})),
@@ -1050,10 +1087,17 @@ fn service_check_schema() -> Value {
     })
 }
 
-fn command_failure_details(path: &str) -> Value {
-    match path {
-        "doctor" => json!({"remote_check_failed": doctor_success_schema()}),
-        _ => Value::Null,
+fn command_failure_details(identity: CommandIdentity) -> Value {
+    match identity {
+        CommandIdentity::Doctor => json!({"remote_check_failed": doctor_success_schema()}),
+        CommandIdentity::Log
+        | CommandIdentity::List
+        | CommandIdentity::Delete
+        | CommandIdentity::Setup
+        | CommandIdentity::Tempo
+        | CommandIdentity::Schema
+        | CommandIdentity::GenerateSkills
+        | CommandIdentity::Help => Value::Null,
     }
 }
 
@@ -1126,10 +1170,57 @@ fn error_contract() -> Value {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
+    use drag::pagination::{DEFAULT_PAGE_LIMIT, DEFAULT_RECORD_LIMIT, HARD_PAGE_LIMIT};
     use serde_json::Value;
 
-    use super::{schema, SCHEMA_VERSION};
+    use super::{schema, CommandIdentity, SCHEMA_VERSION};
     use crate::cli::{Cli, LogInput};
+    use crate::list_tui::{
+        INTERRUPT_KEY, MOVE_DOWN_KEY, MOVE_UP_KEY, NEXT_DATE_KEY, OPEN_ISSUE_KEY,
+        PREVIOUS_DATE_KEY, QUIT_KEY,
+    };
+
+    #[test]
+    fn every_clap_command_has_an_explicit_typed_identity() {
+        let clap = Cli::command();
+        for command in clap.get_subcommands() {
+            assert!(
+                CommandIdentity::from_path(command.get_name()).is_some(),
+                "{} has no command semantics",
+                command.get_name()
+            );
+        }
+    }
+
+    #[test]
+    fn list_behavior_uses_runtime_policy_and_control_constants() {
+        let rendered = schema();
+        let behavior = &rendered.data["commands"]["list"]["behavior"];
+
+        assert_eq!(
+            behavior["pagination"]["defaultRecordLimit"],
+            DEFAULT_RECORD_LIMIT
+        );
+        assert_eq!(
+            behavior["pagination"]["defaultPageLimit"],
+            DEFAULT_PAGE_LIMIT
+        );
+        assert_eq!(
+            behavior["pagination"]["allPagesSafetyCeiling"],
+            HARD_PAGE_LIMIT
+        );
+        assert_eq!(
+            behavior["interactive"]["controls"],
+            serde_json::json!({
+                "previousDate": PREVIOUS_DATE_KEY,
+                "nextDate": NEXT_DATE_KEY,
+                "moveUp": ["up", MOVE_UP_KEY],
+                "moveDown": ["down", MOVE_DOWN_KEY],
+                "openFocusedJiraIssue": OPEN_ISSUE_KEY,
+                "quit": [QUIT_KEY, "escape", format!("ctrl-{INTERRUPT_KEY}")]
+            })
+        );
+    }
 
     #[test]
     fn contract_covers_every_clap_command_and_alias() {

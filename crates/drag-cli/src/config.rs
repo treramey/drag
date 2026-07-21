@@ -9,6 +9,13 @@ use url::Url;
 
 use crate::CliError;
 
+pub(crate) const DRAG_CONFIG_ENV: &str = "DRAG_CONFIG";
+pub(crate) const TEMPO_TOKEN_ENV: &str = "TEMPO_TOKEN";
+pub(crate) const TEMPO_ACCOUNT_ID_ENV: &str = "TEMPO_ACCOUNT_ID";
+pub(crate) const ATLASSIAN_EMAIL_ENV: &str = "ATLASSIAN_EMAIL";
+pub(crate) const ATLASSIAN_TOKEN_ENV: &str = "ATLASSIAN_TOKEN";
+pub(crate) const ATLASSIAN_HOST_ENV: &str = "ATLASSIAN_HOST";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -118,24 +125,24 @@ impl Config {
         &self,
         mut environment: impl FnMut(&str) -> Option<String>,
     ) -> Result<JiraCredentials, CliError> {
-        let hostname = match environment("ATLASSIAN_HOST").filter(|value| !value.trim().is_empty())
-        {
-            Some(hostname) => Some(normalize_jira_site(&hostname)?),
-            None => self.hostname.clone(),
-        };
+        let hostname =
+            match environment(ATLASSIAN_HOST_ENV).filter(|value| !value.trim().is_empty()) {
+                Some(hostname) => Some(normalize_jira_site(&hostname)?),
+                None => self.hostname.clone(),
+            };
         Ok(JiraCredentials {
             atlassian_user_email: credential_value(
                 &self.atlassian_user_email,
-                environment("ATLASSIAN_EMAIL"),
+                environment(ATLASSIAN_EMAIL_ENV),
             )
-            .ok_or_else(|| missing_credential("Atlassian email", "ATLASSIAN_EMAIL"))?,
+            .ok_or_else(|| missing_credential("Atlassian email", ATLASSIAN_EMAIL_ENV))?,
             atlassian_token: credential_value(
                 &self.atlassian_token,
-                environment("ATLASSIAN_TOKEN"),
+                environment(ATLASSIAN_TOKEN_ENV),
             )
-            .ok_or_else(|| missing_credential("Atlassian token", "ATLASSIAN_TOKEN"))?,
+            .ok_or_else(|| missing_credential("Atlassian token", ATLASSIAN_TOKEN_ENV))?,
             hostname: hostname
-                .ok_or_else(|| missing_credential("Atlassian hostname", "ATLASSIAN_HOST"))?,
+                .ok_or_else(|| missing_credential("Atlassian hostname", ATLASSIAN_HOST_ENV))?,
         })
     }
 
@@ -144,10 +151,10 @@ impl Config {
         mut environment: impl FnMut(&str) -> Option<String>,
     ) -> Result<TempoCredentials, CliError> {
         Ok(TempoCredentials {
-            tempo_token: credential_value(&self.tempo_token, environment("TEMPO_TOKEN"))
-                .ok_or_else(|| missing_credential("Tempo token", "TEMPO_TOKEN"))?,
-            account_id: credential_value(&self.account_id, environment("TEMPO_ACCOUNT_ID"))
-                .ok_or_else(|| missing_credential("account ID", "TEMPO_ACCOUNT_ID"))?,
+            tempo_token: credential_value(&self.tempo_token, environment(TEMPO_TOKEN_ENV))
+                .ok_or_else(|| missing_credential("Tempo token", TEMPO_TOKEN_ENV))?,
+            account_id: credential_value(&self.account_id, environment(TEMPO_ACCOUNT_ID_ENV))
+                .ok_or_else(|| missing_credential("account ID", TEMPO_ACCOUNT_ID_ENV))?,
         })
     }
 }
@@ -236,7 +243,7 @@ pub(crate) fn normalize_jira_site(input: &str) -> Result<String, CliError> {
 }
 
 pub fn config_path() -> Result<PathBuf, CliError> {
-    if let Some(path) = std::env::var_os("DRAG_CONFIG") {
+    if let Some(path) = std::env::var_os(DRAG_CONFIG_ENV) {
         return Ok(PathBuf::from(path));
     }
     dirs::home_dir()

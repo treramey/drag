@@ -10,7 +10,10 @@ use crate::api::ApiClient;
 #[cfg(test)]
 pub(crate) use crate::browser::NoopBrowserLauncher;
 pub(crate) use crate::browser::{BrowserLauncher, SystemBrowserLauncher};
-use crate::config::{normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials};
+use crate::config::{
+    normalize_jira_site, Config, Credentials, JiraCredentials, TempoCredentials,
+    ATLASSIAN_EMAIL_ENV, ATLASSIAN_HOST_ENV, ATLASSIAN_TOKEN_ENV, TEMPO_TOKEN_ENV,
+};
 use crate::CliError;
 
 pub(crate) const ATLASSIAN_TOKEN_URL: &str =
@@ -180,10 +183,10 @@ impl SetupCredentials {
     pub(crate) fn from_source(
         mut source: impl FnMut(&str) -> Result<String, CliError>,
     ) -> Result<Self, CliError> {
-        let hostname = normalize_jira_site(&source("ATLASSIAN_HOST")?)?;
-        let atlassian_user_email = source("ATLASSIAN_EMAIL")?.trim().to_owned();
-        let atlassian_token = source("ATLASSIAN_TOKEN")?.trim().to_owned();
-        let tempo_token = source("TEMPO_TOKEN")?.trim().to_owned();
+        let hostname = normalize_jira_site(&source(ATLASSIAN_HOST_ENV)?)?;
+        let atlassian_user_email = source(ATLASSIAN_EMAIL_ENV)?.trim().to_owned();
+        let atlassian_token = source(ATLASSIAN_TOKEN_ENV)?.trim().to_owned();
+        let tempo_token = source(TEMPO_TOKEN_ENV)?.trim().to_owned();
         Ok(Self {
             tempo_token,
             atlassian_user_email,

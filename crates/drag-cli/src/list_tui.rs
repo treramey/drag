@@ -28,6 +28,13 @@ const DASHBOARD_CALENDAR_WIDTH: u16 = 30;
 const DASHBOARD_CALENDAR_HEIGHT: u16 = 13;
 const DASHBOARD_MONTH_SUMMARY_HEIGHT: u16 = 3;
 const DASHBOARD_DATE_HEIGHT: u16 = 2;
+pub(crate) const PREVIOUS_DATE_KEY: char = 'h';
+pub(crate) const NEXT_DATE_KEY: char = 'l';
+pub(crate) const MOVE_UP_KEY: char = 'k';
+pub(crate) const MOVE_DOWN_KEY: char = 'j';
+pub(crate) const OPEN_ISSUE_KEY: char = 'o';
+pub(crate) const QUIT_KEY: char = 'q';
+pub(crate) const INTERRUPT_KEY: char = 'c';
 const DASHBOARD_DAY_SUMMARY_HEIGHT: u16 = 3;
 const DASHBOARD_DETAILS_HEIGHT: u16 = 5;
 const SPACIOUS_HEADER_TOP_PADDING: u16 = 2;
@@ -428,17 +435,17 @@ fn date_action_for_key_event(code: KeyCode, kind: KeyEventKind) -> Option<ListRe
         return None;
     }
     match code {
-        KeyCode::Char('h') => Some(ListReportAction::PreviousDate),
-        KeyCode::Char('l') => Some(ListReportAction::NextDate),
+        KeyCode::Char(PREVIOUS_DATE_KEY) => Some(ListReportAction::PreviousDate),
+        KeyCode::Char(NEXT_DATE_KEY) => Some(ListReportAction::NextDate),
         _ => None,
     }
 }
 
 fn message_for_key(code: KeyCode) -> Option<Message> {
     match code {
-        KeyCode::Up | KeyCode::Char('k') => Some(Message::MoveUp),
-        KeyCode::Down | KeyCode::Char('j') => Some(Message::MoveDown),
-        KeyCode::Char('o') => Some(Message::Open),
+        KeyCode::Up | KeyCode::Char(MOVE_UP_KEY) => Some(Message::MoveUp),
+        KeyCode::Down | KeyCode::Char(MOVE_DOWN_KEY) => Some(Message::MoveDown),
+        KeyCode::Char(OPEN_ISSUE_KEY) => Some(Message::Open),
         _ => None,
     }
 }
@@ -452,8 +459,8 @@ fn message_for_key_event(code: KeyCode, kind: KeyEventKind) -> Option<Message> {
 }
 
 fn should_quit(code: KeyCode, modifiers: KeyModifiers) -> bool {
-    matches!(code, KeyCode::Char('q') | KeyCode::Esc)
-        || (code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL))
+    matches!(code, KeyCode::Char(QUIT_KEY) | KeyCode::Esc)
+        || (code == KeyCode::Char(INTERRUPT_KEY) && modifiers.contains(KeyModifiers::CONTROL))
 }
 
 fn render(frame: &mut Frame<'_>, model: &mut ListReportModel<'_>) {
