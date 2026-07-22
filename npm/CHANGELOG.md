@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.7.1
+
+### Patch Changes
+
+- Support Tempo work attributes in `drag log` through JSON input and repeatable `--attr KEY=VALUE` flags, with actionable hints for required attributes.
+
 ## 0.7.0
 
 ### Minor Changes
