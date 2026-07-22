@@ -31,6 +31,7 @@ jobs:
           mac_arm=$(awk '{print $1}' checksums/drag-aarch64-apple-darwin.tar.gz.sha256)
           mac_intel=$(awk '{print $1}' checksums/drag-x86_64-apple-darwin.tar.gz.sha256)
           linux=$(awk '{print $1}' checksums/drag-x86_64-unknown-linux-gnu.tar.gz.sha256)
+          gh auth setup-git
           gh repo clone "$TAP" tap
           mkdir -p tap/Formula
           cat > tap/Formula/drag.rb <<RUBY
