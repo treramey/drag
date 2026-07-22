@@ -28,7 +28,7 @@ use crate::CliError;
 
 const DASHBOARD_CALENDAR_WIDTH: u16 = 30;
 const DASHBOARD_CALENDAR_HEIGHT: u16 = 13;
-const DASHBOARD_MONTH_SUMMARY_HEIGHT: u16 = 3;
+const DASHBOARD_MONTH_SUMMARY_HEIGHT: u16 = 4;
 const DASHBOARD_DATE_HEIGHT: u16 = 2;
 pub(crate) const PREVIOUS_DATE_KEY: char = 'h';
 pub(crate) const NEXT_DATE_KEY: char = 'l';
@@ -614,15 +614,8 @@ fn render_dashboard_month(
     if !same_calendar_month(report.selected_date(), selected_date) {
         return;
     }
-    let schedule = report.schedule();
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(schedule_balance_text(report)),
-            Line::from(month_totals_text(
-                &schedule.month_logged_duration,
-                &schedule.month_required_duration,
-            )),
-        ]),
+        Paragraph::new(month_progress_lines(report, summary_inner.width)),
         summary_inner,
     );
 }
@@ -742,8 +735,48 @@ fn duration_status(seconds: i64) -> String {
     }
 }
 
-fn month_totals_text(logged: &str, required: &str) -> String {
-    format!("{logged} logged of {required}")
+fn month_progress_lines(report: &ListReport, width: u16) -> Vec<Line<'static>> {
+    let schedule = report.schedule();
+    if !report.pagination().totals_complete {
+        return vec![
+            Line::from(format!(
+                "Segment: {} logged",
+                schedule.month_logged_duration
+            )),
+            Line::from("Balance unavailable for segment"),
+        ];
+    }
+    let required = schedule.seconds.month_required;
+    if required <= 0 {
+        return vec![
+            Line::from("Month: No required hours"),
+            Line::default(),
+            Line::from(schedule_balance_text(report)),
+        ];
+    }
+    let logged = schedule.seconds.month_logged.max(0);
+    let percent = i128::from(logged)
+        .saturating_mul(100)
+        .checked_div(i128::from(required))
+        .unwrap_or(0);
+    let clamped = logged.min(required);
+    let filled = i128::from(width)
+        .saturating_mul(i128::from(clamped))
+        .checked_div(i128::from(required))
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let width = usize::from(width);
+    vec![
+        Line::from(format!(
+            "Month: {} / {} · {percent}%",
+            schedule.month_logged_duration, schedule.month_required_duration
+        )),
+        Line::from(vec![
+            Span::styled("█".repeat(filled), Palette::primary()),
+            Span::styled("░".repeat(width.saturating_sub(filled)), Palette::muted()),
+        ]),
+        Line::from(schedule_balance_text(report)),
+    ]
 }
 
 fn dashboard_report_areas(inner: Rect, model: &ListReportModel<'_>) -> [Rect; 6] {
@@ -982,15 +1015,7 @@ fn render_month(
     let totals_are_current = same_calendar_month(report.selected_date(), selected_date);
     if area.height <= 3 {
         let summary = if totals_are_current {
-            let schedule = report.schedule();
-            format!(
-                "{} · {}",
-                month_totals_text(
-                    &schedule.month_logged_duration,
-                    &schedule.month_required_duration,
-                ),
-                schedule_balance_text(report)
-            )
+            compact_month_summary(report)
         } else {
             String::new()
         };
@@ -1026,18 +1051,23 @@ fn render_month(
     if !totals_are_current {
         return;
     }
+    frame.render_widget(Line::from(compact_month_summary(report)), summary_area);
+}
+
+fn compact_month_summary(report: &ListReport) -> String {
     let schedule = report.schedule();
-    frame.render_widget(
-        Line::from(format!(
-            "{} · {}",
-            month_totals_text(
-                &schedule.month_logged_duration,
-                &schedule.month_required_duration,
-            ),
-            schedule_balance_text(report)
-        )),
-        summary_area,
-    );
+    if !report.pagination().totals_complete {
+        return format!("Segment: {} logged", schedule.month_logged_duration);
+    }
+    if schedule.seconds.month_required <= 0 {
+        return "Month: No required hours".to_owned();
+    }
+    format!(
+        "Month: {} / {} · {}",
+        schedule.month_logged_duration,
+        schedule.month_required_duration,
+        schedule_balance_text(report)
+    )
 }
 
 fn calendar_date(date: chrono::NaiveDate) -> Option<time::Date> {
@@ -1135,8 +1165,8 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::{
-        date_action_for_key_event, message_for_key, message_for_key_event, month_totals_text,
-        render, render_suspense, should_quit, ListReportAction, ListReportModel, Message,
+        date_action_for_key_event, message_for_key, message_for_key_event, render, render_suspense,
+        should_quit, ListReportAction, ListReportModel, Message,
     };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
@@ -1184,9 +1214,12 @@ mod tests {
         selected_date: NaiveDate,
         today: NaiveDate,
     ) -> ListReport {
-        ListReport::new(
-            selected_date,
+        report_with_schedule(
             worklogs,
+            totals_complete,
+            verbose,
+            selected_date,
+            today,
             ScheduleDetails {
                 month_required_duration: "160h".to_owned(),
                 month_logged_duration: "72h".to_owned(),
@@ -1201,6 +1234,21 @@ mod tests {
                     day_logged: 90 * 60,
                 },
             },
+        )
+    }
+
+    fn report_with_schedule(
+        worklogs: Vec<Worklog>,
+        totals_complete: bool,
+        verbose: bool,
+        selected_date: NaiveDate,
+        today: NaiveDate,
+        schedule: ScheduleDetails,
+    ) -> ListReport {
+        ListReport::new(
+            selected_date,
+            worklogs,
+            schedule,
             ListPagination {
                 selected_date: selected_date.to_string(),
                 month_start: selected_date
@@ -1359,11 +1407,6 @@ mod tests {
     }
 
     #[test]
-    fn month_totals_keep_compact_duration_spacing() {
-        assert_eq!(month_totals_text("89h15m", "176h"), "89h15m logged of 176h");
-    }
-
-    #[test]
     fn populated_report_shows_month_day_worklogs_and_quit_controls() {
         let report = report(
             vec![Worklog {
@@ -1385,7 +1428,7 @@ mod tests {
 
         for expected in [
             "July 2026",
-            "72h logged of 160h",
+            "Month: 72h / 160h · 45%",
             "4h ahead",
             "Tuesday, 2026-07-14",
             "751393",
@@ -1481,12 +1524,7 @@ mod tests {
             .iter()
             .position(|line| line.starts_with('└') && line.trim_end().ends_with('┘'));
         assert_eq!(dashboard_start, Some(3), "{}", lines.join("\n"));
-        assert_eq!(dashboard_end, Some(20), "{}", lines.join("\n"));
-        assert!(
-            lines.get(21).is_some_and(|line| line.trim().is_empty()),
-            "{}",
-            lines.join("\n")
-        );
+        assert_eq!(dashboard_end, Some(21), "{}", lines.join("\n"));
         assert!(
             lines
                 .get(22)
@@ -1522,7 +1560,7 @@ mod tests {
             .position(|line| line.contains("4h ahead through 2026-07-14"));
         let month_total = lines
             .iter()
-            .position(|line| line.contains("72h logged of 160h"));
+            .position(|line| line.contains("Month: 72h / 160h · 45%"));
 
         for (label, position) in [
             ("day summary", day_summary),
@@ -1539,9 +1577,9 @@ mod tests {
         let current_period = current_period.unwrap_or(usize::MAX);
         let month_total = month_total.unwrap_or(usize::MAX);
 
-        assert_eq!(day_summary, current_period, "{}", lines.join("\n"));
-        assert_eq!(month_total, current_period + 1, "{}", lines.join("\n"));
-        assert_eq!(day_summary, 22, "{}", lines.join("\n"));
+        assert_eq!(day_summary, month_total + 1, "{}", lines.join("\n"));
+        assert_eq!(current_period, day_summary + 1, "{}", lines.join("\n"));
+        assert_eq!(month_total, 22, "{}", lines.join("\n"));
     }
 
     #[test]
@@ -1565,7 +1603,7 @@ mod tests {
 
         for expected in [
             "July 2026",
-            "72h logged of 160h",
+            "Month: 72h / 160h · 45%",
             "Loading entries…",
             "751393",
             "OPS-42",
@@ -1705,7 +1743,7 @@ mod tests {
 
         assert!(screen.contains("No worklogs"));
         assert!(!screen.contains("No worklogs for Tuesday"));
-        assert!(screen.contains("72h logged of 160h"));
+        assert!(screen.contains("Month: 72h / 160h · 45%"));
         assert!(screen.contains("Day: 1h 30m / 8h required · 6h30m behind"));
     }
 
@@ -1714,6 +1752,78 @@ mod tests {
         let screen = screen(&report(Vec::new(), true));
 
         assert!(screen.contains("4h ahead through 2026-07-14"), "{screen}");
+    }
+
+    #[test]
+    fn complete_month_shows_exact_totals_and_visual_progress() {
+        let screen = screen(&report(Vec::new(), true));
+
+        assert!(screen.contains("Month: 72h / 160h · 45%"), "{screen}");
+        assert!(screen.contains('█'), "{screen}");
+        assert!(screen.contains('░'), "{screen}");
+    }
+
+    #[test]
+    fn bounded_month_suppresses_authoritative_progress() {
+        let screen = screen(&report(Vec::new(), false));
+
+        assert!(screen.contains("Segment: 72h logged"), "{screen}");
+        assert!(!screen.contains("45%"), "{screen}");
+        assert!(!screen.contains('░'), "{screen}");
+    }
+
+    #[test]
+    fn month_without_required_hours_suppresses_percentage_progress() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_schedule(
+            Vec::new(),
+            true,
+            false,
+            date,
+            date,
+            ScheduleDetails {
+                month_required_duration: "0h".to_owned(),
+                month_logged_duration: "0h".to_owned(),
+                month_current_period_duration: "0h".to_owned(),
+                day_required_duration: "0h".to_owned(),
+                day_logged_duration: "0h".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds::default(),
+            },
+        );
+        let screen = screen(&report);
+
+        assert!(screen.contains("Month: No required hours"), "{screen}");
+        assert!(!screen.contains('%'), "{screen}");
+    }
+
+    #[test]
+    fn month_over_target_keeps_exact_overage_while_capping_visual_fill() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_schedule(
+            Vec::new(),
+            true,
+            false,
+            date,
+            date,
+            ScheduleDetails {
+                month_required_duration: "160h".to_owned(),
+                month_logged_duration: "180h".to_owned(),
+                month_current_period_duration: "+20h".to_owned(),
+                day_required_duration: "8h".to_owned(),
+                day_logged_duration: "8h".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds {
+                    month_required: 160 * 3_600,
+                    month_logged: 180 * 3_600,
+                    month_balance: 20 * 3_600,
+                    day_required: 8 * 3_600,
+                    day_logged: 8 * 3_600,
+                },
+            },
+        );
+        let screen = screen(&report);
+
+        assert!(screen.contains("Month: 180h / 160h · 112%"), "{screen}");
+        assert!(!screen.contains('░'), "{screen}");
     }
 
     #[test]
