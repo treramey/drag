@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -50,7 +51,7 @@ pub enum Command {
     /// supplied; intervals include their own start time.
     #[command(
         visible_alias = "l",
-        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log --json '{\"issueKey\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' --dry-run\n  printf '%s' '{\"issueKey\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
+        after_help = "Aliases:\n  drag l\n\nExamples:\n  drag log ABC-123 1h\n  drag l ABC-123 11:35-14:20 yesterday -d \"review\"\n  drag log ABC-123 11.35-14.20 2026-07-14\n  drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h\n  drag log ABC-123 1h --attr _Test_=RD --dry-run\n  drag log --json '{\"issueKey\":\"ABC-123\",\"durationOrInterval\":\"30m\",\"attributes\":{\"_Test_\":\"RD\"}}' --dry-run\n  printf '%s' '{\"issueKey\":\"ABC-123\",\"durationOrInterval\":\"30m\"}' | drag log --json - --dry-run"
     )]
     Log(LogArgs),
     /// List worklogs for a date without changing Jira or Tempo.
@@ -175,12 +176,34 @@ pub struct LogArgs {
     /// Remaining estimate as a duration, such as 2h.
     #[arg(short = 'r', long)]
     pub remaining_estimate: Option<String>,
+    /// Tempo work attribute as KEY=VALUE. Repeat for multiple attributes.
+    #[arg(long = "attr", value_name = "KEY=VALUE", value_parser = parse_log_attribute)]
+    pub attributes: Vec<LogAttribute>,
     /// Raw input JSON, or '-' to read it from stdin.
-    #[arg(long, conflicts_with_all = ["issue_key", "duration_or_interval", "when", "description", "start", "remaining_estimate"])]
+    #[arg(long, conflicts_with_all = ["issue_key", "duration_or_interval", "when", "description", "start", "remaining_estimate", "attributes"])]
     pub json: Option<String>,
     /// Validate and print the Tempo request without sending it.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct LogAttribute {
+    pub key: String,
+    pub value: String,
+}
+
+fn parse_log_attribute(raw: &str) -> Result<LogAttribute, String> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| "work attribute must use KEY=VALUE".to_owned())?;
+    if key.trim().is_empty() {
+        return Err("work attribute key cannot be empty".to_owned());
+    }
+    Ok(LogAttribute {
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -196,6 +219,8 @@ pub struct LogInput {
     pub start: Option<String>,
     #[serde(default)]
     pub remaining_estimate: Option<String>,
+    #[serde(default)]
+    pub attributes: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Args, Default)]

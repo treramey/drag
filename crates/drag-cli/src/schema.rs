@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 6;
+const SCHEMA_VERSION: u64 = 7;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -442,7 +442,7 @@ fn command_skill_policy(identity: CommandIdentity) -> Option<CommandSkillPolicy>
     match identity {
         CommandIdentity::Log => Some(CommandSkillPolicy {
             heading: "Mutation policy",
-            guidance: "`log` creates a Tempo worklog. Start with `--dry-run`, verify the normalized issue, date, time, duration, and description, then execute without `--dry-run` only when the user's request explicitly authorizes creating the worklog.",
+            guidance: "`log` creates a Tempo worklog. Start with `--dry-run`, verify the normalized issue, date, time, duration, description, and work attributes, then execute without `--dry-run` only when the user's request explicitly authorizes creating the worklog.",
         }),
         CommandIdentity::List => Some(CommandSkillPolicy {
             heading: "Automation policy",
@@ -1376,7 +1376,13 @@ mod tests {
             input_schema["required"],
             serde_json::json!(["issueKey", "durationOrInterval"])
         );
-        for field in ["when", "description", "start", "remainingEstimate"] {
+        for field in [
+            "when",
+            "description",
+            "start",
+            "remainingEstimate",
+            "attributes",
+        ] {
             assert!(
                 input_schema["properties"][field].is_object(),
                 "missing {field}"
@@ -1422,6 +1428,15 @@ mod tests {
         .map_err(|error| error.to_string())?;
         assert!(Cli::try_parse_from(["drag", "log"]).is_err());
         assert!(Cli::try_parse_from(["drag", "log", "ABC-1", "30m", "--json", "{}"]).is_err());
+        assert!(Cli::try_parse_from([
+            "drag",
+            "log",
+            "--json",
+            r#"{"issueKey":"ABC-1","durationOrInterval":"30m"}"#,
+            "--attr",
+            "_Test_=RD",
+        ])
+        .is_err());
         Ok(())
     }
 

@@ -1,6 +1,6 @@
 ---
 name: drag-log
-description: "Log time to Tempo Cloud with Drag. Use when the user asks to add or preview a worklog using a duration, clock interval, date, description, or remaining estimate."
+description: "Log time to Tempo Cloud with Drag. Use when the user asks to add or preview a worklog using a duration, clock interval, date, description, remaining estimate, or Tempo work attributes."
 ---
 
 # drag log
@@ -32,6 +32,7 @@ Usage: drag log [OPTIONS] [ISSUE_KEY] [DURATION_OR_INTERVAL] [WHEN]
 | `--description` | no | — | Worklog description |
 | `--start` | no | — | Start time for duration input (HH:mm) |
 | `--remaining-estimate` | no | — | Remaining estimate as a duration, such as 2h |
+| `--attr` | no | — | Tempo work attribute as KEY=VALUE. Repeat for multiple attributes |
 | `--json` | no | — | Raw input JSON, or '-' to read it from stdin |
 | `--dry-run` | no | false | Validate and print the Tempo request without sending it |
 
@@ -42,13 +43,14 @@ drag log ABC-123 1h
 drag l ABC-123 11:35-14:20 yesterday -d "review"
 drag log ABC-123 11.35-14.20 2026-07-14
 drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h
-drag log --json '{"issueKey":"ABC-123","durationOrInterval":"30m"}' --dry-run
+drag log ABC-123 1h --attr _Test_=RD --dry-run
+drag log --json '{"issueKey":"ABC-123","durationOrInterval":"30m","attributes":{"_Test_":"RD"}}' --dry-run
 printf '%s' '{"issueKey":"ABC-123","durationOrInterval":"30m"}' | drag log --json - --dry-run
 ```
 
 ## Mutation policy
 
-`log` creates a Tempo worklog. Start with `--dry-run`, verify the normalized issue, date, time, duration, and description, then execute without `--dry-run` only when the user's request explicitly authorizes creating the worklog.
+`log` creates a Tempo worklog. Start with `--dry-run`, verify the normalized issue, date, time, duration, description, and work attributes, then execute without `--dry-run` only when the user's request explicitly authorizes creating the worklog.
 
 ## Inspect the contract
 

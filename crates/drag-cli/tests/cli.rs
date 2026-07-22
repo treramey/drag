@@ -728,6 +728,128 @@ fn positional_inline_and_stdin_log_inputs_are_equivalent() -> Result<(), Box<dyn
 }
 
 #[test]
+fn log_json_attributes_are_normalized_in_dry_run_output() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+    let raw = r#"{"issueKey":"ABC-1","durationOrInterval":"30m","attributes":{"_Test_":"RD","_Worktype_":"Development"}}"#;
+
+    for output in [
+        command(&path)?
+            .args(["log", "--json", raw, "--dry-run"])
+            .output()?,
+        command(&path)?
+            .args(["log", "--json", "-", "--dry-run"])
+            .write_stdin(raw)
+            .output()?,
+    ] {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(
+            body["data"]["request"]["attributes"],
+            serde_json::json!([
+                {"key": "_Test_", "value": "RD"},
+                {"key": "_Worktype_", "value": "Development"}
+            ])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn malformed_log_attribute_flags_are_structured_usage_errors(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing_config = directory.path().join("missing.json");
+
+    for attribute in ["_Test_", "=RD", "   =RD"] {
+        let output = command(&missing_config)?
+            .args(["log", "ABC-1", "30m", "--attr", attribute, "--dry-run"])
+            .output()?;
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        let body: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(body["error"]["code"], "usage");
+    }
+    assert!(!missing_config.exists());
+    Ok(())
+}
+
+#[test]
+fn log_json_rejects_non_string_attribute_values() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing_config = directory.path().join("missing.json");
+    let output = command(&missing_config)?
+        .args([
+            "log",
+            "--json",
+            r#"{"issueKey":"ABC-1","durationOrInterval":"30m","attributes":{"_Test_":42}}"#,
+            "--dry-run",
+        ])
+        .output()?;
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_json");
+    assert!(!missing_config.exists());
+    Ok(())
+}
+
+#[test]
+fn repeated_log_attribute_flags_use_the_last_value_for_each_key(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = configured_file(&directory)?;
+
+    let output = command(&path)?
+        .args([
+            "log",
+            "ABC-1",
+            "30m",
+            "--attr",
+            "_Test_=first",
+            "--attr",
+            "_Worktype_=Development=Backend",
+            "--attr",
+            "_Test_=last",
+            "--dry-run",
+        ])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(
+        body["data"]["request"]["attributes"],
+        serde_json::json!([
+            {"key": "_Test_", "value": "last"},
+            {"key": "_Worktype_", "value": "Development=Backend"}
+        ])
+    );
+    let json_output = command(&path)?
+        .args([
+            "log",
+            "--json",
+            r#"{"issueKey":"ABC-1","durationOrInterval":"30m","attributes":{"_Test_":"last","_Worktype_":"Development=Backend"}}"#,
+            "--dry-run",
+        ])
+        .output()?;
+    assert!(json_output.status.success());
+    let json_body: Value = serde_json::from_slice(&json_output.stdout)?;
+    assert_eq!(body["data"], json_body["data"]);
+    Ok(())
+}
+
+#[test]
 fn log_rejects_raw_json_combined_with_positional_input() -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
     let path = configured_file(&directory)?;
@@ -877,7 +999,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 6);
+    assert_eq!(contract["schemaVersion"], 7);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -944,6 +1066,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         json_input["conflictsWith"],
         serde_json::json!([
+            "attributes",
             "description",
             "durationOrInterval",
             "issueKey",
@@ -1417,6 +1540,7 @@ fn log_help_documents_inputs_safety_and_examples() -> Result<(), Box<dyn std::er
         "--description",
         "--start",
         "--remaining-estimate",
+        "--attr",
         "--json",
         "--dry-run",
         "--debug",

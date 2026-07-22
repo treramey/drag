@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
-use drag::models::{AddWorklogRequest, ScheduleEntity, WorklogEntity};
+use drag::models::{AddWorklogRequest, ScheduleEntity, WorkAttribute, WorklogEntity};
 use drag::pagination::{
     PaginationPlan, TraversalDecision, TraversalError, TraversalState, DEFAULT_RECORD_LIMIT,
 };
@@ -109,6 +109,21 @@ impl ApiClient {
         let url = self.tempo_base.join("worklogs").map_err(CliError::Url)?;
         self.json(self.tempo(Method::POST, url).json(&request))
             .await
+    }
+
+    pub async fn get_required_work_attributes(&self) -> Result<Vec<WorkAttribute>, CliError> {
+        let url = self
+            .tempo_base
+            .join("work-attributes")
+            .map_err(CliError::Url)?;
+        let page: Page<WorkAttribute> = self
+            .json(self.tempo(Method::GET, url).query(&[("limit", "1000")]))
+            .await?;
+        Ok(page
+            .results
+            .into_iter()
+            .filter(|attribute| attribute.required)
+            .collect())
     }
 
     pub(crate) async fn execute_openapi_value(
@@ -681,6 +696,7 @@ mod tests {
             description: Some("review".to_owned()),
             remaining_estimate_seconds: Some(7_200),
             author_account_id: None,
+            attributes: None,
         }
     }
 
@@ -722,6 +738,33 @@ mod tests {
         let created = api.add_worklog(add_worklog_request()).await?;
 
         assert_eq!(created.tempo_worklog_id, "751393");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn required_work_attributes_returns_only_required_definitions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/4/work-attributes"))
+            .and(query_param("limit", "1000"))
+            .and(header("authorization", "Bearer tempo-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [
+                    {"key": "_Test_", "name": "Account", "required": true},
+                    {"key": "_Optional_", "name": "Optional", "required": false}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let api = ApiClient::with_tempo_base(credentials(), false, mock_tempo_base(&server)?)?;
+
+        let attributes = api.get_required_work_attributes().await?;
+
+        assert_eq!(attributes.len(), 1);
+        assert_eq!(attributes[0].key, "_Test_");
+        assert_eq!(attributes[0].name, "Account");
         Ok(())
     }
 

@@ -152,6 +152,7 @@ drag log ABC-123 1h15m
 drag l ABC-123 11:35-14:20 yesterday -d "review"
 drag log ABC-123 11.35-14.20 2026-07-14
 drag log ABC-123 1h15m 2026-07-14 --start 09:30 --remaining-estimate 2h
+drag log ABC-123 1h --attr _Test_=RD --attr _Worktype_=Development
 drag log ABC-123 30m --start 12:00 --dry-run
 ```
 
@@ -166,12 +167,15 @@ as the following local day.
 `--start`/`-s` sets the start in `HH:mm` form. Without it, today's worklog uses
 the current local time; a selected date uses the start of that day.
 `--description`/`-d` adds worklog text, and `--remaining-estimate`/`-r` accepts
-a duration such as `2h`.
+a duration such as `2h`. Repeat `--attr KEY=VALUE` to supply Tempo work
+attributes. If a key is repeated, its last value wins.
 
 Live logging reads Jira once to resolve the issue ID, then creates one Tempo
 worklog. Drag does not retry the create request automatically. Use `--dry-run`
 to validate the command and print the normalized request without contacting
-Jira or Tempo.
+Jira or Tempo. If Tempo specifically rejects a create because required work
+attributes are missing, Drag reads the required attribute definitions once and
+adds an actionable `--attr` hint; unrelated failures perform no such lookup.
 
 ### Other commands
 
@@ -335,13 +339,13 @@ contract explicitly in automation:
 drag --output json list --fields 'worklogs.issueKey,worklogs.duration,pagination.next' | jq
 drag --output ndjson list --fields 'worklogs.issueKey,worklogs.duration,pagination.next'
 drag --output json schema
-printf '%s' '{"issueKey":"ABC-1","durationOrInterval":"30m"}' \
+printf '%s' '{"issueKey":"ABC-1","durationOrInterval":"30m","attributes":{"_Test_":"RD"}}' \
   | drag --output json log --json - --dry-run
 ```
 
 Raw log input uses camel-case fields: `issueKey`,
-`durationOrInterval`, `when`, `description`, `start`, and
-`remainingEstimate`. Unknown fields are rejected. `--json` cannot be combined
+`durationOrInterval`, `when`, `description`, `start`, `remainingEstimate`, and
+an optional string-to-string `attributes` object. Unknown fields are rejected. `--json` cannot be combined
 with positional log arguments or their corresponding flags.
 
 Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
@@ -349,7 +353,7 @@ Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 and NDJSON output stay machine-readable.
 
-`drag --output json schema` emits the versioned CLI contract. Schema version 6
+`drag --output json schema` emits the versioned CLI contract. Schema version 7
 includes the installed CLI version and every command, nested subcommand,
 shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each

@@ -17,6 +17,26 @@ pub struct AddWorklogRequest {
     pub remaining_estimate_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author_account_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attributes: Option<Vec<WorkAttributeValue>>,
+}
+
+/// A Tempo work attribute value attached to a worklog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkAttributeValue {
+    pub key: String,
+    pub value: String,
+}
+
+/// Definition returned by Tempo's work-attributes endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkAttribute {
+    pub key: String,
+    pub name: String,
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// Tempo worklog response entity.
