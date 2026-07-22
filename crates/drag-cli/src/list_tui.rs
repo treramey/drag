@@ -39,8 +39,8 @@ pub(crate) const QUIT_KEY: char = 'q';
 pub(crate) const INTERRUPT_KEY: char = 'c';
 const DASHBOARD_DAY_SUMMARY_HEIGHT: u16 = 3;
 const DASHBOARD_DETAILS_HEIGHT: u16 = 5;
-const SPACIOUS_HEADER_TOP_PADDING: u16 = 2;
-const SPACIOUS_HEADER_HEIGHT: u16 = 5;
+const SPACIOUS_HEADER_TOP_PADDING: u16 = 1;
+const SPACIOUS_HEADER_HEIGHT: u16 = 3;
 const COMPACT_HEADER_TOP_PADDING: u16 = 1;
 const COMPACT_HEADER_HEIGHT: u16 = 2;
 const MIN_COMPACT_HEADER_HEIGHT: u16 = 20;
@@ -514,7 +514,7 @@ fn render_stacked(
     frame.render_widget(
         Paragraph::new(day_summary_text(report)).block(
             Block::bordered()
-                .title(primary("Day summary"))
+                .title(heading("Day summary"))
                 .border_style(Palette::muted()),
         ),
         day,
@@ -635,11 +635,7 @@ fn render_large_calendar(
         })
         .unwrap_or(selected);
     let mut lines = vec![
-        Line::styled(
-            selected.format("%B %Y").to_string(),
-            Palette::primary().bold(),
-        )
-        .centered(),
+        Line::styled(selected.format("%B %Y").to_string(), Palette::text().bold()).centered(),
         Line::from(
             ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]
                 .into_iter()
@@ -818,7 +814,7 @@ fn month_height(
         return COMPACT_MONTH_HEIGHT;
     };
     let calendar = Monthly::new(date, CalendarEventStore::default())
-        .show_month_header(Palette::primary())
+        .show_month_header(Palette::text().bold())
         .show_weekdays_header(Palette::muted());
     let calendar_height = calendar.height().saturating_add(3);
     let calendar_width = calendar.width().saturating_add(2);
@@ -917,58 +913,58 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
     let spans = if area.width >= 88 && has_focus {
         vec![
             primary(" ←/h "),
-            muted("previous day  "),
+            label("previous day  "),
             primary("→/l "),
-            muted("next day  "),
+            label("next day  "),
             primary("↑/k "),
-            muted("previous worklog  "),
+            label("previous worklog  "),
             primary("↓/j "),
-            muted("next worklog  "),
+            label("next worklog  "),
             primary("o "),
-            muted("open Jira  "),
+            label("open Jira  "),
             primary("q "),
-            muted("quit"),
+            label("quit"),
         ]
     } else if area.width >= 54 && has_focus {
         vec![
             primary(" ←/h →/l "),
-            muted("day  "),
+            label("day  "),
             primary("↑/k ↓/j "),
-            muted("worklog  "),
+            label("worklog  "),
             primary("o "),
-            muted("Jira  "),
+            label("Jira  "),
             primary("q "),
-            muted("quit"),
+            label("quit"),
         ]
     } else if area.width >= 32 && has_focus {
         vec![
             primary(" q "),
-            muted("quit "),
+            label("quit "),
             primary("←/h →/l "),
-            muted("day "),
+            label("day "),
             primary("↑↓ "),
-            muted("worklog "),
+            label("worklog "),
             primary("o "),
-            muted("Jira"),
+            label("Jira"),
         ]
     } else if area.width >= 54 {
         vec![
             primary(" ←/h "),
-            muted("previous day  "),
+            label("previous day  "),
             primary("→/l "),
-            muted("next day  "),
+            label("next day  "),
             primary("q "),
-            muted("quit"),
+            label("quit"),
         ]
     } else if area.width >= 24 {
         vec![
             primary(" q "),
-            muted("quit  "),
+            label("quit  "),
             primary("←/h →/l "),
-            muted("day"),
+            label("day"),
         ]
     } else {
-        vec![primary(" q "), muted("quit")]
+        vec![primary(" q "), label("quit")]
     };
     frame.render_widget(Line::from(spans), content);
 }
@@ -985,8 +981,12 @@ fn primary<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
     Span::styled(content, Palette::primary().bold())
 }
 
-fn muted<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(content, Palette::muted())
+fn heading<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::text().bold())
+}
+
+fn label<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::text())
 }
 
 fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -1022,7 +1022,7 @@ fn render_month(
         frame.render_widget(
             Paragraph::new(summary).block(
                 Block::bordered()
-                    .title(primary(selected_date.format("%B %Y").to_string()))
+                    .title(heading(selected_date.format("%B %Y").to_string()))
                     .border_style(Palette::muted()),
             ),
             area,
@@ -1044,7 +1044,7 @@ fn render_month(
     }
     events.add(selected_date, Palette::action_focus().bold());
     let calendar = Monthly::new(selected_date, events)
-        .show_month_header(Palette::primary().bold())
+        .show_month_header(Palette::text().bold())
         .show_weekdays_header(Palette::muted().bold())
         .show_surrounding(Palette::muted());
     frame.render_widget(calendar, calendar_area);
@@ -1099,7 +1099,7 @@ fn render_worklogs(
             frame.render_widget(
                 empty.block(
                     Block::bordered()
-                        .title(primary("Worklogs"))
+                        .title(heading("Worklogs"))
                         .border_style(Palette::muted()),
                 ),
                 area,
@@ -1144,13 +1144,13 @@ fn render_worklogs(
         ]
     };
     let table = Table::new(rows, widths)
-        .header(Row::new(["ID", "Time", "Issue", "Duration"]).style(Palette::muted().bold()))
+        .header(Row::new(["ID", "Time", "Issue", "Duration"]).style(Palette::text().bold()))
         .row_highlight_style(Palette::action_focus().bold())
         .highlight_symbol("▶ ");
     let table = if bordered {
         table.block(
             Block::bordered()
-                .title(primary("Worklogs"))
+                .title(heading("Worklogs"))
                 .border_style(Palette::muted()),
         )
     } else {
@@ -1380,6 +1380,24 @@ mod tests {
         None
     }
 
+    fn screen_text_color(report: &ListReport, text: &str) -> Option<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).ok()?;
+        let mut model = ListReportModel::new(report);
+        terminal.draw(|frame| render(frame, &mut model)).ok()?;
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let line: String = (0..buffer.area.width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect();
+            if let Some(byte_index) = line.find(text) {
+                let x = u16::try_from(line[..byte_index].chars().count()).ok()?;
+                return buffer.cell((x, y)).map(|cell| cell.fg);
+            }
+        }
+        None
+    }
+
     fn calendar_day_style(
         report: &ListReport,
         row: &str,
@@ -1451,16 +1469,32 @@ mod tests {
     }
 
     #[test]
+    fn informational_text_uses_terminal_foreground_while_selection_uses_accent() {
+        let report = report(Vec::new(), true);
+
+        assert_eq!(screen_text_color(&report, "Month:"), Some(Color::Reset));
+        assert_eq!(screen_text_color(&report, "Day:"), Some(Color::Reset));
+        assert_eq!(
+            screen_text_color(&report, "Tuesday, 2026-07-14"),
+            Some(Color::Magenta)
+        );
+        assert_eq!(
+            screen_text_color(&report, "previous day"),
+            Some(Color::Reset)
+        );
+    }
+
+    #[test]
     fn list_report_shows_the_shared_brand_lockup_and_version() {
         let report = report(Vec::new(), true);
         let mut model = ListReportModel::new(&report);
 
         let lines = screen_lines_with_size(&mut model, 100, 40);
 
-        assert!(lines.get(2).is_some_and(|line| {
+        assert!(lines.get(1).is_some_and(|line| {
             line.contains(DRAG_ART[0]) && line.contains(concat!("v", env!("CARGO_PKG_VERSION")))
         }));
-        assert!(lines.get(3).is_some_and(|line| line.contains(DRAG_ART[1])));
+        assert!(lines.get(2).is_some_and(|line| line.contains(DRAG_ART[1])));
     }
 
     #[test]
@@ -1472,10 +1506,10 @@ mod tests {
         let lines = screen_lines_with_size(&mut model, 100, 40);
 
         assert!(lines
-            .get(2)
+            .get(1)
             .is_some_and(|line| line.contains(concat!("v", env!("CARGO_PKG_VERSION")))));
         assert!(lines
-            .get(3)
+            .get(2)
             .is_some_and(|line| line.contains("Update available: v0.6.0")));
     }
 
@@ -1585,7 +1619,7 @@ mod tests {
 
         assert_eq!(day_summary, month_total + 1, "{}", lines.join("\n"));
         assert_eq!(current_period, day_summary + 1, "{}", lines.join("\n"));
-        assert_eq!(month_total, 22, "{}", lines.join("\n"));
+        assert_eq!(month_total, 19, "{}", lines.join("\n"));
     }
 
     #[test]
