@@ -725,7 +725,12 @@ fn schedule_balance_text(report: &ListReport) -> String {
 
 fn duration_status(seconds: i64) -> String {
     match seconds.cmp(&0) {
-        std::cmp::Ordering::Less => format!("{} behind", format_duration(-seconds, false)),
+        std::cmp::Ordering::Less => {
+            format!(
+                "{} behind",
+                format_duration(seconds.saturating_abs(), false)
+            )
+        }
         std::cmp::Ordering::Equal => "On track".to_owned(),
         std::cmp::Ordering::Greater => format!("{} ahead", format_duration(seconds, false)),
     }
@@ -1084,9 +1089,14 @@ fn render_worklogs(
     if report.worklogs().is_empty() {
         let date = report.selected_date().format("%A, %Y-%m-%d");
         let empty = Paragraph::new(if report.pagination().totals_complete {
+            let guidance = if area.width >= 40 {
+                "Close, then run drag log to add one"
+            } else {
+                "Close; run drag log"
+            };
             Text::from(vec![
                 Line::from(format!("No worklogs for {date}")),
-                Line::from("Close, then run drag log to add one"),
+                Line::from(guidance),
             ])
         } else {
             Text::from(vec![
@@ -2116,6 +2126,7 @@ mod tests {
                     "missing {expected:?} at width {width}\n{screen}"
                 );
             }
+            assert!(screen.contains("Close; run drag log"), "{screen}");
             assert!(!screen.contains("Jira"), "{screen}");
         }
     }

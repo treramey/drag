@@ -1249,8 +1249,14 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(interactive["allTerminalsRequired"], true);
     assert_eq!(interactive["renderStream"], "stderr");
     assert_eq!(interactive["fallback"], "completedPlainTextReport");
-    assert_eq!(interactive["controls"]["previousDate"], "h");
-    assert_eq!(interactive["controls"]["nextDate"], "l");
+    assert_eq!(
+        interactive["controls"]["previousDate"],
+        serde_json::json!(["left", "h"])
+    );
+    assert_eq!(
+        interactive["controls"]["nextDate"],
+        serde_json::json!(["right", "l"])
+    );
     assert_eq!(interactive["controls"]["openFocusedJiraIssue"], "o");
     assert_eq!(
         interactive["controls"]["quit"],
