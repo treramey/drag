@@ -399,8 +399,8 @@ fn date_action_for_key_event(code: KeyCode, kind: KeyEventKind) -> Option<ListRe
         return None;
     }
     match code {
-        KeyCode::Char(PREVIOUS_DATE_KEY) => Some(ListReportAction::PreviousDate),
-        KeyCode::Char(NEXT_DATE_KEY) => Some(ListReportAction::NextDate),
+        KeyCode::Left | KeyCode::Char(PREVIOUS_DATE_KEY) => Some(ListReportAction::PreviousDate),
+        KeyCode::Right | KeyCode::Char(NEXT_DATE_KEY) => Some(ListReportAction::NextDate),
         _ => None,
     }
 }
@@ -573,7 +573,7 @@ fn dashboard_desired_height(model: &ListReportModel<'_>) -> u16 {
 
 fn worklogs_content_height(report: &ListReport) -> u16 {
     if report.worklogs().is_empty() {
-        1
+        2
     } else {
         u16::try_from(report.worklogs().len())
             .unwrap_or(u16::MAX)
@@ -913,55 +913,59 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
         frame.render_widget(Line::from(status.to_owned()), content);
         return;
     }
-    let spans = if area.width >= 70 {
+    let has_focus = model.focused_row().is_some();
+    let spans = if area.width >= 88 && has_focus {
         vec![
-            primary(" h/l "),
-            muted("date  "),
-            primary(" ↑/k "),
-            muted("up  "),
+            primary(" ←/h "),
+            muted("previous day  "),
+            primary("→/l "),
+            muted("next day  "),
+            primary("↑/k "),
+            muted("previous worklog  "),
             primary("↓/j "),
-            muted("down  "),
+            muted("next worklog  "),
             primary("o "),
-            muted("open  "),
+            muted("open Jira  "),
             primary("q "),
             muted("quit"),
-            muted_bold("   Esc "),
-            muted("close   "),
-            muted_bold("Ctrl-C "),
-            muted("exit"),
         ]
-    } else if area.width >= 48 {
+    } else if area.width >= 54 && has_focus {
         vec![
-            primary(" q "),
-            muted("quit  "),
-            primary("h/l "),
-            muted("date  "),
-            primary("↑/k "),
-            muted("up  "),
-            primary("↓/j "),
-            muted("down  "),
+            primary(" ←/h →/l "),
+            muted("day  "),
+            primary("↑/k ↓/j "),
+            muted("worklog  "),
             primary("o "),
-            muted("open"),
+            muted("Jira  "),
+            primary("q "),
+            muted("quit"),
         ]
-    } else if area.width >= 32 {
+    } else if area.width >= 32 && has_focus {
         vec![
             primary(" q "),
             muted("quit "),
-            primary("h/l "),
-            muted("date "),
+            primary("←/h →/l "),
+            muted("day "),
             primary("↑↓ "),
-            muted("move "),
+            muted("worklog "),
             primary("o "),
-            muted("open"),
+            muted("Jira"),
+        ]
+    } else if area.width >= 54 {
+        vec![
+            primary(" ←/h "),
+            muted("previous day  "),
+            primary("→/l "),
+            muted("next day  "),
+            primary("q "),
+            muted("quit"),
         ]
     } else if area.width >= 24 {
         vec![
             primary(" q "),
             muted("quit  "),
-            primary("↑↓ "),
-            muted("move  "),
-            primary("o "),
-            muted("open"),
+            primary("←/h →/l "),
+            muted("day"),
         ]
     } else {
         vec![primary(" q "), muted("quit")]
@@ -983,10 +987,6 @@ fn primary<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
 
 fn muted<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
     Span::styled(content, Palette::muted())
-}
-
-fn muted_bold<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(content, Palette::muted().bold())
 }
 
 fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -1082,10 +1082,17 @@ fn render_worklogs(
 ) {
     let report = model.report;
     if report.worklogs().is_empty() {
+        let date = report.selected_date().format("%A, %Y-%m-%d");
         let empty = Paragraph::new(if report.pagination().totals_complete {
-            "No worklogs".to_owned()
+            Text::from(vec![
+                Line::from(format!("No worklogs for {date}")),
+                Line::from("Close, then run drag log to add one"),
+            ])
         } else {
-            "No worklogs in this retrieved segment".to_owned()
+            Text::from(vec![
+                Line::from(format!("No worklogs for {date}")),
+                Line::from("in this retrieved segment"),
+            ])
         })
         .centered();
         if bordered {
@@ -1435,10 +1442,9 @@ mod tests {
             "09:00–10:30",
             "OPS-42",
             "Day: 1h 30m / 8h required",
-            "h/l date",
+            "←/h previous day",
+            "o open Jira",
             "q quit",
-            "Esc close",
-            "Ctrl-C exit",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
@@ -1608,7 +1614,7 @@ mod tests {
             "751393",
             "OPS-42",
             "Day:",
-            "h/l date",
+            "←/h previous day",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
@@ -1666,7 +1672,10 @@ mod tests {
         assert!(screen.contains("Loading entries…"), "{screen}");
         assert!(!screen.contains("72h logged of 160h"), "{screen}");
         assert!(!screen.contains("+4h current period"), "{screen}");
-        assert!(!screen.contains("Tuesday, 2026-07-14"), "{screen}");
+        assert!(
+            screen.contains("No worklogs for Tuesday, 2026-07-14"),
+            "{screen}"
+        );
     }
 
     #[test]
@@ -1741,10 +1750,11 @@ mod tests {
     fn empty_report_shows_empty_state_and_schedule_summaries() {
         let screen = screen(&report(Vec::new(), true));
 
-        assert!(screen.contains("No worklogs"));
-        assert!(!screen.contains("No worklogs for Tuesday"));
+        assert!(screen.contains("No worklogs for Tuesday, 2026-07-14"));
+        assert!(screen.contains("Close, then run drag log to add one"));
         assert!(screen.contains("Month: 72h / 160h · 45%"));
         assert!(screen.contains("Day: 1h 30m / 8h required · 6h30m behind"));
+        assert!(!screen.contains("open Jira"));
     }
 
     #[test]
@@ -1848,10 +1858,11 @@ mod tests {
     fn incomplete_empty_report_qualifies_segment_and_totals() {
         let screen = screen(&report(Vec::new(), false));
 
-        assert!(screen.contains("No worklogs in this retrieved segment"));
+        assert!(screen.contains("No worklogs for Tuesday, 2026-07-14"));
+        assert!(screen.contains("in this retrieved segment"));
         assert!(screen.contains("More worklogs are available"));
         assert!(screen.contains("Totals reflect this bounded segment"));
-        assert!(!screen.contains("No worklogs for Tuesday"));
+        assert!(!screen.contains("run drag log"));
     }
 
     #[test]
@@ -1915,13 +1926,21 @@ mod tests {
     }
 
     #[test]
-    fn h_and_l_change_dates_only_on_key_press() {
+    fn vim_and_arrow_keys_change_dates_only_on_key_press() {
         assert_eq!(
             date_action_for_key_event(KeyCode::Char('h'), KeyEventKind::Press),
             Some(ListReportAction::PreviousDate)
         );
         assert_eq!(
             date_action_for_key_event(KeyCode::Char('l'), KeyEventKind::Press),
+            Some(ListReportAction::NextDate)
+        );
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Left, KeyEventKind::Press),
+            Some(ListReportAction::PreviousDate)
+        );
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Right, KeyEventKind::Press),
             Some(ListReportAction::NextDate)
         );
         assert_eq!(
@@ -2019,9 +2038,20 @@ mod tests {
     #[test]
     fn open_key_and_footer_are_discoverable() {
         assert_eq!(message_for_key(KeyCode::Char('o')), Some(Message::Open));
-        let report = report(Vec::new(), true);
+        let report = report(
+            vec![Worklog {
+                id: "1".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            true,
+        );
         let screen = screen(&report);
-        assert!(screen.contains("o open"), "{screen}");
+        assert!(screen.contains("o open Jira"), "{screen}");
     }
 
     #[test]
@@ -2041,17 +2071,18 @@ mod tests {
     }
 
     #[test]
-    fn compact_footer_keeps_quit_move_and_open_hints_at_boundary_widths() {
+    fn compact_empty_footer_keeps_only_date_and_quit_hints() {
         let report = report(Vec::new(), true);
         for width in [24, 32] {
             let mut model = ListReportModel::new(&report);
             let screen = screen_with_size(&mut model, width, 20);
-            for expected in ["q quit", "move", "o open"] {
+            for expected in ["q quit", "←/h →/l"] {
                 assert!(
                     screen.contains(expected),
                     "missing {expected:?} at width {width}\n{screen}"
                 );
             }
+            assert!(!screen.contains("Jira"), "{screen}");
         }
     }
 
@@ -2184,8 +2215,8 @@ mod tests {
             "09:00–10:30",
             "OPS-42",
             "1h 30m",
-            "↑/k",
-            "↓/j",
+            "↑↓",
+            "worklog",
             "q quit",
         ] {
             assert!(narrow.contains(expected), "missing {expected:?}\n{narrow}");

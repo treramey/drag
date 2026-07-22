@@ -699,8 +699,8 @@ fn command_behavior_contract(identity: CommandIdentity) -> Value {
                 "renderStream": "stderr",
                 "fallback": "completedPlainTextReport",
                 "controls": {
-                    "previousDate": PREVIOUS_DATE_KEY,
-                    "nextDate": NEXT_DATE_KEY,
+                    "previousDate": ["left", PREVIOUS_DATE_KEY.to_string()],
+                    "nextDate": ["right", NEXT_DATE_KEY.to_string()],
                     "moveUp": ["up", MOVE_UP_KEY],
                     "moveDown": ["down", MOVE_DOWN_KEY],
                     "openFocusedJiraIssue": OPEN_ISSUE_KEY,
@@ -1302,8 +1302,8 @@ mod tests {
         assert_eq!(
             behavior["interactive"]["controls"],
             serde_json::json!({
-                "previousDate": PREVIOUS_DATE_KEY,
-                "nextDate": NEXT_DATE_KEY,
+                "previousDate": ["left", PREVIOUS_DATE_KEY.to_string()],
+                "nextDate": ["right", NEXT_DATE_KEY.to_string()],
                 "moveUp": ["up", MOVE_UP_KEY],
                 "moveDown": ["down", MOVE_DOWN_KEY],
                 "openFocusedJiraIssue": OPEN_ISSUE_KEY,
