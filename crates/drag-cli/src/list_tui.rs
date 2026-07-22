@@ -694,7 +694,15 @@ fn day_summary_text(report: &ListReport) -> String {
     let schedule = report.schedule();
     let logged = schedule.seconds.day_logged;
     let required = schedule.seconds.day_required;
-    let status = if required == 0 {
+    if !report.pagination().totals_complete {
+        return format!(
+            "Day segment: {} logged · {} required",
+            schedule.day_logged_duration, schedule.day_required_duration
+        );
+    }
+    let status = if report.selected_date() > report.today() {
+        "Upcoming".to_owned()
+    } else if required == 0 {
         "No required hours".to_owned()
     } else {
         duration_status(logged - required)
@@ -724,15 +732,18 @@ fn schedule_balance_text(report: &ListReport) -> String {
 }
 
 fn duration_status(seconds: i64) -> String {
-    match seconds.cmp(&0) {
+    let displayed_seconds = (seconds / 60) * 60;
+    match displayed_seconds.cmp(&0) {
         std::cmp::Ordering::Less => {
             format!(
                 "{} behind",
-                format_duration(seconds.saturating_abs(), false)
+                format_duration(displayed_seconds.saturating_abs(), false)
             )
         }
         std::cmp::Ordering::Equal => "On track".to_owned(),
-        std::cmp::Ordering::Greater => format!("{} ahead", format_duration(seconds, false)),
+        std::cmp::Ordering::Greater => {
+            format!("{} ahead", format_duration(displayed_seconds, false))
+        }
     }
 }
 
@@ -915,7 +926,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
         return;
     }
     let has_focus = model.focused_row().is_some();
-    let spans = if area.width >= 88 && has_focus {
+    let spans = if area.width >= 92 && has_focus {
         vec![
             primary(" ←/h "),
             label("previous day  "),
@@ -941,7 +952,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
             primary("q "),
             label("quit"),
         ]
-    } else if area.width >= 32 && has_focus {
+    } else if area.width >= 37 && has_focus {
         vec![
             primary(" q "),
             label("quit "),
@@ -1087,6 +1098,17 @@ fn render_worklogs(
 ) {
     let report = model.report;
     if report.worklogs().is_empty() {
+        if model.selected_date() != report.selected_date() {
+            if bordered {
+                frame.render_widget(
+                    Block::bordered()
+                        .title(heading("Worklogs"))
+                        .border_style(Palette::muted()),
+                    area,
+                );
+            }
+            return;
+        }
         let empty = Paragraph::new(if report.pagination().totals_complete {
             Text::from(Line::from("No worklogs"))
         } else {
@@ -1717,7 +1739,7 @@ mod tests {
         assert!(screen.contains("Loading entries…"), "{screen}");
         assert!(!screen.contains("72h logged of 160h"), "{screen}");
         assert!(!screen.contains("+4h current period"), "{screen}");
-        assert!(screen.contains("No worklogs"), "{screen}");
+        assert!(!screen.contains("No worklogs"), "{screen}");
     }
 
     #[test]
@@ -1819,6 +1841,11 @@ mod tests {
         let screen = screen(&report(Vec::new(), false));
 
         assert!(screen.contains("Segment: 72h logged"), "{screen}");
+        assert!(
+            screen.contains("Day segment: 1h 30m logged · 8h required"),
+            "{screen}"
+        );
+        assert!(!screen.contains("6h30m behind"), "{screen}");
         assert!(!screen.contains("45%"), "{screen}");
         assert!(!screen.contains('░'), "{screen}");
     }
@@ -1893,6 +1920,49 @@ mod tests {
         let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
 
         assert!(screen.contains("Schedule has not started"), "{screen}");
+    }
+
+    #[test]
+    fn future_working_day_is_upcoming_instead_of_behind() {
+        let selected = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
+
+        assert!(
+            screen.contains("1h 30m / 8h required · Upcoming"),
+            "{screen}"
+        );
+        assert!(!screen.contains("6h30m behind"), "{screen}");
+    }
+
+    #[test]
+    fn subminute_balance_is_on_track_at_displayed_precision() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_schedule(
+            Vec::new(),
+            true,
+            false,
+            date,
+            date,
+            ScheduleDetails {
+                month_required_duration: "8h".to_owned(),
+                month_logged_duration: "8h".to_owned(),
+                month_current_period_duration: "+30s".to_owned(),
+                day_required_duration: "8h".to_owned(),
+                day_logged_duration: "8h".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds {
+                    month_required: 8 * 3_600,
+                    month_logged: 8 * 3_600 + 30,
+                    month_balance: 30,
+                    day_required: 8 * 3_600,
+                    day_logged: 8 * 3_600 + 30,
+                },
+            },
+        );
+        let screen = screen(&report);
+
+        assert!(screen.contains("8h / 8h required · On track"), "{screen}");
+        assert!(!screen.contains("0h ahead"), "{screen}");
     }
 
     #[test]
@@ -2125,6 +2195,42 @@ mod tests {
             }
             assert!(!screen.contains("Jira"), "{screen}");
         }
+    }
+
+    #[test]
+    fn footer_variants_do_not_clip_at_their_width_boundaries() {
+        let report = report(
+            vec![Worklog {
+                id: "1".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            true,
+        );
+
+        let mut medium_model = ListReportModel::new(&report);
+        let medium = screen_with_size(&mut medium_model, 88, 20);
+        assert!(medium.contains("q quit"), "{medium}");
+        assert!(medium.contains("o Jira"), "{medium}");
+
+        let mut wide_model = ListReportModel::new(&report);
+        let wide = screen_with_size(&mut wide_model, 92, 20);
+        assert!(wide.contains("previous worklog"), "{wide}");
+        assert!(wide.contains("q quit"), "{wide}");
+
+        let mut exact_compact_model = ListReportModel::new(&report);
+        let exact_compact = screen_with_size(&mut exact_compact_model, 37, 20);
+        assert!(exact_compact.contains("q quit"), "{exact_compact}");
+        assert!(exact_compact.contains("o Jira"), "{exact_compact}");
+
+        let mut compact_model = ListReportModel::new(&report);
+        let compact = screen_with_size(&mut compact_model, 32, 20);
+        assert!(compact.contains("q quit"), "{compact}");
+        assert!(!compact.contains("Jira"), "{compact}");
     }
 
     #[test]
