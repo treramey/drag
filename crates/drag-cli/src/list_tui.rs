@@ -573,7 +573,7 @@ fn dashboard_desired_height(model: &ListReportModel<'_>) -> u16 {
 
 fn worklogs_content_height(report: &ListReport) -> u16 {
     if report.worklogs().is_empty() {
-        2
+        1 + u16::from(!report.pagination().totals_complete)
     } else {
         u16::try_from(report.worklogs().len())
             .unwrap_or(u16::MAX)
@@ -1089,15 +1089,7 @@ fn render_worklogs(
     if report.worklogs().is_empty() {
         let date = report.selected_date().format("%A, %Y-%m-%d");
         let empty = Paragraph::new(if report.pagination().totals_complete {
-            let guidance = if area.width >= 40 {
-                "Close, then run drag log to add one"
-            } else {
-                "Close; run drag log"
-            };
-            Text::from(vec![
-                Line::from(format!("No worklogs for {date}")),
-                Line::from(guidance),
-            ])
+            Text::from(Line::from(format!("No worklogs for {date}")))
         } else {
             Text::from(vec![
                 Line::from(format!("No worklogs for {date}")),
@@ -1795,7 +1787,6 @@ mod tests {
         let screen = screen(&report(Vec::new(), true));
 
         assert!(screen.contains("No worklogs for Tuesday, 2026-07-14"));
-        assert!(screen.contains("Close, then run drag log to add one"));
         assert!(screen.contains("Month: 72h / 160h · 45%"));
         assert!(screen.contains("Day: 1h 30m / 8h required · 6h30m behind"));
         assert!(!screen.contains("open Jira"));
@@ -2126,7 +2117,6 @@ mod tests {
                     "missing {expected:?} at width {width}\n{screen}"
                 );
             }
-            assert!(screen.contains("Close; run drag log"), "{screen}");
             assert!(!screen.contains("Jira"), "{screen}");
         }
     }
