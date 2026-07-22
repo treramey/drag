@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.7.2
+
+### Patch Changes
+
+- Authenticate Git before publishing the generated Homebrew formula.
+
 ## 0.7.1
 
 ### Patch Changes
