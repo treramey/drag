@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Days, NaiveDate};
+use chrono::{DateTime, Datelike, Days, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use drag::field_selection::{project_list_result, ListField, ListFieldMask, ListProjectionPlan};
@@ -96,6 +96,64 @@ impl<T> Drop for AbortOnDropTask<T> {
 pub(crate) struct CachedListReport {
     pub(crate) report: ListReport,
     pub(crate) reusable: bool,
+}
+
+#[derive(Clone)]
+struct MonthSummary {
+    required_duration: String,
+    logged_duration: String,
+    balance_duration: String,
+    required_seconds: i64,
+    logged_seconds: i64,
+    balance_seconds: i64,
+}
+
+impl MonthSummary {
+    fn from_report(report: &ListReport) -> Self {
+        let schedule = report.schedule();
+        Self {
+            required_duration: schedule.month_required_duration.clone(),
+            logged_duration: schedule.month_logged_duration.clone(),
+            balance_duration: schedule.month_current_period_duration.clone(),
+            required_seconds: schedule.seconds.month_required,
+            logged_seconds: schedule.seconds.month_logged,
+            balance_seconds: schedule.seconds.month_balance,
+        }
+    }
+
+    fn apply_to(&self, report: &mut ListReport) {
+        report
+            .details
+            .month_required_duration
+            .clone_from(&self.required_duration);
+        report
+            .details
+            .month_logged_duration
+            .clone_from(&self.logged_duration);
+        report
+            .details
+            .month_current_period_duration
+            .clone_from(&self.balance_duration);
+        report.details.seconds.month_required = self.required_seconds;
+        report.details.seconds.month_logged = self.logged_seconds;
+        report.details.seconds.month_balance = self.balance_seconds;
+    }
+}
+
+fn stabilize_month_summary(
+    summaries: &mut BTreeMap<(i32, u32), MonthSummary>,
+    report: &mut ListReport,
+) {
+    if !report.pagination().totals_complete {
+        return;
+    }
+    let date = report.selected_date();
+    let key = (date.year(), date.month());
+    if let Some(summary) = summaries.get(&key) {
+        summary.apply_to(report);
+    } else {
+        summaries.insert(key, MonthSummary::from_report(report));
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -576,6 +634,7 @@ pub(crate) async fn run_command(
     }
 
     let mut reports: BTreeMap<NaiveDate, CachedListReport> = BTreeMap::new();
+    let mut month_summaries = BTreeMap::new();
     let mut prefetches: BTreeMap<NaiveDate, AbortOnDropTask<Result<ListReport, CliError>>> =
         BTreeMap::new();
     let initial_report = load_api_report(config_path, now, args.clone(), debug).await?;
@@ -584,7 +643,7 @@ pub(crate) async fn run_command(
     let mut initial_report = Some((initial_report, args.continue_from.is_none()));
 
     loop {
-        let (report, reusable) = if let Some(initial_report) = initial_report.take() {
+        let (mut report, reusable) = if let Some(initial_report) = initial_report.take() {
             initial_report
         } else if let Some(report) = take_reusable_report(&mut reports, requested_date) {
             (report, true)
@@ -627,6 +686,7 @@ pub(crate) async fn run_command(
             };
             (report, true)
         };
+        stabilize_month_summary(&mut month_summaries, &mut report);
         let selected_date = report.selected_date();
         displayed_date = selected_date;
 
@@ -1259,6 +1319,28 @@ mod tests {
             next: None,
             complete: true,
             totals_complete: true,
+        }
+    }
+
+    fn schedule_details_for_test(
+        month_logged: &str,
+        day_logged: &str,
+        month_logged_seconds: i64,
+        day_logged_seconds: i64,
+    ) -> ScheduleDetails {
+        ScheduleDetails {
+            month_required_duration: "176h".to_owned(),
+            month_logged_duration: month_logged.to_owned(),
+            month_current_period_duration: "-14h".to_owned(),
+            day_required_duration: "8h".to_owned(),
+            day_logged_duration: day_logged.to_owned(),
+            seconds: drag::schedule::ScheduleSeconds {
+                month_required: 176 * 3_600,
+                month_logged: month_logged_seconds,
+                month_balance: -14 * 3_600,
+                day_required: 8 * 3_600,
+                day_logged: day_logged_seconds,
+            },
         }
     }
 
@@ -2102,6 +2184,35 @@ mod tests {
             .map_err(|_| CliError::Api("test request lock was poisoned".to_owned()))?;
         assert_eq!(requests.issues, ["10", "20"]);
         Ok(())
+    }
+
+    #[test]
+    fn date_reports_in_one_session_share_the_first_complete_month_summary() {
+        let first_date = NaiveDate::from_ymd_opt(2026, 7, 21).unwrap_or(NaiveDate::MIN);
+        let next_date = NaiveDate::from_ymd_opt(2026, 7, 22).unwrap_or(NaiveDate::MIN);
+        let mut summaries = BTreeMap::new();
+        let mut first = ListReport::new(
+            first_date,
+            Vec::new(),
+            schedule_details_for_test("106h", "1h", 106 * 3_600, 3_600),
+            complete_pagination(first_date),
+            false,
+        );
+        let mut next = ListReport::new(
+            next_date,
+            Vec::new(),
+            schedule_details_for_test("107h", "0h", 107 * 3_600, 0),
+            complete_pagination(next_date),
+            false,
+        );
+
+        stabilize_month_summary(&mut summaries, &mut first);
+        stabilize_month_summary(&mut summaries, &mut next);
+
+        assert_eq!(next.schedule().month_logged_duration, "106h");
+        assert_eq!(next.schedule().seconds.month_logged, 106 * 3_600);
+        assert_eq!(next.schedule().day_logged_duration, "0h");
+        assert_eq!(next.schedule().seconds.day_logged, 0);
     }
 
     #[tokio::test]

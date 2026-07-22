@@ -51,7 +51,10 @@ several peer submodules rather than a single implementation file.
   issue labels, and verbose state. Plain text and structured JSON
   are projections of that completed report. The list feature also owns
   interactive date navigation, reusable-report caching, adjacent-date
-  prefetch, debounce, and cancellation of obsolete fetches.
+  prefetch, debounce, and cancellation of obsolete fetches. During one
+  interactive session, the first complete summary shown for a calendar month
+  remains stable across that month's dates while day worklogs and day schedule
+  continue to follow the selected date.
 - `drag_cli::list_tui`: eligibility checks, focused row state, bounded keyboard
   navigation, responsive stderr Ratatui rendering, scrolling, verbose focused
   details, recoverable opening of the focused worklog's resolved Jira URL,
