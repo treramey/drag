@@ -18,6 +18,19 @@ pub struct ScheduleDetails {
     pub month_current_period_duration: String,
     pub day_required_duration: String,
     pub day_logged_duration: String,
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub seconds: ScheduleSeconds,
+}
+
+/// Numeric schedule facts retained for interactive presentation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ScheduleSeconds {
+    pub month_required: i64,
+    pub month_logged: i64,
+    pub month_balance: i64,
+    pub day_required: i64,
+    pub day_logged: i64,
 }
 
 /// Incremental month/day totals for paginated worklog retrieval.
@@ -78,15 +91,20 @@ impl ScheduleAccumulator {
     /// Formats the accumulated totals as a list schedule summary.
     #[must_use]
     pub fn finish(self) -> ScheduleDetails {
+        let month_balance = self.month_logged - self.required_through_today;
         ScheduleDetails {
             month_required_duration: format_duration(self.month_required, false),
             month_logged_duration: format_duration(self.month_logged, false),
-            month_current_period_duration: format_duration(
-                self.month_logged - self.required_through_today,
-                true,
-            ),
+            month_current_period_duration: format_duration(month_balance, true),
             day_required_duration: format_duration(self.day_required, false),
             day_logged_duration: format_duration(self.day_logged, false),
+            seconds: ScheduleSeconds {
+                month_required: self.month_required,
+                month_logged: self.month_logged,
+                month_balance,
+                day_required: self.day_required,
+                day_logged: self.day_logged,
+            },
         }
     }
 }

@@ -2440,6 +2440,7 @@ mod tests {
             month_current_period_duration: "-7h".to_owned(),
             day_required_duration: "8h".to_owned(),
             day_logged_duration: "1h".to_owned(),
+            seconds: drag::schedule::ScheduleSeconds::default(),
         };
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
@@ -2473,6 +2474,7 @@ mod tests {
             month_current_period_duration: "-7h".to_owned(),
             day_required_duration: "8h".to_owned(),
             day_logged_duration: "1h".to_owned(),
+            seconds: drag::schedule::ScheduleSeconds::default(),
         };
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;
@@ -2504,6 +2506,7 @@ mod tests {
             month_current_period_duration: "-7h".to_owned(),
             day_required_duration: "8h".to_owned(),
             day_logged_duration: "1h".to_owned(),
+            seconds: drag::schedule::ScheduleSeconds::default(),
         };
         let date = NaiveDate::from_ymd_opt(2026, 7, 14)
             .ok_or_else(|| CliError::InvalidInput("invalid test date".to_owned()))?;

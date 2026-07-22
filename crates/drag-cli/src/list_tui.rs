@@ -5,6 +5,7 @@ use std::io::{self, IsTerminal};
 
 use chrono::Datelike;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use drag::time::format_duration;
 use futures_util::StreamExt;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
@@ -510,9 +511,8 @@ fn render_stacked(
     );
     render_worklogs(frame, worklogs, model, true);
     render_focused_details(frame, details, model);
-    let schedule = report.schedule();
     frame.render_widget(
-        Paragraph::new(schedule.day_logged_duration.as_str()).block(
+        Paragraph::new(day_summary_text(report)).block(
             Block::bordered()
                 .title(primary("Day summary"))
                 .border_style(Palette::muted()),
@@ -617,7 +617,7 @@ fn render_dashboard_month(
     let schedule = report.schedule();
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(current_period_text(&schedule.month_current_period_duration)),
+            Line::from(schedule_balance_text(report)),
             Line::from(month_totals_text(
                 &schedule.month_logged_duration,
                 &schedule.month_required_duration,
@@ -702,18 +702,44 @@ fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListRe
 }
 
 fn day_summary_text(report: &ListReport) -> String {
-    format!("Day summary: {}", report.schedule().day_logged_duration)
+    let schedule = report.schedule();
+    let logged = schedule.seconds.day_logged;
+    let required = schedule.seconds.day_required;
+    let status = if required == 0 {
+        "No required hours".to_owned()
+    } else {
+        duration_status(logged - required)
+    };
+    format!(
+        "Day: {} / {} required · {status}",
+        schedule.day_logged_duration, schedule.day_required_duration
+    )
 }
 
 fn same_calendar_month(left: chrono::NaiveDate, right: chrono::NaiveDate) -> bool {
     left.year() == right.year() && left.month() == right.month()
 }
 
-fn current_period_text(duration: &str) -> Cow<'_, str> {
-    duration.strip_prefix('-').map_or_else(
-        || Cow::Owned(format!("{duration} current period")),
-        |remaining| Cow::Owned(format!("{remaining} left")),
-    )
+fn schedule_balance_text(report: &ListReport) -> String {
+    let selected = report.selected_date();
+    let today = report.today();
+    if (selected.year(), selected.month()) > (today.year(), today.month()) {
+        return "Schedule has not started".to_owned();
+    }
+    let status = duration_status(report.schedule().seconds.month_balance);
+    if (selected.year(), selected.month()) < (today.year(), today.month()) {
+        format!("Final balance: {status}")
+    } else {
+        format!("{status} through {}", today.format("%Y-%m-%d"))
+    }
+}
+
+fn duration_status(seconds: i64) -> String {
+    match seconds.cmp(&0) {
+        std::cmp::Ordering::Less => format!("{} behind", format_duration(-seconds, false)),
+        std::cmp::Ordering::Equal => "On track".to_owned(),
+        std::cmp::Ordering::Greater => format!("{} ahead", format_duration(seconds, false)),
+    }
 }
 
 fn month_totals_text(logged: &str, required: &str) -> String {
@@ -963,7 +989,7 @@ fn render_month(
                     &schedule.month_logged_duration,
                     &schedule.month_required_duration,
                 ),
-                current_period_text(&schedule.month_current_period_duration)
+                schedule_balance_text(report)
             )
         } else {
             String::new()
@@ -1008,7 +1034,7 @@ fn render_month(
                 &schedule.month_logged_duration,
                 &schedule.month_required_duration,
             ),
-            current_period_text(&schedule.month_current_period_duration)
+            schedule_balance_text(report)
         )),
         summary_area,
     );
@@ -1109,9 +1135,8 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::{
-        current_period_text, date_action_for_key_event, message_for_key, message_for_key_event,
-        month_totals_text, render, render_suspense, should_quit, ListReportAction, ListReportModel,
-        Message,
+        date_action_for_key_event, message_for_key, message_for_key_event, month_totals_text,
+        render, render_suspense, should_quit, ListReportAction, ListReportModel, Message,
     };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
@@ -1168,6 +1193,13 @@ mod tests {
                 month_current_period_duration: "+4h".to_owned(),
                 day_required_duration: "8h".to_owned(),
                 day_logged_duration: "1h 30m".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds {
+                    month_required: 160 * 3_600,
+                    month_logged: 72 * 3_600,
+                    month_balance: 4 * 3_600,
+                    day_required: 8 * 3_600,
+                    day_logged: 90 * 60,
+                },
             },
             ListPagination {
                 selected_date: selected_date.to_string(),
@@ -1332,12 +1364,6 @@ mod tests {
     }
 
     #[test]
-    fn negative_current_period_duration_is_presented_as_time_left() {
-        assert_eq!(current_period_text("-14h45m"), "14h45m left");
-        assert_eq!(current_period_text("+4h"), "+4h current period");
-    }
-
-    #[test]
     fn populated_report_shows_month_day_worklogs_and_quit_controls() {
         let report = report(
             vec![Worklog {
@@ -1360,12 +1386,12 @@ mod tests {
         for expected in [
             "July 2026",
             "72h logged of 160h",
-            "+4h",
+            "4h ahead",
             "Tuesday, 2026-07-14",
             "751393",
             "09:00–10:30",
             "OPS-42",
-            "Day summary: 1h 30m",
+            "Day: 1h 30m / 8h required",
             "h/l date",
             "q quit",
             "Esc close",
@@ -1490,10 +1516,10 @@ mod tests {
         let mut model = ListReportModel::new(&report);
 
         let lines = screen_lines_with_size(&mut model, 100, 40);
-        let day_summary = lines.iter().position(|line| line.contains("Day summary"));
+        let day_summary = lines.iter().position(|line| line.contains("Day:"));
         let current_period = lines
             .iter()
-            .position(|line| line.contains("+4h current period"));
+            .position(|line| line.contains("4h ahead through 2026-07-14"));
         let month_total = lines
             .iter()
             .position(|line| line.contains("72h logged of 160h"));
@@ -1543,7 +1569,7 @@ mod tests {
             "Loading entries…",
             "751393",
             "OPS-42",
-            "Day summary",
+            "Day:",
             "h/l date",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
@@ -1553,7 +1579,7 @@ mod tests {
         let loading_line = lines
             .iter()
             .position(|line| line.contains("Loading entries…"));
-        let day_summary_line = lines.iter().position(|line| line.contains("Day summary"));
+        let day_summary_line = lines.iter().position(|line| line.contains("Day:"));
         assert_eq!(loading_line, day_summary_line, "{screen}");
         assert!(
             lines
@@ -1680,8 +1706,32 @@ mod tests {
         assert!(screen.contains("No worklogs"));
         assert!(!screen.contains("No worklogs for Tuesday"));
         assert!(screen.contains("72h logged of 160h"));
-        assert!(screen.contains("Day summary: 1h 30m"));
-        assert!(!screen.contains("logged / required"));
+        assert!(screen.contains("Day: 1h 30m / 8h required · 6h30m behind"));
+    }
+
+    #[test]
+    fn current_month_balance_names_its_as_of_date_and_direction() {
+        let screen = screen(&report(Vec::new(), true));
+
+        assert!(screen.contains("4h ahead through 2026-07-14"), "{screen}");
+    }
+
+    #[test]
+    fn past_month_balance_is_labeled_as_final() {
+        let selected = NaiveDate::from_ymd_opt(2026, 6, 14).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
+
+        assert!(screen.contains("Final balance: 4h ahead"), "{screen}");
+    }
+
+    #[test]
+    fn future_month_does_not_present_logged_time_as_a_surplus() {
+        let selected = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
+
+        assert!(screen.contains("Schedule has not started"), "{screen}");
     }
 
     #[test]

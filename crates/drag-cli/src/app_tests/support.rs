@@ -102,6 +102,13 @@ fn empty_list_report(verbose: bool) -> ListReport {
             month_current_period_duration: "+4h".to_owned(),
             day_required_duration: "8h".to_owned(),
             day_logged_duration: "0h".to_owned(),
+            seconds: drag::schedule::ScheduleSeconds {
+                month_required: 160 * 3_600,
+                month_logged: 72 * 3_600,
+                month_balance: 4 * 3_600,
+                day_required: 8 * 3_600,
+                day_logged: 0,
+            },
         },
         ListPagination {
             selected_date: "2026-07-14".to_owned(),
