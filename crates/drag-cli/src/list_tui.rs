@@ -700,7 +700,7 @@ fn day_summary_text(report: &ListReport) -> String {
         duration_status(logged - required)
     };
     format!(
-        "Day: {} / {} required · {status}",
+        "{} / {} required · {status}",
         schedule.day_logged_duration, schedule.day_required_duration
     )
 }
@@ -750,7 +750,7 @@ fn month_progress_lines(report: &ListReport, width: u16) -> Vec<Line<'static>> {
     let required = schedule.seconds.month_required;
     if required <= 0 {
         return vec![
-            Line::from("Month: No required hours"),
+            Line::from("No required hours"),
             Line::default(),
             Line::from(schedule_balance_text(report)),
         ];
@@ -769,7 +769,7 @@ fn month_progress_lines(report: &ListReport, width: u16) -> Vec<Line<'static>> {
     let width = usize::from(width);
     vec![
         Line::from(format!(
-            "Month: {} / {} · {percent}%",
+            "{} / {} · {percent}%",
             schedule.month_logged_duration, schedule.month_required_duration
         )),
         Line::from(vec![
@@ -1065,10 +1065,10 @@ fn compact_month_summary(report: &ListReport) -> String {
         return format!("Segment: {} logged", schedule.month_logged_duration);
     }
     if schedule.seconds.month_required <= 0 {
-        return "Month: No required hours".to_owned();
+        return "No required hours".to_owned();
     }
     format!(
-        "Month: {} / {} · {}",
+        "{} / {} · {}",
         schedule.month_logged_duration,
         schedule.month_required_duration,
         schedule_balance_text(report)
@@ -1087,12 +1087,11 @@ fn render_worklogs(
 ) {
     let report = model.report;
     if report.worklogs().is_empty() {
-        let date = report.selected_date().format("%A, %Y-%m-%d");
         let empty = Paragraph::new(if report.pagination().totals_complete {
-            Text::from(Line::from(format!("No worklogs for {date}")))
+            Text::from(Line::from("No worklogs"))
         } else {
             Text::from(vec![
-                Line::from(format!("No worklogs for {date}")),
+                Line::from("No worklogs"),
                 Line::from("in this retrieved segment"),
             ])
         })
@@ -1455,13 +1454,13 @@ mod tests {
 
         for expected in [
             "July 2026",
-            "Month: 72h / 160h · 45%",
+            "72h / 160h · 45%",
             "4h ahead",
             "Tuesday, 2026-07-14",
             "751393",
             "09:00–10:30",
             "OPS-42",
-            "Day: 1h 30m / 8h required",
+            "1h 30m / 8h required",
             "←/h previous day",
             "o open Jira",
             "q quit",
@@ -1474,8 +1473,14 @@ mod tests {
     fn informational_text_uses_terminal_foreground_while_selection_uses_accent() {
         let report = report(Vec::new(), true);
 
-        assert_eq!(screen_text_color(&report, "Month:"), Some(Color::Reset));
-        assert_eq!(screen_text_color(&report, "Day:"), Some(Color::Reset));
+        assert_eq!(
+            screen_text_color(&report, "72h / 160h · 45%"),
+            Some(Color::Reset)
+        );
+        assert_eq!(
+            screen_text_color(&report, "1h 30m / 8h required"),
+            Some(Color::Reset)
+        );
         assert_eq!(
             screen_text_color(&report, "Tuesday, 2026-07-14"),
             Some(Color::Magenta)
@@ -1596,13 +1601,15 @@ mod tests {
         let mut model = ListReportModel::new(&report);
 
         let lines = screen_lines_with_size(&mut model, 100, 40);
-        let day_summary = lines.iter().position(|line| line.contains("Day:"));
+        let day_summary = lines
+            .iter()
+            .position(|line| line.contains("1h 30m / 8h required"));
         let current_period = lines
             .iter()
             .position(|line| line.contains("4h ahead through 2026-07-14"));
         let month_total = lines
             .iter()
-            .position(|line| line.contains("Month: 72h / 160h · 45%"));
+            .position(|line| line.contains("72h / 160h · 45%"));
 
         for (label, position) in [
             ("day summary", day_summary),
@@ -1645,11 +1652,11 @@ mod tests {
 
         for expected in [
             "July 2026",
-            "Month: 72h / 160h · 45%",
+            "72h / 160h · 45%",
             "Loading entries…",
             "751393",
             "OPS-42",
-            "Day:",
+            "1h 30m / 8h required",
             "←/h previous day",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
@@ -1659,7 +1666,9 @@ mod tests {
         let loading_line = lines
             .iter()
             .position(|line| line.contains("Loading entries…"));
-        let day_summary_line = lines.iter().position(|line| line.contains("Day:"));
+        let day_summary_line = lines
+            .iter()
+            .position(|line| line.contains("1h 30m / 8h required"));
         assert_eq!(loading_line, day_summary_line, "{screen}");
         assert!(
             lines
@@ -1708,10 +1717,7 @@ mod tests {
         assert!(screen.contains("Loading entries…"), "{screen}");
         assert!(!screen.contains("72h logged of 160h"), "{screen}");
         assert!(!screen.contains("+4h current period"), "{screen}");
-        assert!(
-            screen.contains("No worklogs for Tuesday, 2026-07-14"),
-            "{screen}"
-        );
+        assert!(screen.contains("No worklogs"), "{screen}");
     }
 
     #[test]
@@ -1786,9 +1792,9 @@ mod tests {
     fn empty_report_shows_empty_state_and_schedule_summaries() {
         let screen = screen(&report(Vec::new(), true));
 
-        assert!(screen.contains("No worklogs for Tuesday, 2026-07-14"));
-        assert!(screen.contains("Month: 72h / 160h · 45%"));
-        assert!(screen.contains("Day: 1h 30m / 8h required · 6h30m behind"));
+        assert!(screen.contains("No worklogs"));
+        assert!(screen.contains("72h / 160h · 45%"));
+        assert!(screen.contains("1h 30m / 8h required · 6h30m behind"));
         assert!(!screen.contains("open Jira"));
     }
 
@@ -1803,7 +1809,7 @@ mod tests {
     fn complete_month_shows_exact_totals_and_visual_progress() {
         let screen = screen(&report(Vec::new(), true));
 
-        assert!(screen.contains("Month: 72h / 160h · 45%"), "{screen}");
+        assert!(screen.contains("72h / 160h · 45%"), "{screen}");
         assert!(screen.contains('█'), "{screen}");
         assert!(screen.contains('░'), "{screen}");
     }
@@ -1837,7 +1843,7 @@ mod tests {
         );
         let screen = screen(&report);
 
-        assert!(screen.contains("Month: No required hours"), "{screen}");
+        assert!(screen.contains("No required hours"), "{screen}");
         assert!(!screen.contains('%'), "{screen}");
     }
 
@@ -1867,7 +1873,7 @@ mod tests {
         );
         let screen = screen(&report);
 
-        assert!(screen.contains("Month: 180h / 160h · 112%"), "{screen}");
+        assert!(screen.contains("180h / 160h · 112%"), "{screen}");
         assert!(!screen.contains('░'), "{screen}");
     }
 
@@ -1893,7 +1899,7 @@ mod tests {
     fn incomplete_empty_report_qualifies_segment_and_totals() {
         let screen = screen(&report(Vec::new(), false));
 
-        assert!(screen.contains("No worklogs for Tuesday, 2026-07-14"));
+        assert!(screen.contains("No worklogs"));
         assert!(screen.contains("in this retrieved segment"));
         assert!(screen.contains("More worklogs are available"));
         assert!(screen.contains("Totals reflect this bounded segment"));
