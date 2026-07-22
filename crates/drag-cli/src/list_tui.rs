@@ -475,7 +475,8 @@ fn dashboard_month_width(
         .saturating_add(MIN_REPORT_WIDTH)
         .saturating_add(2);
     let minimum_height = DASHBOARD_CALENDAR_HEIGHT
-        .saturating_add(5)
+        .saturating_add(DASHBOARD_MONTH_SUMMARY_HEIGHT)
+        .saturating_add(2)
         .saturating_add(footer_height(terminal_area.height))
         .saturating_add(pagination_height);
     (terminal_area.width >= minimum_width && terminal_area.height >= minimum_height)
@@ -1598,6 +1599,28 @@ mod tests {
             lines
                 .get(22)
                 .is_some_and(|line| line.chars().all(|character| character == '─')),
+            "{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn wide_report_falls_back_before_the_calendar_would_clip() {
+        let selected = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_dates(Vec::new(), true, false, selected, selected);
+        let mut model = ListReportModel::new(&report);
+
+        let lines = screen_lines_with_size(&mut model, 100, 23);
+
+        assert!(
+            !lines.iter().any(|line| {
+                line.contains("August 2026") && line.contains("Friday, 2026-08-14")
+            }),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Friday, 2026-08-14")),
             "{}",
             lines.join("\n")
         );
