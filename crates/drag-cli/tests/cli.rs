@@ -766,7 +766,14 @@ fn malformed_log_attribute_flags_are_structured_usage_errors(
     let directory = TempDir::new()?;
     let missing_config = directory.path().join("missing.json");
 
-    for attribute in ["_Test_", "=RD", "   =RD"] {
+    for attribute in [
+        "_Test_",
+        "=RD",
+        "   =RD",
+        " _Test_=RD",
+        "_Test_ =RD",
+        "_Te\nst_=RD",
+    ] {
         let output = command(&missing_config)?
             .args(["log", "ABC-1", "30m", "--attr", attribute, "--dry-run"])
             .output()?;
@@ -775,6 +782,31 @@ fn malformed_log_attribute_flags_are_structured_usage_errors(
         assert!(output.stdout.is_empty());
         let body: Value = serde_json::from_slice(&output.stderr)?;
         assert_eq!(body["error"]["code"], "usage");
+    }
+    assert!(!missing_config.exists());
+    Ok(())
+}
+
+#[test]
+fn log_json_rejects_invalid_attribute_keys_before_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let missing_config = directory.path().join("missing.json");
+
+    for key in ["", "   ", " _Test_", "_Test_ ", "_Te\nst_"] {
+        let raw = serde_json::json!({
+            "issueKey": "ABC-1",
+            "durationOrInterval": "30m",
+            "attributes": {key: "RD"}
+        })
+        .to_string();
+        let output = command(&missing_config)?
+            .args(["log", "--json", &raw, "--dry-run"])
+            .output()?;
+
+        assert_eq!(output.status.code(), Some(2));
+        let body: Value = serde_json::from_slice(&output.stderr)?;
+        assert_eq!(body["error"]["code"], "invalid_input");
     }
     assert!(!missing_config.exists());
     Ok(())
@@ -999,7 +1031,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 7);
+    assert_eq!(contract["schemaVersion"], 8);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");

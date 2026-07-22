@@ -12,7 +12,7 @@ use serde_json::json;
 use url::Url;
 
 use crate::api::ApiClient;
-use crate::cli::{LogArgs, LogInput};
+use crate::cli::{validate_work_attribute_key, LogArgs, LogInput};
 use crate::config::{Config, Credentials};
 use crate::output::escape_terminal_data;
 use crate::{CliError, Rendered};
@@ -80,6 +80,7 @@ where
         .as_deref()
         .unwrap_or_default()
         .iter()
+        .filter(|attribute| !attribute.value.is_empty())
         .map(|attribute| attribute.key.clone())
         .collect::<std::collections::BTreeSet<_>>();
     let entity = match gateway.create_worklog(request).await {
@@ -243,6 +244,13 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
             }),
         }
     };
+    if let Some(attributes) = &value.attributes {
+        for key in attributes.keys() {
+            validate_work_attribute_key(key).map_err(|message| {
+                CliError::InvalidInput(format!("invalid work attribute key: {message}"))
+            })?;
+        }
+    }
     Ok(ResolvedLogInput {
         value,
         dry_run: args.dry_run,
@@ -712,8 +720,13 @@ mod tests {
             discovery_fails: false,
         };
 
+        let mut args = log_args("30m");
+        args.attributes.push(crate::cli::LogAttribute {
+            key: "_Test_".to_owned(),
+            value: String::new(),
+        });
         let error = require_error(
-            run(&path, fixed_now()?, log_args("30m"), |_| Ok(gateway)).await,
+            run(&path, fixed_now()?, args, |_| Ok(gateway)).await,
             "required attribute rejection",
         )?;
 

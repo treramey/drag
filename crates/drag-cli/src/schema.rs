@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 7;
+const SCHEMA_VERSION: u64 = 8;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -262,6 +262,7 @@ fn argument_contract(command: &Command, argument: &Arg, path: &str) -> Value {
         "type": argument_type(path, argument, &possible_values),
         "required": argument.is_required_set(),
         "global": is_global,
+        "repeatable": matches!(argument.get_action(), ArgAction::Append | ArgAction::Count),
         "valueCount": value_count,
         "conflictsWith": conflicts
     });
@@ -1418,6 +1419,11 @@ mod tests {
                 serde_json::json!(["json"])
             );
         }
+        let attributes = arguments
+            .iter()
+            .find(|argument| argument["id"] == "attributes")
+            .ok_or_else(|| "missing attributes".to_owned())?;
+        assert_eq!(attributes["repeatable"], true);
         Cli::try_parse_from(["drag", "log", "ABC-1", "30m"]).map_err(|error| error.to_string())?;
         Cli::try_parse_from([
             "drag",

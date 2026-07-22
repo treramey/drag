@@ -197,13 +197,21 @@ fn parse_log_attribute(raw: &str) -> Result<LogAttribute, String> {
     let (key, value) = raw
         .split_once('=')
         .ok_or_else(|| "work attribute must use KEY=VALUE".to_owned())?;
-    if key.trim().is_empty() {
-        return Err("work attribute key cannot be empty".to_owned());
-    }
+    validate_work_attribute_key(key).map_err(str::to_owned)?;
     Ok(LogAttribute {
         key: key.to_owned(),
         value: value.to_owned(),
     })
+}
+
+pub(crate) fn validate_work_attribute_key(key: &str) -> Result<(), &'static str> {
+    if key.is_empty() || key.trim() != key {
+        return Err("work attribute key must be non-empty and have no surrounding whitespace");
+    }
+    if key.chars().any(char::is_control) {
+        return Err("work attribute key cannot contain control characters");
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

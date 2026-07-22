@@ -353,7 +353,7 @@ Successful JSON uses `{"ok":true,"data":...}`. Errors go to stderr as
 `--debug` writes redacted request diagnostics only in human output mode; JSON
 and NDJSON output stay machine-readable.
 
-`drag --output json schema` emits the versioned CLI contract. Schema version 7
+`drag --output json schema` emits the versioned CLI contract. Schema version 8
 includes the installed CLI version and every command, nested subcommand,
 shortcut, and hidden compatibility form. Arguments report their types,
 cardinality, defaults, enums, conditional requirements, and conflicts. Each
