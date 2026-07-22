@@ -21,7 +21,7 @@ const LOCAL_SKILLS: [(&str, &str); 4] = [
     ),
     (
         "drag-log",
-        "Log time to Tempo Cloud with Drag. Use when the user asks to add or preview a worklog using a duration, clock interval, date, description, or remaining estimate.",
+        "Log time to Tempo Cloud with Drag. Use when the user asks to add or preview a worklog using a duration, clock interval, date, description, remaining estimate, or Tempo work attributes.",
     ),
     (
         "drag-list",
@@ -891,7 +891,10 @@ mod tests {
         };
 
         assert!(content("drag-log").is_some_and(|skill| {
-            skill.contains("## Mutation policy") && skill.contains("`log` creates a Tempo worklog")
+            skill.contains("## Mutation policy")
+                && skill.contains("`log` creates a Tempo worklog")
+                && skill.contains("--attr")
+                && skill.contains("work attributes")
         }));
         assert!(content("drag-list").is_some_and(|skill| {
             skill.contains("## Automation policy") && skill.contains("`list` is read-only")

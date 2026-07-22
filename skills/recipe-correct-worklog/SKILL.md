@@ -18,12 +18,12 @@ This is a portable, host-neutral recipe. Use coding-agent context only as eviden
 
 - Require the original worklog's exact numeric ID. Never select by row position, inferred ordering, a guessed ID, or stale display text.
 - Retrieve the current original entry and derive a complete replacement payload from explicit correction instructions and verified current values.
-- Confirm that the original has no work attributes, billable seconds, or other accounting fields that `drag log` cannot represent. If any are present, stop rather than silently discard them and use a separately reviewed generic Tempo create workflow capable of preserving the complete payload.
+- Preserve every original work attribute in the replacement `attributes` object. Confirm that the original has no billable seconds or other accounting fields that `drag log` cannot represent; if it does, stop rather than silently discarding them and use a separately reviewed generic Tempo create workflow capable of preserving the complete payload.
 - Retain the exact original ID, reviewed replacement payload, and new replacement ID throughout execution and recovery reporting.
 
 ## Workflow
 
-1. **Retrieve the exact original** Run `drag --output json schema tempo.worklogs.get-worklog-by-id --resolve-refs`, construct the declared path parameters for the exact numeric ID, then run `drag --output json tempo worklogs get-worklog-by-id --params "$PARAMS_JSON"`. Display and retain the complete current original as the reviewed snapshot. Stop if its returned ID does not match or if it contains work attributes, billable seconds, or another field that `drag log` cannot preserve.
+1. **Retrieve the exact original** Run `drag --output json schema tempo.worklogs.get-worklog-by-id --resolve-refs`, construct the declared path parameters for the exact numeric ID, then run `drag --output json tempo worklogs get-worklog-by-id --params "$PARAMS_JSON"`. Display and retain the complete current original as the reviewed snapshot. Preserve all work attributes in the replacement and stop if its returned ID does not match or if it contains billable seconds or another field that `drag log` cannot preserve.
 2. **Build and preview the replacement** Build the complete structured replacement as `WORKLOG_JSON`, then run `printf '%s\n' "$WORKLOG_JSON" | drag --output json log --json - --dry-run`. Verify every normalized material field against the intended correction.
 3. **Preview deletion of the original** Build `DELETE_JSON` with only the exact original ID and run `printf '%s\n' "$DELETE_JSON" | drag --output json delete --json - --dry-run`. Display the replacement preview and deletion preview together before requesting authorization.
 4. **Explain risk and obtain exact authorization** Explain that replacement is non-atomic. Authorization must identify the exact original ID and the complete replacement payload shown in both previews. A general audit, correction suggestion, or approval of different values does not authorize execution.
@@ -34,7 +34,7 @@ This is a portable, host-neutral recipe. Use coding-agent context only as eviden
 ## Stop conditions
 
 - The exact numeric original ID is absent, inferred, stale, or does not match the retrieved entry.
-- The original contains work attributes, billable seconds, or another field that `drag log` cannot preserve.
+- The original contains billable seconds or another field that `drag log` cannot preserve, or its work attributes cannot be represented completely in the replacement.
 - The replacement payload is incomplete, ambiguous, or differs from its dry run.
 - Either dry run fails or exact authorization for the displayed ID and payload is absent.
 - The original changes after review, or replacement creation cannot be reconciled and verified; never delete the original in either case.

@@ -3,15 +3,16 @@ use std::path::Path;
 
 use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
-use drag::models::{AddWorklogRequest, Worklog, WorklogEntity};
+use drag::models::{AddWorklogRequest, WorkAttribute, WorkAttributeValue, Worklog, WorklogEntity};
 use drag::time::{
     clock_interval, format_duration, parse_clock, parse_duration_or_interval, select_date,
 };
+use reqwest::StatusCode;
 use serde_json::json;
 use url::Url;
 
 use crate::api::ApiClient;
-use crate::cli::{LogArgs, LogInput};
+use crate::cli::{validate_work_attribute_key, LogArgs, LogInput};
 use crate::config::{Config, Credentials};
 use crate::output::escape_terminal_data;
 use crate::{CliError, Rendered};
@@ -19,6 +20,7 @@ use crate::{CliError, Rendered};
 pub(crate) trait LogGateway: Send + Sync {
     async fn resolve_issue_id(&self, issue_key: &str) -> Result<String, CliError>;
     async fn create_worklog(&self, request: AddWorklogRequest) -> Result<WorklogEntity, CliError>;
+    async fn required_work_attributes(&self) -> Result<Vec<WorkAttribute>, CliError>;
 }
 
 pub(crate) struct ApiLogGateway {
@@ -40,6 +42,10 @@ impl LogGateway for ApiLogGateway {
 
     async fn create_worklog(&self, request: AddWorklogRequest) -> Result<WorklogEntity, CliError> {
         self.api.add_worklog(request).await
+    }
+
+    async fn required_work_attributes(&self) -> Result<Vec<WorkAttribute>, CliError> {
+        self.api.get_required_work_attributes().await
     }
 }
 
@@ -69,7 +75,25 @@ where
     }
     let gateway = make_gateway(credentials)?;
     request.issue_id = gateway.resolve_issue_id(&issue_key).await?;
-    let entity = gateway.create_worklog(request).await?;
+    let supplied_attribute_keys = request
+        .attributes
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|attribute| !attribute.value.is_empty())
+        .map(|attribute| attribute.key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let entity = match gateway.create_worklog(request).await {
+        Ok(entity) => entity,
+        Err(mut error) => {
+            if is_missing_required_attribute_rejection(&error) {
+                if let Ok(attributes) = gateway.required_work_attributes().await {
+                    add_required_attribute_hint(&mut error, &attributes, &supplied_attribute_keys);
+                }
+            }
+            return Err(error);
+        }
+    };
     let worklog = to_worklog(entity, issue_key, now.timezone())?;
     Ok(Rendered::new(
         serde_json::to_value(&worklog)?,
@@ -80,6 +104,58 @@ where
             escape_terminal_data(&worklog.id)
         ),
     ))
+}
+
+fn is_missing_required_attribute_rejection(error: &CliError) -> bool {
+    let CliError::Remote(remote) = error else {
+        return false;
+    };
+    let message = remote.message.to_ascii_lowercase();
+    remote.service == crate::RemoteService::Tempo
+        && remote.status == Some(StatusCode::BAD_REQUEST)
+        && remote.kind == crate::RemoteErrorKind::Rejected
+        && message.contains("work attribute")
+        && message.contains("required")
+}
+
+fn add_required_attribute_hint(
+    error: &mut CliError,
+    attributes: &[WorkAttribute],
+    supplied_keys: &std::collections::BTreeSet<String>,
+) {
+    let missing = attributes
+        .iter()
+        .filter(|attribute| attribute.required && !supplied_keys.contains(attribute.key.as_str()))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return;
+    }
+    let labels = missing
+        .iter()
+        .map(|attribute| {
+            if attribute.name.is_empty() {
+                attribute.key.clone()
+            } else {
+                format!("{} ({})", attribute.name, attribute.key)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let flags = missing
+        .iter()
+        .map(|attribute| format!("--attr {}=VALUE", attribute.key))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let json_attributes = missing
+        .iter()
+        .map(|attribute| (attribute.key.clone(), json!("VALUE")))
+        .collect::<serde_json::Map<_, _>>();
+    if let CliError::Remote(remote) = error {
+        remote.message.push_str(&format!(
+            ". Required Tempo work attributes: {labels}. Pass {flags}, or include \"attributes\":{} in --json input",
+            serde_json::Value::Object(json_attributes)
+        ));
+    }
 }
 
 fn build_log_request(
@@ -121,6 +197,15 @@ fn build_log_request(
         description: input.description.clone(),
         remaining_estimate_seconds,
         author_account_id: Some(credentials.account_id.clone()),
+        attributes: input.attributes.as_ref().map(|attributes| {
+            attributes
+                .iter()
+                .map(|(key, value)| WorkAttributeValue {
+                    key: key.clone(),
+                    value: value.clone(),
+                })
+                .collect()
+        }),
     })
 }
 
@@ -151,8 +236,21 @@ fn log_input(args: LogArgs) -> Result<ResolvedLogInput, CliError> {
             description: args.description,
             start: args.start,
             remaining_estimate: args.remaining_estimate,
+            attributes: (!args.attributes.is_empty()).then(|| {
+                args.attributes
+                    .into_iter()
+                    .map(|attribute| (attribute.key, attribute.value))
+                    .collect()
+            }),
         }
     };
+    if let Some(attributes) = &value.attributes {
+        for key in attributes.keys() {
+            validate_work_attribute_key(key).map_err(|message| {
+                CliError::InvalidInput(format!("invalid work attribute key: {message}"))
+            })?;
+        }
+    }
     Ok(ResolvedLogInput {
         value,
         dry_run: args.dry_run,
@@ -189,16 +287,19 @@ pub(crate) fn to_worklog(
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use chrono::TimeZone;
-    use drag::models::{Author, Issue};
+    use drag::models::{Author, Issue, WorkAttribute};
+    use reqwest::StatusCode;
     use tempfile::TempDir;
     use url::Url;
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::{RemoteError, RemoteErrorKind, RemoteService};
 
     #[derive(Debug, PartialEq, Eq)]
     enum Operation {
@@ -218,6 +319,13 @@ mod tests {
     }
 
     struct UnusedLogGateway;
+
+    struct AttributeHintGateway {
+        attribute_lookups: Arc<AtomicUsize>,
+        required_attributes: Vec<WorkAttribute>,
+        rejection_message: String,
+        discovery_fails: bool,
+    }
 
     impl LogGateway for FakeLogGateway {
         async fn resolve_issue_id(&self, issue_key: &str) -> Result<String, CliError> {
@@ -257,6 +365,12 @@ mod tests {
                 time_spent_seconds: request.time_spent_seconds,
             })
         }
+
+        async fn required_work_attributes(&self) -> Result<Vec<WorkAttribute>, CliError> {
+            Err(CliError::Api(
+                "fake gateway unexpectedly fetched work attributes".to_owned(),
+            ))
+        }
     }
 
     impl LogGateway for UnusedLogGateway {
@@ -273,6 +387,39 @@ mod tests {
             Err(CliError::Api(
                 "unused test gateway created a worklog".to_owned(),
             ))
+        }
+
+        async fn required_work_attributes(&self) -> Result<Vec<WorkAttribute>, CliError> {
+            Err(CliError::Api(
+                "unused test gateway fetched work attributes".to_owned(),
+            ))
+        }
+    }
+
+    impl LogGateway for AttributeHintGateway {
+        async fn resolve_issue_id(&self, _issue_key: &str) -> Result<String, CliError> {
+            Ok("10001".to_owned())
+        }
+
+        async fn create_worklog(
+            &self,
+            _request: AddWorklogRequest,
+        ) -> Result<WorklogEntity, CliError> {
+            Err(CliError::Remote(RemoteError {
+                service: RemoteService::Tempo,
+                status: Some(StatusCode::BAD_REQUEST),
+                kind: RemoteErrorKind::Rejected,
+                message: self.rejection_message.clone(),
+            }))
+        }
+
+        async fn required_work_attributes(&self) -> Result<Vec<WorkAttribute>, CliError> {
+            self.attribute_lookups.fetch_add(1, Ordering::SeqCst);
+            if self.discovery_fails {
+                Err(CliError::Api("work attribute discovery failed".to_owned()))
+            } else {
+                Ok(self.required_attributes.clone())
+            }
         }
     }
 
@@ -304,6 +451,7 @@ mod tests {
             description: None,
             start: None,
             remaining_estimate: None,
+            attributes: Vec::new(),
             json: None,
             dry_run: false,
         }
@@ -362,6 +510,7 @@ mod tests {
                 description: Some("review".to_owned()),
                 start: None,
                 remaining_estimate: Some("2h".to_owned()),
+                attributes: Vec::new(),
                 json: None,
                 dry_run: false,
             },
@@ -384,6 +533,7 @@ mod tests {
                     description: Some("review".to_owned()),
                     remaining_estimate_seconds: Some(7_200),
                     author_account_id: Some("account-1".to_owned()),
+                    attributes: None,
                 }),
             ]
         );
@@ -420,6 +570,10 @@ mod tests {
             description: Some("review".to_owned()),
             remaining_estimate_seconds: Some(7_200),
             author_account_id: Some("account-1".to_owned()),
+            attributes: Some(vec![WorkAttributeValue {
+                key: "_Test_".to_owned(),
+                value: "RD".to_owned(),
+            }]),
         };
 
         Mock::given(method("GET"))
@@ -464,6 +618,10 @@ mod tests {
                 description: Some("review".to_owned()),
                 start: Some("9:15".to_owned()),
                 remaining_estimate: Some("2h".to_owned()),
+                attributes: vec![crate::cli::LogAttribute {
+                    key: "_Test_".to_owned(),
+                    value: "RD".to_owned(),
+                }],
                 json: None,
                 dry_run: false,
             },
@@ -541,6 +699,92 @@ mod tests {
             [Operation::ResolveIssue(issue_key), Operation::CreateWorklog(_)]
                 if issue_key == "ABC-1"
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_required_attribute_rejection_adds_an_actionable_hint() -> Result<(), CliError>
+    {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let attribute_lookups = Arc::new(AtomicUsize::new(0));
+        let gateway = AttributeHintGateway {
+            attribute_lookups: Arc::clone(&attribute_lookups),
+            required_attributes: vec![WorkAttribute {
+                key: "_Test_".to_owned(),
+                name: "Account".to_owned(),
+                required: true,
+            }],
+            rejection_message:
+                "returned 400 Bad Request: Work attribute Account (_Test_) is required".to_owned(),
+            discovery_fails: false,
+        };
+
+        let mut args = log_args("30m");
+        args.attributes.push(crate::cli::LogAttribute {
+            key: "_Test_".to_owned(),
+            value: String::new(),
+        });
+        let error = require_error(
+            run(&path, fixed_now()?, args, |_| Ok(gateway)).await,
+            "required attribute rejection",
+        )?;
+
+        assert_eq!(attribute_lookups.load(Ordering::SeqCst), 1);
+        assert!(error.to_string().contains("Account (_Test_)"));
+        assert!(error.to_string().contains("--attr _Test_=VALUE"));
+        assert!(error
+            .to_string()
+            .contains(r#""attributes":{"_Test_":"VALUE"}"#));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn required_attribute_discovery_failure_preserves_the_original_rejection(
+    ) -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let attribute_lookups = Arc::new(AtomicUsize::new(0));
+        let original = "returned 400 Bad Request: Work attribute Account (_Test_) is required";
+        let gateway = AttributeHintGateway {
+            attribute_lookups: Arc::clone(&attribute_lookups),
+            required_attributes: Vec::new(),
+            rejection_message: original.to_owned(),
+            discovery_fails: true,
+        };
+
+        let error = require_error(
+            run(&path, fixed_now()?, log_args("30m"), |_| Ok(gateway)).await,
+            "required attribute rejection",
+        )?;
+
+        assert_eq!(attribute_lookups.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            error.to_string(),
+            format!("API request failed: Tempo {original}")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unrelated_tempo_rejection_does_not_fetch_work_attributes() -> Result<(), CliError> {
+        let directory = TempDir::new()?;
+        let path = configured_file(&directory)?;
+        let attribute_lookups = Arc::new(AtomicUsize::new(0));
+        let gateway = AttributeHintGateway {
+            attribute_lookups: Arc::clone(&attribute_lookups),
+            required_attributes: Vec::new(),
+            rejection_message: "returned 400 Bad Request: invalid start time".to_owned(),
+            discovery_fails: false,
+        };
+
+        let error = require_error(
+            run(&path, fixed_now()?, log_args("30m"), |_| Ok(gateway)).await,
+            "unrelated Tempo rejection",
+        )?;
+
+        assert_eq!(attribute_lookups.load(Ordering::SeqCst), 0);
+        assert!(!error.to_string().contains("--attr"));
         Ok(())
     }
 
