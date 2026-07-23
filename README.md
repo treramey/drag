@@ -74,6 +74,11 @@ drag delete 123456 --dry-run
 
 Run `drag <command> --help` for every option.
 
+When `drag list` opens an interactive terminal report, use Left/Right Arrow or
+`h`/`l` to change days, Up/Down Arrow or `k`/`j` to move between worklogs, and
+`o` to open the focused worklog's Jira issue. Press `q`, Escape, or Ctrl-C to
+close the report. Adding time remains a separate `drag log` workflow.
+
 ### Dates and durations
 
 Durations use forms such as `15m`, `1h`, and `1h15m`. Clock intervals can use

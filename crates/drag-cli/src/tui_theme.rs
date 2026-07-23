@@ -16,6 +16,10 @@ pub(crate) const DRAG_ART: [&str; 2] = ["█▀▄  █▀█  ▄▀█  █▀
 pub(crate) struct Palette;
 
 impl Palette {
+    pub(crate) const fn text() -> Style {
+        Style::new()
+    }
+
     pub(crate) const fn primary() -> Style {
         Style::new().fg(PRIMARY_COLOR)
     }

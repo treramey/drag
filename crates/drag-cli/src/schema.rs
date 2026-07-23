@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 8;
+const SCHEMA_VERSION: u64 = 9;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -699,8 +699,8 @@ fn command_behavior_contract(identity: CommandIdentity) -> Value {
                 "renderStream": "stderr",
                 "fallback": "completedPlainTextReport",
                 "controls": {
-                    "previousDate": PREVIOUS_DATE_KEY,
-                    "nextDate": NEXT_DATE_KEY,
+                    "previousDate": ["left", PREVIOUS_DATE_KEY.to_string()],
+                    "nextDate": ["right", NEXT_DATE_KEY.to_string()],
                     "moveUp": ["up", MOVE_UP_KEY],
                     "moveDown": ["down", MOVE_DOWN_KEY],
                     "openFocusedJiraIssue": OPEN_ISSUE_KEY,
@@ -1302,8 +1302,8 @@ mod tests {
         assert_eq!(
             behavior["interactive"]["controls"],
             serde_json::json!({
-                "previousDate": PREVIOUS_DATE_KEY,
-                "nextDate": NEXT_DATE_KEY,
+                "previousDate": ["left", PREVIOUS_DATE_KEY.to_string()],
+                "nextDate": ["right", NEXT_DATE_KEY.to_string()],
                 "moveUp": ["up", MOVE_UP_KEY],
                 "moveDown": ["down", MOVE_DOWN_KEY],
                 "openFocusedJiraIssue": OPEN_ISSUE_KEY,

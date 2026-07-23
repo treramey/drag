@@ -5,6 +5,7 @@ use std::io::{self, IsTerminal};
 
 use chrono::Datelike;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use drag::time::format_duration;
 use futures_util::StreamExt;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span, Text};
@@ -27,7 +28,7 @@ use crate::CliError;
 
 const DASHBOARD_CALENDAR_WIDTH: u16 = 30;
 const DASHBOARD_CALENDAR_HEIGHT: u16 = 13;
-const DASHBOARD_MONTH_SUMMARY_HEIGHT: u16 = 3;
+const DASHBOARD_MONTH_SUMMARY_HEIGHT: u16 = 4;
 const DASHBOARD_DATE_HEIGHT: u16 = 2;
 pub(crate) const PREVIOUS_DATE_KEY: char = 'h';
 pub(crate) const NEXT_DATE_KEY: char = 'l';
@@ -38,8 +39,8 @@ pub(crate) const QUIT_KEY: char = 'q';
 pub(crate) const INTERRUPT_KEY: char = 'c';
 const DASHBOARD_DAY_SUMMARY_HEIGHT: u16 = 3;
 const DASHBOARD_DETAILS_HEIGHT: u16 = 5;
-const SPACIOUS_HEADER_TOP_PADDING: u16 = 2;
-const SPACIOUS_HEADER_HEIGHT: u16 = 5;
+const SPACIOUS_HEADER_TOP_PADDING: u16 = 1;
+const SPACIOUS_HEADER_HEIGHT: u16 = 3;
 const COMPACT_HEADER_TOP_PADDING: u16 = 1;
 const COMPACT_HEADER_HEIGHT: u16 = 2;
 const MIN_COMPACT_HEADER_HEIGHT: u16 = 20;
@@ -398,8 +399,8 @@ fn date_action_for_key_event(code: KeyCode, kind: KeyEventKind) -> Option<ListRe
         return None;
     }
     match code {
-        KeyCode::Char(PREVIOUS_DATE_KEY) => Some(ListReportAction::PreviousDate),
-        KeyCode::Char(NEXT_DATE_KEY) => Some(ListReportAction::NextDate),
+        KeyCode::Left | KeyCode::Char(PREVIOUS_DATE_KEY) => Some(ListReportAction::PreviousDate),
+        KeyCode::Right | KeyCode::Char(NEXT_DATE_KEY) => Some(ListReportAction::NextDate),
         _ => None,
     }
 }
@@ -474,7 +475,8 @@ fn dashboard_month_width(
         .saturating_add(MIN_REPORT_WIDTH)
         .saturating_add(2);
     let minimum_height = DASHBOARD_CALENDAR_HEIGHT
-        .saturating_add(5)
+        .saturating_add(DASHBOARD_MONTH_SUMMARY_HEIGHT)
+        .saturating_add(2)
         .saturating_add(footer_height(terminal_area.height))
         .saturating_add(pagination_height);
     (terminal_area.width >= minimum_width && terminal_area.height >= minimum_height)
@@ -510,11 +512,10 @@ fn render_stacked(
     );
     render_worklogs(frame, worklogs, model, true);
     render_focused_details(frame, details, model);
-    let schedule = report.schedule();
     frame.render_widget(
-        Paragraph::new(schedule.day_logged_duration.as_str()).block(
+        Paragraph::new(day_summary_text(report)).block(
             Block::bordered()
-                .title(primary("Day summary"))
+                .title(heading("Day summary"))
                 .border_style(Palette::muted()),
         ),
         day,
@@ -573,7 +574,7 @@ fn dashboard_desired_height(model: &ListReportModel<'_>) -> u16 {
 
 fn worklogs_content_height(report: &ListReport) -> u16 {
     if report.worklogs().is_empty() {
-        1
+        1 + u16::from(!report.pagination().totals_complete)
     } else {
         u16::try_from(report.worklogs().len())
             .unwrap_or(u16::MAX)
@@ -614,15 +615,8 @@ fn render_dashboard_month(
     if !same_calendar_month(report.selected_date(), selected_date) {
         return;
     }
-    let schedule = report.schedule();
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(current_period_text(&schedule.month_current_period_duration)),
-            Line::from(month_totals_text(
-                &schedule.month_logged_duration,
-                &schedule.month_required_duration,
-            )),
-        ]),
+        Paragraph::new(month_progress_lines(report, summary_inner.width)),
         summary_inner,
     );
 }
@@ -642,11 +636,7 @@ fn render_large_calendar(
         })
         .unwrap_or(selected);
     let mut lines = vec![
-        Line::styled(
-            selected.format("%B %Y").to_string(),
-            Palette::primary().bold(),
-        )
-        .centered(),
+        Line::styled(selected.format("%B %Y").to_string(), Palette::text().bold()).centered(),
         Line::from(
             ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"]
                 .into_iter()
@@ -702,22 +692,104 @@ fn render_dashboard_report(frame: &mut Frame<'_>, area: Rect, model: &mut ListRe
 }
 
 fn day_summary_text(report: &ListReport) -> String {
-    format!("Day summary: {}", report.schedule().day_logged_duration)
+    let schedule = report.schedule();
+    let logged = schedule.seconds.day_logged;
+    let required = schedule.seconds.day_required;
+    if !report.pagination().totals_complete {
+        return format!(
+            "Day segment: {} logged · {} required",
+            schedule.day_logged_duration, schedule.day_required_duration
+        );
+    }
+    let status = if report.selected_date() > report.today() {
+        "Upcoming".to_owned()
+    } else if required == 0 {
+        "No required hours".to_owned()
+    } else {
+        duration_status(logged - required)
+    };
+    format!(
+        "{} / {} required · {status}",
+        schedule.day_logged_duration, schedule.day_required_duration
+    )
 }
 
 fn same_calendar_month(left: chrono::NaiveDate, right: chrono::NaiveDate) -> bool {
     left.year() == right.year() && left.month() == right.month()
 }
 
-fn current_period_text(duration: &str) -> Cow<'_, str> {
-    duration.strip_prefix('-').map_or_else(
-        || Cow::Owned(format!("{duration} current period")),
-        |remaining| Cow::Owned(format!("{remaining} left")),
-    )
+fn schedule_balance_text(report: &ListReport) -> String {
+    let selected = report.selected_date();
+    let today = report.today();
+    if (selected.year(), selected.month()) > (today.year(), today.month()) {
+        return "Schedule has not started".to_owned();
+    }
+    let status = duration_status(report.schedule().seconds.month_balance);
+    if (selected.year(), selected.month()) < (today.year(), today.month()) {
+        format!("Final balance: {status}")
+    } else {
+        format!("{status} through {}", today.format("%Y-%m-%d"))
+    }
 }
 
-fn month_totals_text(logged: &str, required: &str) -> String {
-    format!("{logged} logged of {required}")
+fn duration_status(seconds: i64) -> String {
+    let displayed_seconds = (seconds / 60) * 60;
+    match displayed_seconds.cmp(&0) {
+        std::cmp::Ordering::Less => {
+            format!(
+                "{} behind",
+                format_duration(displayed_seconds.saturating_abs(), false)
+            )
+        }
+        std::cmp::Ordering::Equal => "On track".to_owned(),
+        std::cmp::Ordering::Greater => {
+            format!("{} ahead", format_duration(displayed_seconds, false))
+        }
+    }
+}
+
+fn month_progress_lines(report: &ListReport, width: u16) -> Vec<Line<'static>> {
+    let schedule = report.schedule();
+    if !report.pagination().totals_complete {
+        return vec![
+            Line::from(format!(
+                "Segment: {} logged",
+                schedule.month_logged_duration
+            )),
+            Line::from("Balance unavailable for segment"),
+        ];
+    }
+    let required = schedule.seconds.month_required;
+    if required <= 0 {
+        return vec![
+            Line::from("No required hours"),
+            Line::default(),
+            Line::from(schedule_balance_text(report)),
+        ];
+    }
+    let logged = schedule.seconds.month_logged.max(0);
+    let percent = i128::from(logged)
+        .saturating_mul(100)
+        .checked_div(i128::from(required))
+        .unwrap_or(0);
+    let clamped = logged.min(required);
+    let filled = i128::from(width)
+        .saturating_mul(i128::from(clamped))
+        .checked_div(i128::from(required))
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let width = usize::from(width);
+    vec![
+        Line::from(format!(
+            "{} / {} · {percent}%",
+            schedule.month_logged_duration, schedule.month_required_duration
+        )),
+        Line::from(vec![
+            Span::styled("█".repeat(filled), Palette::primary()),
+            Span::styled("░".repeat(width.saturating_sub(filled)), Palette::muted()),
+        ]),
+        Line::from(schedule_balance_text(report)),
+    ]
 }
 
 fn dashboard_report_areas(inner: Rect, model: &ListReportModel<'_>) -> [Rect; 6] {
@@ -759,7 +831,7 @@ fn month_height(
         return COMPACT_MONTH_HEIGHT;
     };
     let calendar = Monthly::new(date, CalendarEventStore::default())
-        .show_month_header(Palette::primary())
+        .show_month_header(Palette::text().bold())
         .show_weekdays_header(Palette::muted());
     let calendar_height = calendar.height().saturating_add(3);
     let calendar_width = calendar.width().saturating_add(2);
@@ -854,58 +926,62 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, model: &ListReportModel<'_>)
         frame.render_widget(Line::from(status.to_owned()), content);
         return;
     }
-    let spans = if area.width >= 70 {
+    let has_focus = model.focused_row().is_some();
+    let spans = if area.width >= 92 && has_focus {
         vec![
-            primary(" h/l "),
-            muted("date  "),
-            primary(" ↑/k "),
-            muted("up  "),
-            primary("↓/j "),
-            muted("down  "),
-            primary("o "),
-            muted("open  "),
-            primary("q "),
-            muted("quit"),
-            muted_bold("   Esc "),
-            muted("close   "),
-            muted_bold("Ctrl-C "),
-            muted("exit"),
-        ]
-    } else if area.width >= 48 {
-        vec![
-            primary(" q "),
-            muted("quit  "),
-            primary("h/l "),
-            muted("date  "),
+            primary(" ←/h "),
+            label("previous day  "),
+            primary("→/l "),
+            label("next day  "),
             primary("↑/k "),
-            muted("up  "),
+            label("previous worklog  "),
             primary("↓/j "),
-            muted("down  "),
+            label("next worklog  "),
             primary("o "),
-            muted("open"),
+            label("open Jira  "),
+            primary("q "),
+            label("quit"),
         ]
-    } else if area.width >= 32 {
+    } else if area.width >= 54 && has_focus {
+        vec![
+            primary(" ←/h →/l "),
+            label("day  "),
+            primary("↑/k ↓/j "),
+            label("worklog  "),
+            primary("o "),
+            label("Jira  "),
+            primary("q "),
+            label("quit"),
+        ]
+    } else if area.width >= 37 && has_focus {
         vec![
             primary(" q "),
-            muted("quit "),
-            primary("h/l "),
-            muted("date "),
+            label("quit "),
+            primary("←/h →/l "),
+            label("day "),
             primary("↑↓ "),
-            muted("move "),
+            label("worklog "),
             primary("o "),
-            muted("open"),
+            label("Jira"),
+        ]
+    } else if area.width >= 54 {
+        vec![
+            primary(" ←/h "),
+            label("previous day  "),
+            primary("→/l "),
+            label("next day  "),
+            primary("q "),
+            label("quit"),
         ]
     } else if area.width >= 24 {
         vec![
             primary(" q "),
-            muted("quit  "),
-            primary("↑↓ "),
-            muted("move  "),
-            primary("o "),
-            muted("open"),
+            label("quit  "),
+            primary("←/h →/l "),
+            label("day"),
         ]
     } else {
-        vec![primary(" q "), muted("quit")]
+        vec![primary(" q "), label("quit")]
     };
     frame.render_widget(Line::from(spans), content);
 }
@@ -922,12 +998,12 @@ fn primary<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
     Span::styled(content, Palette::primary().bold())
 }
 
-fn muted<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(content, Palette::muted())
+fn heading<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::text().bold())
 }
 
-fn muted_bold<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
-    Span::styled(content, Palette::muted().bold())
+fn label<'a>(content: impl Into<Cow<'a, str>>) -> Span<'a> {
+    Span::styled(content, Palette::text())
 }
 
 fn render_pagination_notice(frame: &mut Frame<'_>, area: Rect, report: &ListReport) {
@@ -956,22 +1032,14 @@ fn render_month(
     let totals_are_current = same_calendar_month(report.selected_date(), selected_date);
     if area.height <= 3 {
         let summary = if totals_are_current {
-            let schedule = report.schedule();
-            format!(
-                "{} · {}",
-                month_totals_text(
-                    &schedule.month_logged_duration,
-                    &schedule.month_required_duration,
-                ),
-                current_period_text(&schedule.month_current_period_duration)
-            )
+            compact_month_summary(report)
         } else {
             String::new()
         };
         frame.render_widget(
             Paragraph::new(summary).block(
                 Block::bordered()
-                    .title(primary(selected_date.format("%B %Y").to_string()))
+                    .title(heading(selected_date.format("%B %Y").to_string()))
                     .border_style(Palette::muted()),
             ),
             area,
@@ -993,25 +1061,30 @@ fn render_month(
     }
     events.add(selected_date, Palette::action_focus().bold());
     let calendar = Monthly::new(selected_date, events)
-        .show_month_header(Palette::primary().bold())
+        .show_month_header(Palette::text().bold())
         .show_weekdays_header(Palette::muted().bold())
         .show_surrounding(Palette::muted());
     frame.render_widget(calendar, calendar_area);
     if !totals_are_current {
         return;
     }
+    frame.render_widget(Line::from(compact_month_summary(report)), summary_area);
+}
+
+fn compact_month_summary(report: &ListReport) -> String {
     let schedule = report.schedule();
-    frame.render_widget(
-        Line::from(format!(
-            "{} · {}",
-            month_totals_text(
-                &schedule.month_logged_duration,
-                &schedule.month_required_duration,
-            ),
-            current_period_text(&schedule.month_current_period_duration)
-        )),
-        summary_area,
-    );
+    if !report.pagination().totals_complete {
+        return format!("Segment: {} logged", schedule.month_logged_duration);
+    }
+    if schedule.seconds.month_required <= 0 {
+        return "No required hours".to_owned();
+    }
+    format!(
+        "{} / {} · {}",
+        schedule.month_logged_duration,
+        schedule.month_required_duration,
+        schedule_balance_text(report)
+    )
 }
 
 fn calendar_date(date: chrono::NaiveDate) -> Option<time::Date> {
@@ -1026,17 +1099,31 @@ fn render_worklogs(
 ) {
     let report = model.report;
     if report.worklogs().is_empty() {
+        if model.selected_date() != report.selected_date() {
+            if bordered {
+                frame.render_widget(
+                    Block::bordered()
+                        .title(heading("Worklogs"))
+                        .border_style(Palette::muted()),
+                    area,
+                );
+            }
+            return;
+        }
         let empty = Paragraph::new(if report.pagination().totals_complete {
-            "No worklogs".to_owned()
+            Text::from(Line::from("No worklogs"))
         } else {
-            "No worklogs in this retrieved segment".to_owned()
+            Text::from(vec![
+                Line::from("No worklogs"),
+                Line::from("in this retrieved segment"),
+            ])
         })
         .centered();
         if bordered {
             frame.render_widget(
                 empty.block(
                     Block::bordered()
-                        .title(primary("Worklogs"))
+                        .title(heading("Worklogs"))
                         .border_style(Palette::muted()),
                 ),
                 area,
@@ -1081,13 +1168,13 @@ fn render_worklogs(
         ]
     };
     let table = Table::new(rows, widths)
-        .header(Row::new(["ID", "Time", "Issue", "Duration"]).style(Palette::muted().bold()))
+        .header(Row::new(["ID", "Time", "Issue", "Duration"]).style(Palette::text().bold()))
         .row_highlight_style(Palette::action_focus().bold())
         .highlight_symbol("▶ ");
     let table = if bordered {
         table.block(
             Block::bordered()
-                .title(primary("Worklogs"))
+                .title(heading("Worklogs"))
                 .border_style(Palette::muted()),
         )
     } else {
@@ -1109,9 +1196,8 @@ mod tests {
     use ratatui::{backend::TestBackend, Terminal};
 
     use super::{
-        current_period_text, date_action_for_key_event, message_for_key, message_for_key_event,
-        month_totals_text, render, render_suspense, should_quit, ListReportAction, ListReportModel,
-        Message,
+        date_action_for_key_event, message_for_key, message_for_key_event, render, render_suspense,
+        should_quit, ListReportAction, ListReportModel, Message,
     };
     use crate::browser::{BrowserLauncher, NoopBrowserLauncher};
     use crate::list::ListReport;
@@ -1159,16 +1245,41 @@ mod tests {
         selected_date: NaiveDate,
         today: NaiveDate,
     ) -> ListReport {
-        ListReport::new(
-            selected_date,
+        report_with_schedule(
             worklogs,
+            totals_complete,
+            verbose,
+            selected_date,
+            today,
             ScheduleDetails {
                 month_required_duration: "160h".to_owned(),
                 month_logged_duration: "72h".to_owned(),
                 month_current_period_duration: "+4h".to_owned(),
                 day_required_duration: "8h".to_owned(),
                 day_logged_duration: "1h 30m".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds {
+                    month_required: 160 * 3_600,
+                    month_logged: 72 * 3_600,
+                    month_balance: 4 * 3_600,
+                    day_required: 8 * 3_600,
+                    day_logged: 90 * 60,
+                },
             },
+        )
+    }
+
+    fn report_with_schedule(
+        worklogs: Vec<Worklog>,
+        totals_complete: bool,
+        verbose: bool,
+        selected_date: NaiveDate,
+        today: NaiveDate,
+        schedule: ScheduleDetails,
+    ) -> ListReport {
+        ListReport::new(
+            selected_date,
+            worklogs,
+            schedule,
             ListPagination {
                 selected_date: selected_date.to_string(),
                 month_start: selected_date
@@ -1293,6 +1404,24 @@ mod tests {
         None
     }
 
+    fn screen_text_color(report: &ListReport, text: &str) -> Option<Color> {
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).ok()?;
+        let mut model = ListReportModel::new(report);
+        terminal.draw(|frame| render(frame, &mut model)).ok()?;
+        let buffer = terminal.backend().buffer();
+        for y in 0..buffer.area.height {
+            let line: String = (0..buffer.area.width)
+                .filter_map(|x| buffer.cell((x, y)))
+                .map(|cell| cell.symbol())
+                .collect();
+            if let Some(byte_index) = line.find(text) {
+                let x = u16::try_from(line[..byte_index].chars().count()).ok()?;
+                return buffer.cell((x, y)).map(|cell| cell.fg);
+            }
+        }
+        None
+    }
+
     fn calendar_day_style(
         report: &ListReport,
         row: &str,
@@ -1327,17 +1456,6 @@ mod tests {
     }
 
     #[test]
-    fn month_totals_keep_compact_duration_spacing() {
-        assert_eq!(month_totals_text("89h15m", "176h"), "89h15m logged of 176h");
-    }
-
-    #[test]
-    fn negative_current_period_duration_is_presented_as_time_left() {
-        assert_eq!(current_period_text("-14h45m"), "14h45m left");
-        assert_eq!(current_period_text("+4h"), "+4h current period");
-    }
-
-    #[test]
     fn populated_report_shows_month_day_worklogs_and_quit_controls() {
         let report = report(
             vec![Worklog {
@@ -1359,20 +1477,41 @@ mod tests {
 
         for expected in [
             "July 2026",
-            "72h logged of 160h",
-            "+4h",
+            "72h / 160h · 45%",
+            "4h ahead",
             "Tuesday, 2026-07-14",
             "751393",
             "09:00–10:30",
             "OPS-42",
-            "Day summary: 1h 30m",
-            "h/l date",
+            "1h 30m / 8h required",
+            "←/h previous day",
+            "o open Jira",
             "q quit",
-            "Esc close",
-            "Ctrl-C exit",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
+    }
+
+    #[test]
+    fn informational_text_uses_terminal_foreground_while_selection_uses_accent() {
+        let report = report(Vec::new(), true);
+
+        assert_eq!(
+            screen_text_color(&report, "72h / 160h · 45%"),
+            Some(Color::Reset)
+        );
+        assert_eq!(
+            screen_text_color(&report, "1h 30m / 8h required"),
+            Some(Color::Reset)
+        );
+        assert_eq!(
+            screen_text_color(&report, "Tuesday, 2026-07-14"),
+            Some(Color::Magenta)
+        );
+        assert_eq!(
+            screen_text_color(&report, "previous day"),
+            Some(Color::Reset)
+        );
     }
 
     #[test]
@@ -1382,10 +1521,10 @@ mod tests {
 
         let lines = screen_lines_with_size(&mut model, 100, 40);
 
-        assert!(lines.get(2).is_some_and(|line| {
+        assert!(lines.get(1).is_some_and(|line| {
             line.contains(DRAG_ART[0]) && line.contains(concat!("v", env!("CARGO_PKG_VERSION")))
         }));
-        assert!(lines.get(3).is_some_and(|line| line.contains(DRAG_ART[1])));
+        assert!(lines.get(2).is_some_and(|line| line.contains(DRAG_ART[1])));
     }
 
     #[test]
@@ -1397,10 +1536,10 @@ mod tests {
         let lines = screen_lines_with_size(&mut model, 100, 40);
 
         assert!(lines
-            .get(2)
+            .get(1)
             .is_some_and(|line| line.contains(concat!("v", env!("CARGO_PKG_VERSION")))));
         assert!(lines
-            .get(3)
+            .get(2)
             .is_some_and(|line| line.contains("Update available: v0.6.0")));
     }
 
@@ -1455,16 +1594,33 @@ mod tests {
             .iter()
             .position(|line| line.starts_with('└') && line.trim_end().ends_with('┘'));
         assert_eq!(dashboard_start, Some(3), "{}", lines.join("\n"));
-        assert_eq!(dashboard_end, Some(20), "{}", lines.join("\n"));
-        assert!(
-            lines.get(21).is_some_and(|line| line.trim().is_empty()),
-            "{}",
-            lines.join("\n")
-        );
+        assert_eq!(dashboard_end, Some(21), "{}", lines.join("\n"));
         assert!(
             lines
                 .get(22)
                 .is_some_and(|line| line.chars().all(|character| character == '─')),
+            "{}",
+            lines.join("\n")
+        );
+    }
+
+    #[test]
+    fn wide_report_falls_back_before_the_calendar_would_clip() {
+        let selected = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_dates(Vec::new(), true, false, selected, selected);
+        let mut model = ListReportModel::new(&report);
+
+        let lines = screen_lines_with_size(&mut model, 100, 23);
+
+        assert!(
+            !lines.iter().any(|line| {
+                line.contains("August 2026") && line.contains("Friday, 2026-08-14")
+            }),
+            "{}",
+            lines.join("\n")
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("Friday, 2026-08-14")),
             "{}",
             lines.join("\n")
         );
@@ -1490,13 +1646,15 @@ mod tests {
         let mut model = ListReportModel::new(&report);
 
         let lines = screen_lines_with_size(&mut model, 100, 40);
-        let day_summary = lines.iter().position(|line| line.contains("Day summary"));
+        let day_summary = lines
+            .iter()
+            .position(|line| line.contains("1h 30m / 8h required"));
         let current_period = lines
             .iter()
-            .position(|line| line.contains("+4h current period"));
+            .position(|line| line.contains("4h ahead through 2026-07-14"));
         let month_total = lines
             .iter()
-            .position(|line| line.contains("72h logged of 160h"));
+            .position(|line| line.contains("72h / 160h · 45%"));
 
         for (label, position) in [
             ("day summary", day_summary),
@@ -1513,9 +1671,9 @@ mod tests {
         let current_period = current_period.unwrap_or(usize::MAX);
         let month_total = month_total.unwrap_or(usize::MAX);
 
-        assert_eq!(day_summary, current_period, "{}", lines.join("\n"));
-        assert_eq!(month_total, current_period + 1, "{}", lines.join("\n"));
-        assert_eq!(day_summary, 22, "{}", lines.join("\n"));
+        assert_eq!(day_summary, month_total + 1, "{}", lines.join("\n"));
+        assert_eq!(current_period, day_summary + 1, "{}", lines.join("\n"));
+        assert_eq!(month_total, 19, "{}", lines.join("\n"));
     }
 
     #[test]
@@ -1539,12 +1697,12 @@ mod tests {
 
         for expected in [
             "July 2026",
-            "72h logged of 160h",
+            "72h / 160h · 45%",
             "Loading entries…",
             "751393",
             "OPS-42",
-            "Day summary",
-            "h/l date",
+            "1h 30m / 8h required",
+            "←/h previous day",
         ] {
             assert!(screen.contains(expected), "missing {expected:?}\n{screen}");
         }
@@ -1553,7 +1711,9 @@ mod tests {
         let loading_line = lines
             .iter()
             .position(|line| line.contains("Loading entries…"));
-        let day_summary_line = lines.iter().position(|line| line.contains("Day summary"));
+        let day_summary_line = lines
+            .iter()
+            .position(|line| line.contains("1h 30m / 8h required"));
         assert_eq!(loading_line, day_summary_line, "{screen}");
         assert!(
             lines
@@ -1602,7 +1762,7 @@ mod tests {
         assert!(screen.contains("Loading entries…"), "{screen}");
         assert!(!screen.contains("72h logged of 160h"), "{screen}");
         assert!(!screen.contains("+4h current period"), "{screen}");
-        assert!(!screen.contains("Tuesday, 2026-07-14"), "{screen}");
+        assert!(!screen.contains("No worklogs"), "{screen}");
     }
 
     #[test]
@@ -1678,20 +1838,165 @@ mod tests {
         let screen = screen(&report(Vec::new(), true));
 
         assert!(screen.contains("No worklogs"));
-        assert!(!screen.contains("No worklogs for Tuesday"));
-        assert!(screen.contains("72h logged of 160h"));
-        assert!(screen.contains("Day summary: 1h 30m"));
-        assert!(!screen.contains("logged / required"));
+        assert!(screen.contains("72h / 160h · 45%"));
+        assert!(screen.contains("1h 30m / 8h required · 6h30m behind"));
+        assert!(!screen.contains("open Jira"));
+    }
+
+    #[test]
+    fn current_month_balance_names_its_as_of_date_and_direction() {
+        let screen = screen(&report(Vec::new(), true));
+
+        assert!(screen.contains("4h ahead through 2026-07-14"), "{screen}");
+    }
+
+    #[test]
+    fn complete_month_shows_exact_totals_and_visual_progress() {
+        let screen = screen(&report(Vec::new(), true));
+
+        assert!(screen.contains("72h / 160h · 45%"), "{screen}");
+        assert!(screen.contains('█'), "{screen}");
+        assert!(screen.contains('░'), "{screen}");
+    }
+
+    #[test]
+    fn bounded_month_suppresses_authoritative_progress() {
+        let screen = screen(&report(Vec::new(), false));
+
+        assert!(screen.contains("Segment: 72h logged"), "{screen}");
+        assert!(
+            screen.contains("Day segment: 1h 30m logged · 8h required"),
+            "{screen}"
+        );
+        assert!(!screen.contains("6h30m behind"), "{screen}");
+        assert!(!screen.contains("45%"), "{screen}");
+        assert!(!screen.contains('░'), "{screen}");
+    }
+
+    #[test]
+    fn month_without_required_hours_suppresses_percentage_progress() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_schedule(
+            Vec::new(),
+            true,
+            false,
+            date,
+            date,
+            ScheduleDetails {
+                month_required_duration: "0h".to_owned(),
+                month_logged_duration: "0h".to_owned(),
+                month_current_period_duration: "0h".to_owned(),
+                day_required_duration: "0h".to_owned(),
+                day_logged_duration: "0h".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds::default(),
+            },
+        );
+        let screen = screen(&report);
+
+        assert!(screen.contains("No required hours"), "{screen}");
+        assert!(!screen.contains('%'), "{screen}");
+    }
+
+    #[test]
+    fn month_over_target_keeps_exact_overage_while_capping_visual_fill() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_schedule(
+            Vec::new(),
+            true,
+            false,
+            date,
+            date,
+            ScheduleDetails {
+                month_required_duration: "160h".to_owned(),
+                month_logged_duration: "180h".to_owned(),
+                month_current_period_duration: "+20h".to_owned(),
+                day_required_duration: "8h".to_owned(),
+                day_logged_duration: "8h".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds {
+                    month_required: 160 * 3_600,
+                    month_logged: 180 * 3_600,
+                    month_balance: 20 * 3_600,
+                    day_required: 8 * 3_600,
+                    day_logged: 8 * 3_600,
+                },
+            },
+        );
+        let screen = screen(&report);
+
+        assert!(screen.contains("180h / 160h · 112%"), "{screen}");
+        assert!(!screen.contains('░'), "{screen}");
+    }
+
+    #[test]
+    fn past_month_balance_is_labeled_as_final() {
+        let selected = NaiveDate::from_ymd_opt(2026, 6, 14).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
+
+        assert!(screen.contains("Final balance: 4h ahead"), "{screen}");
+    }
+
+    #[test]
+    fn future_month_does_not_present_logged_time_as_a_surplus() {
+        let selected = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
+
+        assert!(screen.contains("Schedule has not started"), "{screen}");
+    }
+
+    #[test]
+    fn future_working_day_is_upcoming_instead_of_behind() {
+        let selected = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap_or(NaiveDate::MIN);
+        let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let screen = screen(&report_with_dates(Vec::new(), true, false, selected, today));
+
+        assert!(
+            screen.contains("1h 30m / 8h required · Upcoming"),
+            "{screen}"
+        );
+        assert!(!screen.contains("6h30m behind"), "{screen}");
+    }
+
+    #[test]
+    fn subminute_balance_is_on_track_at_displayed_precision() {
+        let date = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap_or(NaiveDate::MIN);
+        let report = report_with_schedule(
+            Vec::new(),
+            true,
+            false,
+            date,
+            date,
+            ScheduleDetails {
+                month_required_duration: "8h".to_owned(),
+                month_logged_duration: "8h".to_owned(),
+                month_current_period_duration: "+30s".to_owned(),
+                day_required_duration: "8h".to_owned(),
+                day_logged_duration: "8h".to_owned(),
+                seconds: drag::schedule::ScheduleSeconds {
+                    month_required: 8 * 3_600,
+                    month_logged: 8 * 3_600 + 30,
+                    month_balance: 30,
+                    day_required: 8 * 3_600,
+                    day_logged: 8 * 3_600 + 30,
+                },
+            },
+        );
+        let screen = screen(&report);
+
+        assert!(screen.contains("8h / 8h required · On track"), "{screen}");
+        assert!(!screen.contains("0h ahead"), "{screen}");
     }
 
     #[test]
     fn incomplete_empty_report_qualifies_segment_and_totals() {
         let screen = screen(&report(Vec::new(), false));
 
-        assert!(screen.contains("No worklogs in this retrieved segment"));
+        assert!(screen.contains("No worklogs"));
+        assert!(screen.contains("in this retrieved segment"));
         assert!(screen.contains("More worklogs are available"));
         assert!(screen.contains("Totals reflect this bounded segment"));
-        assert!(!screen.contains("No worklogs for Tuesday"));
+        assert!(!screen.contains("run drag log"));
     }
 
     #[test]
@@ -1755,13 +2060,21 @@ mod tests {
     }
 
     #[test]
-    fn h_and_l_change_dates_only_on_key_press() {
+    fn vim_and_arrow_keys_change_dates_only_on_key_press() {
         assert_eq!(
             date_action_for_key_event(KeyCode::Char('h'), KeyEventKind::Press),
             Some(ListReportAction::PreviousDate)
         );
         assert_eq!(
             date_action_for_key_event(KeyCode::Char('l'), KeyEventKind::Press),
+            Some(ListReportAction::NextDate)
+        );
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Left, KeyEventKind::Press),
+            Some(ListReportAction::PreviousDate)
+        );
+        assert_eq!(
+            date_action_for_key_event(KeyCode::Right, KeyEventKind::Press),
             Some(ListReportAction::NextDate)
         );
         assert_eq!(
@@ -1859,9 +2172,20 @@ mod tests {
     #[test]
     fn open_key_and_footer_are_discoverable() {
         assert_eq!(message_for_key(KeyCode::Char('o')), Some(Message::Open));
-        let report = report(Vec::new(), true);
+        let report = report(
+            vec![Worklog {
+                id: "1".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            true,
+        );
         let screen = screen(&report);
-        assert!(screen.contains("o open"), "{screen}");
+        assert!(screen.contains("o open Jira"), "{screen}");
     }
 
     #[test]
@@ -1881,18 +2205,55 @@ mod tests {
     }
 
     #[test]
-    fn compact_footer_keeps_quit_move_and_open_hints_at_boundary_widths() {
+    fn compact_empty_footer_keeps_only_date_and_quit_hints() {
         let report = report(Vec::new(), true);
         for width in [24, 32] {
             let mut model = ListReportModel::new(&report);
             let screen = screen_with_size(&mut model, width, 20);
-            for expected in ["q quit", "move", "o open"] {
+            for expected in ["q quit", "←/h →/l"] {
                 assert!(
                     screen.contains(expected),
                     "missing {expected:?} at width {width}\n{screen}"
                 );
             }
+            assert!(!screen.contains("Jira"), "{screen}");
         }
+    }
+
+    #[test]
+    fn footer_variants_do_not_clip_at_their_width_boundaries() {
+        let report = report(
+            vec![Worklog {
+                id: "1".to_owned(),
+                interval: None,
+                issue_id: "1".to_owned(),
+                issue_key: "OPS-1".to_owned(),
+                duration: "30m".to_owned(),
+                description: String::new(),
+                link: "https://example.atlassian.net/browse/OPS-1".to_owned(),
+            }],
+            true,
+        );
+
+        let mut medium_model = ListReportModel::new(&report);
+        let medium = screen_with_size(&mut medium_model, 88, 20);
+        assert!(medium.contains("q quit"), "{medium}");
+        assert!(medium.contains("o Jira"), "{medium}");
+
+        let mut wide_model = ListReportModel::new(&report);
+        let wide = screen_with_size(&mut wide_model, 92, 20);
+        assert!(wide.contains("previous worklog"), "{wide}");
+        assert!(wide.contains("q quit"), "{wide}");
+
+        let mut exact_compact_model = ListReportModel::new(&report);
+        let exact_compact = screen_with_size(&mut exact_compact_model, 37, 20);
+        assert!(exact_compact.contains("q quit"), "{exact_compact}");
+        assert!(exact_compact.contains("o Jira"), "{exact_compact}");
+
+        let mut compact_model = ListReportModel::new(&report);
+        let compact = screen_with_size(&mut compact_model, 32, 20);
+        assert!(compact.contains("q quit"), "{compact}");
+        assert!(!compact.contains("Jira"), "{compact}");
     }
 
     #[test]
@@ -2024,8 +2385,8 @@ mod tests {
             "09:00–10:30",
             "OPS-42",
             "1h 30m",
-            "↑/k",
-            "↓/j",
+            "↑↓",
+            "worklog",
             "q quit",
         ] {
             assert!(narrow.contains(expected), "missing {expected:?}\n{narrow}");
