@@ -13,6 +13,36 @@ fn companion() -> Result<Command, Box<dyn std::error::Error>> {
     Ok(Command::cargo_bin("drag-companion")?)
 }
 
+fn bash_executable(
+    dir: &tempfile::TempDir,
+    name: &str,
+    script: &str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    #[cfg(windows)]
+    {
+        let script_path = dir.path().join(format!("{name}.sh"));
+        std::fs::write(&script_path, script)?;
+        let wrapper_path = dir.path().join(format!("{name}.cmd"));
+        std::fs::write(
+            &wrapper_path,
+            format!("@echo off\r\nbash \"%~dp0{name}.sh\" %*\r\n"),
+        )?;
+        Ok(wrapper_path)
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.path().join(name);
+        std::fs::write(&path, script)?;
+        let mut permissions = std::fs::metadata(&path)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions)?;
+        Ok(path)
+    }
+}
+
 fn isolated_git(current_dir: &Path) -> std::process::Command {
     let mut command = std::process::Command::new("git");
     command.current_dir(current_dir);
@@ -2265,7 +2295,6 @@ fn fake_drag(
     dir: &tempfile::TempDir,
     pages: Vec<Value>,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let bin = dir.path().join("fake-drag");
     let page0 = serde_json::to_string(&serde_json::json!({
         "ok": true,
         "data": pages.first().unwrap_or(&serde_json::json!({})),
@@ -2274,9 +2303,10 @@ fn fake_drag(
         "ok": true,
         "data": pages.get(1).unwrap_or(&serde_json::json!({})),
     }))?;
-    std::fs::write(
-        &bin,
-        format!(
+    bash_executable(
+        dir,
+        "fake-drag",
+        &format!(
             r#"#!/usr/bin/env bash
 set -euo pipefail
 log="{}/commands.log"
@@ -2311,11 +2341,7 @@ fi
             page1,
             page0
         ),
-    )?;
-    std::process::Command::new("chmod")
-        .args(["+x", bin.to_str().ok_or("bin")?])
-        .status()?;
-    Ok(bin)
+    )
 }
 
 fn seed_approved_payload(
@@ -2375,10 +2401,10 @@ fn seed_general_autonomy_rollout(data_dir: &str) -> Result<(), Box<dyn std::erro
 fn executable_drag(
     dir: &tempfile::TempDir,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let bin = dir.path().join("exec-drag");
-    std::fs::write(
-        &bin,
-        format!(
+    bash_executable(
+        dir,
+        "exec-drag",
+        &format!(
             r#"#!/usr/bin/env bash
 set -euo pipefail
 log="{0}/commands.log"
@@ -2418,11 +2444,7 @@ exit 2
 "#,
             dir.path().display()
         ),
-    )?;
-    std::process::Command::new("chmod")
-        .args(["+x", bin.to_str().ok_or("bin")?])
-        .status()?;
-    Ok(bin)
+    )
 }
 
 #[test]
@@ -3177,14 +3199,11 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
             .stderr(predicate::str::contains(error));
     }
     let dir = tempdir()?;
-    let drag = dir.path().join("bad-drag");
-    std::fs::write(
-        &drag,
+    let drag = bash_executable(
+        &dir,
+        "bad-drag",
         "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":10}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
     )?;
-    std::process::Command::new("chmod")
-        .args(["+x", drag.to_str().ok_or("drag")?])
-        .status()?;
     companion()?
         .args([
             "--drag-bin",
@@ -3529,7 +3548,7 @@ fn stale_lease_is_recovered_but_unexpired_lease_blocks_takeover(
             date,
         ])
         .env("DRAG_COMPANION_TEST_CRASH_AFTER_PHASE", "collecting")
-        .env("DRAG_COMPANION_TEST_LEASE_TTL_MS", "250")
+        .env("DRAG_COMPANION_TEST_LEASE_TTL_MS", "30000")
         .assert()
         .failure();
 
@@ -3545,7 +3564,12 @@ fn stale_lease_is_recovered_but_unexpired_lease_blocks_takeover(
         .failure()
         .stderr(predicate::str::contains("already owned"));
 
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    assert_eq!(
+        conn.execute("UPDATE run_leases SET expires_at_ms = 0", [])?,
+        1
+    );
+    drop(conn);
 
     let recovered = companion()?
         .args([
@@ -3555,7 +3579,6 @@ fn stale_lease_is_recovered_but_unexpired_lease_blocks_takeover(
             "--date",
             date,
         ])
-        .env("DRAG_COMPANION_TEST_LEASE_TTL_MS", "0")
         .assert()
         .success()
         .get_output()
