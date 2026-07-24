@@ -424,7 +424,8 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     assert_eq!(installed["status"], "installed");
     assert_eq!(installed["hostSchedulerMutated"], false);
     let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
-    let catch_up_service = std::fs::read_to_string(systemd.join("drag-companion-catch-up.service"))?;
+    let catch_up_service =
+        std::fs::read_to_string(systemd.join("drag-companion-catch-up.service"))?;
     let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
     assert!(service.contains("scheduler run --date"));
     assert!(service.contains("date +%%F"));
@@ -450,7 +451,8 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
             .arg(&launchd),
     )?;
     let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
-    let catch_up_plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.catch-up.plist"))?;
+    let catch_up_plist =
+        std::fs::read_to_string(launchd.join("email.trevors.drag-companion.catch-up.plist"))?;
     assert!(plist.contains("scheduler run --date"));
     assert!(plist.contains("date +%F"));
     assert!(catch_up_plist.contains("scheduler catch-up"));
@@ -1228,7 +1230,7 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
     let calendar = dir.path().join("work.ics");
     std::fs::write(
         &calendar,
-        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Drag Test//ICS//EN\r\nBEGIN:VTIMEZONE\r\nTZID:America/New_York\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:daily-standup@example.test\r\nDTSTART;TZID=America/New_York:20260308T013000\r\nDTEND;TZID=America/New_York:20260308T023000\r\nEXDATE;TZID=America/New_York:20260309T013000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cancelled@example.test\r\nDTSTART;TZID=America/New_York:20260308T110000\r\nDTEND;TZID=America/New_York:20260308T120000\r\nSTATUS:CANCELLED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Cancelled meeting\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:all-day@example.test\r\nDTSTART;VALUE=DATE:20260308\r\nDTEND;VALUE=DATE:20260309\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Office holiday\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:update@example.test\r\nDTSTART;TZID=America/New_York:20260308T140000\r\nDTEND;TZID=America/New_York:20260308T150000\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSEQUENCE:1\r\nSUMMARY:Planning v1\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:update@example.test\r\nDTSTART;TZID=America/New_York:20260308T143000\r\nDTEND;TZID=America/New_York:20260308T153000\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260302T120000Z\r\nSEQUENCE:2\r\nSUMMARY:Planning v2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Drag Test//ICS//EN\r\nBEGIN:VTIMEZONE\r\nTZID:America/New_York\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:daily-standup@example.test\r\nDTSTART;TZID=America/New_York:20260308T013000\r\nDTEND;TZID=America/New_York:20260308T033000\r\nEXDATE;TZID=America/New_York:20260309T013000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cancelled@example.test\r\nDTSTART;TZID=America/New_York:20260308T110000\r\nDTEND;TZID=America/New_York:20260308T120000\r\nSTATUS:CANCELLED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Cancelled meeting\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:all-day@example.test\r\nDTSTART;VALUE=DATE:20260308\r\nDTEND;VALUE=DATE:20260309\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Office holiday\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:update@example.test\r\nDTSTART;TZID=America/New_York:20260308T140000\r\nDTEND;TZID=America/New_York:20260308T150000\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSEQUENCE:1\r\nSUMMARY:Planning v1\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:update@example.test\r\nDTSTART;TZID=America/New_York:20260308T143000\r\nDTEND;TZID=America/New_York:20260308T153000\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260302T120000Z\r\nSEQUENCE:2\r\nSUMMARY:Planning v2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
     )?;
 
     let output = companion()?
@@ -1253,7 +1255,7 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
             .as_array()
             .ok_or("events")?
             .len(),
-        4
+        5
     );
     assert_eq!(
         collected["calendar"]["failures"]
@@ -1288,12 +1290,19 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
         .clone();
     let bundle: Value = serde_json::from_slice(&bundle_out)?;
     let evidence = bundle["evidence"].as_array().ok_or("evidence")?;
-    assert_eq!(evidence.len(), 4);
+    assert_eq!(evidence.len(), 5);
     assert!(evidence.iter().all(|event| event["source"] == "ics-local"));
-    assert!(!evidence.iter().any(|event| event["id"]
+    let cancelled = evidence
+        .iter()
+        .find(|event| event["summary"] == "Cancelled meeting")
+        .ok_or("cancelled tombstone")?;
+    assert_eq!(cancelled["status"], "CANCELLED");
+    assert_eq!(cancelled["intervalStartUtc"], Value::Null);
+    assert_eq!(cancelled["intervalEndUtc"], Value::Null);
+    assert!(!cancelled["id"]
         .as_str()
         .unwrap_or_default()
-        .contains("cancelled@example.test")));
+        .contains("cancelled@example.test"));
     assert!(evidence.iter().all(|event| event["reference"]
         .as_str()
         .unwrap_or_default()
@@ -1364,8 +1373,8 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
         .find(|event| event["summary"] == "Daily standup")
         .ok_or("DST standup occurrence")?;
     assert_eq!(dst_standup["intervalStartUtc"], "2026-03-10T05:30:00Z");
-    assert_eq!(dst_standup["intervalEndUtc"], "2026-03-10T06:30:00Z");
-    assert_eq!(dst_standup["elapsedSeconds"], 3600);
+    assert_eq!(dst_standup["intervalEndUtc"], "2026-03-10T07:30:00Z");
+    assert_eq!(dst_standup["elapsedSeconds"], 7200);
     Ok(())
 }
 
@@ -1717,10 +1726,22 @@ fn contract_exposes_capture_and_import_without_live_mutation(
             .ok_or(required)?;
         assert_eq!(command["defaultNetworkAccess"], false);
         assert_eq!(command["possibleNetworkAccess"], false);
-        assert_eq!(command["conditionalNetworkAccess"].as_array().ok_or("network conditions")?.len(), 0);
+        assert_eq!(
+            command["conditionalNetworkAccess"]
+                .as_array()
+                .ok_or("network conditions")?
+                .len(),
+            0
+        );
         assert_eq!(command["defaultLiveMutationAllowed"], false);
         assert_eq!(command["possibleLiveMutationAllowed"], false);
-        assert_eq!(command["conditionalLiveMutationAllowed"].as_array().ok_or("live conditions")?.len(), 0);
+        assert_eq!(
+            command["conditionalLiveMutationAllowed"]
+                .as_array()
+                .ok_or("live conditions")?
+                .len(),
+            0
+        );
     }
     Ok(())
 }
@@ -2027,26 +2048,31 @@ fn claude_hook_capture_records_safe_lifecycle_metadata_without_private_paths(
         .write_stdin(serde_json::to_vec(&payload)?)
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "evidence.claude.stable-session-1.SessionStart",
-        ));
+        .stdout(predicate::str::contains("evidence.claude.sha256:"));
 
     let journal = std::fs::read_to_string(dir.path().join("journal.jsonl"))?;
     let event: Value = serde_json::from_str(journal.lines().next().ok_or("journal event")?)?;
     assert_eq!(event["schemaVersion"], 1);
     assert_eq!(event["eventType"], "evidence.claude.lifecycle");
     assert_eq!(event["source"]["adapter"], "claude-code-session-hook");
-    assert_eq!(event["source"]["reference"], "drag#stable-session-1");
+    assert!(event["source"]["reference"]
+        .as_str()
+        .ok_or("source reference")?
+        .starts_with("drag#session:sha256:"));
     assert_eq!(event["timestampSemantics"]["explicitDate"], "2026-03-08");
     assert_eq!(event["payload"]["schemaVersion"], 1);
     assert_eq!(event["payload"]["lifecycleKind"], "SessionStart");
-    assert_eq!(event["payload"]["sessionId"], "stable-session-1");
+    assert!(event["payload"]["sessionId"]
+        .as_str()
+        .ok_or("session id")?
+        .starts_with("session:sha256:"));
     assert_eq!(event["payload"]["repository"], "drag");
     assert_eq!(event["payload"]["networkAccess"], false);
     assert_eq!(event["payload"]["transcriptCaptured"], false);
     let text = serde_json::to_string(&event)?;
     assert!(!text.contains("/home/tmr"));
     assert!(!text.contains("transcript.jsonl"));
+    assert!(!text.contains("stable-session-1"));
 
     companion()?
         .args(["--data-dir", data_dir.as_str(), "import"])
@@ -2191,11 +2217,8 @@ fn propose_accepts_offline_fixture_persists_hash_metadata_without_raw_evidence_o
     );
 
     let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
-    let state: String = conn.query_row(
-        "SELECT state FROM proposals WHERE id = 'proposal-1'",
-        [],
-        |row| row.get(0),
-    )?;
+    let state: String =
+        conn.query_row("SELECT state FROM proposals LIMIT 1", [], |row| row.get(0))?;
     assert_eq!(state, "proposed");
     let approved: i64 = conn.query_row(
         "SELECT COUNT(*) FROM proposals WHERE state = 'approved'",
@@ -2673,7 +2696,7 @@ fn execute_persists_exact_payload_before_drag_confirms_id_and_reruns_idempotentl
     assert!(op["operationKey"]
         .as_str()
         .ok_or("key")?
-        .contains("op.v1.default.2026-03-08"));
+        .contains("op.v1.account-default.2026-03-08"));
     assert_eq!(op["state"], "confirmed");
     assert_eq!(op["tempoWorklogId"], "tempo-1");
     assert_eq!(
@@ -2782,6 +2805,21 @@ fn concurrent_execute_allows_only_one_live_submitter_per_account_and_date(
         .stderr(predicate::str::contains("companion state is busy"));
     assert!(data_dir.join("companion.sqlite3").exists());
 
+    companion()?
+        .args([
+            "--data-dir",
+            data.as_str(),
+            "rollout",
+            "record",
+            "--gate",
+            "general",
+            "--unsafe-reason",
+            "incident during submission",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("companion state is busy"));
+
     let second = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
         .args(args)
         .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
@@ -2824,7 +2862,7 @@ fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
         .env("DRAG_FAULT", "after-remote")
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""status":"uncertain""#));
+        .stdout(predicate::str::contains(r#""status": "uncertain""#));
     companion()?
         .args([
             "--data-dir",
@@ -3122,7 +3160,7 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         .env("DRAG_FAULT", "stdin")
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""status":"uncertain""#));
+        .stdout(predicate::str::contains(r#""status": "uncertain""#));
     let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
     assert_eq!(commands.matches(" log ").count(), 1);
     let blocked = companion()?
@@ -3174,7 +3212,7 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         .env("DRAG_FAULT", "after-response")
         .assert()
         .success()
-        .stdout(predicate::str::contains(r#""status":"uncertain""#));
+        .stdout(predicate::str::contains(r#""status": "uncertain""#));
     companion()?
         .args([
             "--data-dir",
@@ -3331,6 +3369,7 @@ fn drag_preview_sends_exact_structured_dry_run_payload_without_live_mutation(
         [],
     )?;
     for (name, value) in [
+        ("tempoAccountId", "account-default"),
         ("issueKey", "DRAG-151"),
         ("start", "2026-03-08T10:00:00Z"),
         ("end", "2026-03-08T11:00:00Z"),
@@ -3420,7 +3459,7 @@ fn drag_preview_populates_resolutions_through_read_only_drag_boundary(
         [],
         |row| row.get(0),
     )?;
-    assert_eq!(count, 5);
+    assert_eq!(count, 6);
     Ok(())
 }
 
@@ -3542,6 +3581,7 @@ fn drag_audit_normalizes_existing_worklogs_and_never_live_mutates(
     conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-audit','2026-03-08','proposed')", [])?;
     conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-audit','bundle-audit','proposed')", [])?;
     for (name, value) in [
+        ("tempoAccountId", "account-default"),
         ("issueKey", "DRAG-151"),
         ("start", "2026-03-08T15:00:00Z"),
         ("end", "2026-03-08T16:00:00Z"),
@@ -3601,14 +3641,20 @@ fn audit_policy_decisions_are_deterministic_exhaustive_and_preserve_unsupported_
         .success();
 
     let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let provider_proposal_id: String =
+        conn.query_row("SELECT id FROM proposals LIMIT 1", [], |row| row.get(0))?;
     for (name, value) in [
+        ("tempoAccountId", "account-default".to_owned()),
         ("issueKey", "DRAG-151".to_owned()),
         ("start", "2026-03-08T16:00:00Z".to_owned()),
         ("end", "2026-03-08T17:00:00Z".to_owned()),
         ("description", "Implemented proposal adapter".to_owned()),
         ("attributes", serde_json::json!({}).to_string()),
     ] {
-        conn.execute("INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES ('proposal-1', ?1, ?2)", rusqlite::params![name, value])?;
+        conn.execute(
+            "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![provider_proposal_id, name, value],
+        )?;
     }
     for (id, refs, issue, start, end, facts, limits, attrs) in [
         (
@@ -3655,6 +3701,7 @@ fn audit_policy_decisions_are_deterministic_exhaustive_and_preserve_unsupported_
         conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES (?1, (SELECT id FROM daily_bundles LIMIT 1), 'proposed')", rusqlite::params![id])?;
         conn.execute("INSERT INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1.0, ?7)", rusqlite::params![id, refs.to_string(), issue, start, end, facts.to_string(), limits.to_string()])?;
         for (name, value) in [
+            ("tempoAccountId", "account-default".to_owned()),
             ("issueKey", issue.to_owned()),
             ("start", start.to_owned()),
             ("end", end.to_owned()),
@@ -4057,15 +4104,15 @@ fn replay_failures_identify_fixture_evidence_rule_and_operation(
         "fixtureId": "bad-day",
         "date": "2026-11-01",
         "tags": ["dst"],
-        "collector": {"events": []},
-        "model": {"proposals": []},
-        "dragRead": {"worklogs": []},
-        "preview": {"dryRun": true},
-        "mutation": {"attempted": false},
-        "crash": {"resumeState": "clean"},
-        "network": {"allowed": false},
+        "collector": {"recording":"collector-fixture-v1","events":[{"id":"collector-bad","kind":"redacted-activity","source":"local"}]},
+        "model": {"recording":"model-fixture-v1","proposals":[{"id":"proposal-bad","issue":"DRAG-157","materialFields":["issue","startedAt","durationMinutes"]}]},
+        "dragRead": {"recording":"drag-read-fixture-v1","worklogs": []},
+        "preview": {"recording":"preview-fixture-v1","dryRun": true,"payloads":[]},
+        "mutation": {"recording":"mutation-fixture-v1","attempted": true,"ledger":[]},
+        "crash": {"recording":"crash-fixture-v1","resumeState": "clean"},
+        "network": {"recording":"network-fixture-v1","allowed": false,"failures":[]},
         "expectations": {
-            "schemaValid": true,
+            "schemaValid": false,
             "provenanceValid": true,
             "redactionValid": true,
             "attributionPrecision": 1.0,
@@ -4094,9 +4141,9 @@ fn replay_failures_identify_fixture_evidence_rule_and_operation(
     assert!(
         failures.iter().any(|failure| {
             failure["fixture"] == "bad-day"
-                && failure["evidence"] == "zero-unsafe-retries"
-                && failure["rule"] == "expectations.unsafeRetries"
-                && failure["operation"] == "validate"
+                && failure["evidence"] == "mutation"
+                && failure["rule"] == "production recovery ledger"
+                && failure["operation"] == "execute"
         }),
         "missing precise unsafe retry failure: {failures:?}"
     );

@@ -7,7 +7,9 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
         .unwrap_or_else(|| PathBuf::from(".drag-companion"));
     let _state_lock = match &cli.command {
         Command::Contract => None,
-        Command::Purge(_) => Some(acquire_companion_state_lock(&data_dir, true)?),
+        Command::Purge(_) | Command::Rollout(_) => {
+            Some(acquire_companion_state_lock(&data_dir, true)?)
+        }
         _ => Some(acquire_companion_state_lock(&data_dir, false)?),
     };
 

@@ -334,7 +334,8 @@ fn validate_replay_seams(
         & validate_collector_normalization(fixture, &collector, failures)
         & validate_model_proposals(fixture, &model, failures)
         & validate_drag_policy(fixture, &drag, failures)
-        & validate_recovery_policy(fixture, &mutation, failures);
+        & validate_recovery_policy(fixture, &mutation, failures)
+        & execute_production_seams(fixture, &collector, &model, &drag, &mutation, failures);
     actual.provenance_valid = collector
         .events
         .iter()
@@ -354,6 +355,158 @@ fn validate_replay_seams(
     actual.unsafe_retries = u64::from(mutation.attempted && mutation.ledger.is_empty());
     actual.incorrect_creates = u64::from(mutation.attempted && drag.worklogs.is_empty());
     actual
+}
+
+fn execute_production_seams(
+    fixture: &ReplayFixture,
+    collector: &CollectorSeam,
+    model: &ModelSeam,
+    drag: &DragReadSeam,
+    mutation: &MutationSeam,
+    failures: &mut Vec<Value>,
+) -> bool {
+    let evidence = collector
+        .events
+        .iter()
+        .map(|event| BundleEvidence {
+            id: format!("evidence.{}", event.id),
+            source: event.source.clone(),
+            reference: minimized_reference(&event.id),
+            original_timestamp: Some(format!("{}T09:00:00Z", fixture.date)),
+            original_timezone: Some("UTC".to_owned()),
+            observed_at_utc: Some(format!("{}T09:00:00Z", fixture.date)),
+            interval_start_utc: None,
+            interval_end_utc: None,
+            elapsed_seconds: None,
+            summary: redact(&event.kind),
+            status: None,
+            unsupported_reason: None,
+            supersedes: None,
+            superseded_by: None,
+            contradicted_by: Vec::new(),
+            abandoned_session: false,
+        })
+        .collect::<Vec<_>>();
+    let bundle = EvidenceBundle {
+        schema_version: 1,
+        explicit_date: fixture.date,
+        mode: DEFAULT_MODE,
+        network_access: false,
+        live_mutation_allowed: false,
+        unsupported_gaps: Vec::new(),
+        source_health: Vec::new(),
+        evidence,
+        contradictions: Vec::new(),
+    };
+    let first_evidence = bundle.evidence.first().map(|event| event.id.clone());
+    let proposals = model
+        .proposals
+        .iter()
+        .enumerate()
+        .map(|(index, proposal)| WorklogProposal {
+            id: proposal.id.clone(),
+            provider_id: None,
+            evidence_refs: first_evidence.clone().into_iter().collect(),
+            issue_candidate: ProposalIssueCandidate {
+                key: proposal.issue.clone(),
+                confidence: "recorded".to_owned(),
+            },
+            supported_time: ProposalTimePeriod {
+                start: format!("{}T{:02}:00:00Z", fixture.date, 9 + index),
+                end: format!("{}T{:02}:00:00Z", fixture.date, 10 + index),
+            },
+            description_facts: vec!["recorded replay evidence".to_owned()],
+            confidence: 1.0,
+            limitations: vec!["offline replay fixture".to_owned()],
+        })
+        .collect::<Vec<_>>();
+    let response = ProviderResponse {
+        proposals,
+        unsupported_periods: Vec::new(),
+    };
+    if let Err(error) = validate_provider_response(&response, &bundle) {
+        failures.push(replay_failure(
+            &fixture.fixture_id,
+            "model",
+            "production provider validator",
+            "execute",
+            error,
+        ));
+        return false;
+    }
+
+    let mut existing_worklogs = Vec::new();
+    for value in &drag.worklogs {
+        match normalize_worklog(value, fixture.date) {
+            Ok(worklog) => existing_worklogs.push(worklog),
+            Err(error) => {
+                failures.push(replay_failure(
+                    &fixture.fixture_id,
+                    "dragRead",
+                    "production Drag normalization",
+                    "execute",
+                    error.to_string(),
+                ));
+                return false;
+            }
+        }
+    }
+    let policy_inputs = response
+        .proposals
+        .iter()
+        .map(|proposal| ProposalPolicyInput {
+            id: proposal.id.clone(),
+            evidence_refs: proposal.evidence_refs.clone(),
+            issue_key: proposal.issue_candidate.key.clone(),
+            start: proposal.supported_time.start.clone(),
+            end: proposal.supported_time.end.clone(),
+            description_facts: proposal.description_facts.clone(),
+            limitations: proposal.limitations.clone(),
+        })
+        .collect::<Vec<_>>();
+    let decisions = evaluate_policy_decisions(&policy_inputs, &existing_worklogs, &[], &[], true);
+    if decisions
+        .iter()
+        .any(|decision| decision.decision != "approved")
+    {
+        failures.push(replay_failure(
+            &fixture.fixture_id,
+            "policy",
+            "production deterministic policy",
+            "execute",
+            "recorded proposal was not approved by production policy",
+        ));
+        return false;
+    }
+
+    for proposal in &response.proposals {
+        let payload = serde_json::json!({
+            "issue": proposal.issue_candidate.key,
+            "startedAt": proposal.supported_time.start,
+            "durationMinutes": 60,
+        });
+        if operation_key("replay-account", fixture.date, &payload).is_err() {
+            failures.push(replay_failure(
+                &fixture.fixture_id,
+                "mutation",
+                "production operation key",
+                "execute",
+                "could not derive deterministic operation key",
+            ));
+            return false;
+        }
+    }
+    if mutation.attempted && mutation.ledger.is_empty() {
+        failures.push(replay_failure(
+            &fixture.fixture_id,
+            "mutation",
+            "production recovery ledger",
+            "execute",
+            "attempted mutation has no durable ledger entry",
+        ));
+        return false;
+    }
+    true
 }
 
 fn parse_seam<T: serde::de::DeserializeOwned>(

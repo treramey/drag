@@ -421,11 +421,11 @@ pub(crate) fn proposal_drag_resolution_complete(
     proposal_id: &str,
 ) -> Result<bool, CompanionError> {
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM proposal_drag_resolutions WHERE proposal_id = ?1 AND name IN ('issueKey','start','end','description','attributes') AND TRIM(value) != ''",
+        "SELECT COUNT(*) FROM proposal_drag_resolutions WHERE proposal_id = ?1 AND name IN ('tempoAccountId','issueKey','start','end','description','attributes') AND TRIM(value) != ''",
         [proposal_id],
         |row| row.get(0),
     )?;
-    Ok(count == 5)
+    Ok(count == 6)
 }
 
 pub(crate) fn resolved_tempo_account_id(resolution: &Value) -> Result<String, CompanionError> {

@@ -633,9 +633,16 @@ fn require_companion_sentinel(data_dir: &Path) -> Result<(), CompanionError> {
 
 fn validate_purge_target(data_dir: &Path) -> Result<(), CompanionError> {
     let identity = canonical_lock_identity(data_dir)?;
+    let current_directory = std::env::current_dir()
+        .ok()
+        .and_then(|path| canonical_lock_identity(&path).ok());
+    let home_directory = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|path| canonical_lock_identity(&path).ok());
     if identity.parent().is_none()
         || identity == Path::new("/")
-        || identity == std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        || current_directory.as_ref() == Some(&identity)
+        || home_directory.as_ref() == Some(&identity)
     {
         return Err(CompanionError::Proposal(format!(
             "refusing dangerous purge target {}",

@@ -31,9 +31,20 @@ pub(crate) struct CalendarEvidence {
     pub(crate) all_day: bool,
     pub(crate) interval_start: Option<String>,
     pub(crate) interval_end: Option<String>,
+    pub(crate) unsupported_reason: Option<String>,
     pub(crate) summary: String,
     pub(crate) source_file: String,
     pub(crate) sequence: i64,
+}
+
+struct OccurrenceIntervalInput<'a> {
+    start_params: &'a str,
+    start: &'a str,
+    end: Option<&'a (String, String)>,
+    timezone: &'a str,
+    daily: bool,
+    occurrence_date: NaiveDate,
+    start_utc: DateTime<Utc>,
 }
 
 #[derive(Debug, Serialize)]
@@ -314,9 +325,6 @@ pub(crate) fn parse_ics_event(
             _ => {}
         }
     }
-    if status == "CANCELLED" {
-        return;
-    }
     let Some(uid) = uid else {
         errors.push("missing UID".to_owned());
         return;
@@ -336,19 +344,9 @@ pub(crate) fn parse_ics_event(
         errors.push("floating time requires explicit timezone".to_owned());
         return;
     };
-    let duration = dtend
-        .as_ref()
-        .and_then(|(params, value)| {
-            event_duration(
-                &start_params,
-                &start_value,
-                params,
-                value,
-                all_day,
-                &timezone,
-            )
-        })
-        .unwrap_or_else(|| Duration::hours(1));
+    let daily = rrule
+        .as_deref()
+        .is_some_and(|rule| rule.contains("FREQ=DAILY"));
     let starts = occurrence_starts(
         &start_value,
         all_day,
@@ -359,12 +357,22 @@ pub(crate) fn parse_ics_event(
         errors,
     );
     for (occurrence_date, start_utc) in starts {
-        let (interval_start, interval_end) = if all_day {
-            (None, None)
+        let (interval_start, interval_end, unsupported_reason) = if status == "CANCELLED" {
+            (None, None, Some("calendar-event-cancelled".to_owned()))
+        } else if all_day {
+            (None, None, None)
         } else {
-            (
-                Some(start_utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
-                Some((start_utc + duration).to_rfc3339_opts(SecondsFormat::Secs, true)),
+            occurrence_interval(
+                OccurrenceIntervalInput {
+                    start_params: &start_params,
+                    start: &start_value,
+                    end: dtend.as_ref(),
+                    timezone: &timezone,
+                    daily,
+                    occurrence_date,
+                    start_utc,
+                },
+                errors,
             )
         };
         out.push(CalendarEvidence {
@@ -379,6 +387,7 @@ pub(crate) fn parse_ics_event(
             all_day,
             interval_start,
             interval_end,
+            unsupported_reason,
             summary: summary.clone(),
             source_file: path.display().to_string(),
             sequence,
@@ -407,73 +416,90 @@ pub(crate) fn occurrence_starts(
     let Some(first) = parse_ics_start(raw, all_day, timezone, errors) else {
         return Vec::new();
     };
-    let explicit_count = rrule.and_then(|rule| {
-        rule.split(';')
-            .find_map(|part| part.strip_prefix("COUNT=")?.parse::<usize>().ok())
-    });
+    let explicit_count = rrule.and_then(|rule| rrule_usize(rule, "COUNT"));
     let daily = rrule.is_some_and(|rule| rule.contains("FREQ=DAILY"));
-    let count = explicit_count
-        .unwrap_or_else(|| {
-            if daily {
-                let first_local_date = if all_day {
-                    first.date_naive()
-                } else {
-                    first
-                        .with_timezone(&timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC))
-                        .date_naive()
-                };
-                date.signed_duration_since(first_local_date)
-                    .num_days()
-                    .max(0) as usize
-                    + 1
-            } else {
-                1
-            }
-        })
-        .min(400);
-    let local_base = (!all_day && daily)
-        .then(|| NaiveDateTime::parse_from_str(raw.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok())
-        .flatten();
     let recurrence_tz = timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC);
-    let mut starts = Vec::new();
-    for index in 0..count {
-        let candidate = if let Some(base) = local_base {
-            let local = base + Duration::days(index as i64);
-            match recurrence_tz.from_local_datetime(&local) {
-                LocalResult::Single(value) => value.with_timezone(&Utc),
-                LocalResult::Ambiguous(early, _) => early.with_timezone(&Utc),
-                LocalResult::None => {
-                    errors.push(format!(
-                        "nonexistent local recurrence {local} in {timezone}"
-                    ));
-                    continue;
-                }
-            }
-        } else if daily {
-            first + Duration::days(index as i64)
-        } else {
-            first
-        };
-        if exdates.iter().any(|exdate| {
-            parse_ics_start(exdate, all_day, timezone, &mut Vec::new()) == Some(candidate)
-        }) {
-            continue;
-        }
-        let local_date = if all_day {
-            candidate.date_naive()
-        } else {
-            candidate
-                .with_timezone(&timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC))
-                .date_naive()
-        };
-        if local_date == date {
-            starts.push((local_date, candidate));
-        }
-        if !daily {
-            break;
+    let first_local_date = if all_day {
+        first.date_naive()
+    } else {
+        first.with_timezone(&recurrence_tz).date_naive()
+    };
+    if !daily {
+        return (first_local_date == date)
+            .then_some((date, first))
+            .into_iter()
+            .collect();
+    }
+
+    let interval = rrule
+        .and_then(|rule| rrule_usize(rule, "INTERVAL"))
+        .unwrap_or(1);
+    if interval == 0 {
+        errors.push("RRULE INTERVAL must be greater than zero".to_owned());
+        return Vec::new();
+    }
+    let elapsed_days = date.signed_duration_since(first_local_date).num_days();
+    if elapsed_days < 0 || elapsed_days % interval as i64 != 0 {
+        return Vec::new();
+    }
+    let occurrence_index = elapsed_days as usize / interval;
+    if explicit_count.is_some_and(|count| occurrence_index >= count) {
+        return Vec::new();
+    }
+
+    let candidate = if all_day {
+        date.and_hms_opt(0, 0, 0)
+            .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc))
+    } else if raw.ends_with('Z') {
+        NaiveDateTime::parse_from_str(raw.trim_end_matches('Z'), "%Y%m%dT%H%M%S")
+            .ok()
+            .and_then(|base| date.and_time(base.time()).and_local_timezone(Utc).single())
+    } else {
+        NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%S")
+            .ok()
+            .and_then(|base| localize(date.and_time(base.time()), recurrence_tz, timezone, errors))
+    };
+    let Some(candidate) = candidate else {
+        return Vec::new();
+    };
+    if let Some(until) = rrule.and_then(|rule| rrule_value(rule, "UNTIL")) {
+        if parse_ics_start(until, all_day, timezone, &mut Vec::new())
+            .is_some_and(|limit| candidate > limit)
+        {
+            return Vec::new();
         }
     }
-    starts
+    if exdates.iter().any(|exdate| {
+        parse_ics_start(exdate, all_day, timezone, &mut Vec::new()) == Some(candidate)
+    }) {
+        return Vec::new();
+    }
+    vec![(date, candidate)]
+}
+
+fn rrule_value<'a>(rule: &'a str, key: &str) -> Option<&'a str> {
+    rule.split(';')
+        .find_map(|part| part.strip_prefix(&format!("{key}=")))
+}
+
+fn rrule_usize(rule: &str, key: &str) -> Option<usize> {
+    rrule_value(rule, key)?.parse().ok()
+}
+
+fn localize(
+    naive: NaiveDateTime,
+    timezone: Tz,
+    timezone_name: &str,
+    errors: &mut Vec<String>,
+) -> Option<DateTime<Utc>> {
+    match timezone.from_local_datetime(&naive) {
+        LocalResult::Single(value) => Some(value.with_timezone(&Utc)),
+        LocalResult::Ambiguous(early, _) => Some(early.with_timezone(&Utc)),
+        LocalResult::None => {
+            errors.push(format!("nonexistent local time {naive} in {timezone_name}"));
+            None
+        }
+    }
 }
 
 pub(crate) fn parse_ics_start(
@@ -511,29 +537,97 @@ pub(crate) fn parse_ics_start(
     }
 }
 
-pub(crate) fn event_duration(
-    _start_params: &str,
-    start: &str,
-    end_params: &str,
-    end: &str,
-    all_day: bool,
-    timezone: &str,
-) -> Option<Duration> {
-    if !all_day {
-        let s = NaiveDateTime::parse_from_str(start.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok()?;
-        let e = NaiveDateTime::parse_from_str(end.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok()?;
-        return Some(e - s);
-    }
-    let mut errors = Vec::new();
-    let s = parse_ics_start(start, all_day, timezone, &mut errors)?;
-    let end_tz = param_value(end_params, "TZID").unwrap_or_else(|| timezone.to_owned());
-    let e = parse_ics_start(
+fn occurrence_interval(
+    input: OccurrenceIntervalInput<'_>,
+    errors: &mut Vec<String>,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let OccurrenceIntervalInput {
+        start_params,
+        start,
         end,
-        all_day || end_params.contains("VALUE=DATE"),
-        &end_tz,
-        &mut errors,
-    )?;
-    Some(e - s)
+        timezone,
+        daily,
+        occurrence_date,
+        start_utc,
+    } = input;
+    let start_text = Some(start_utc.to_rfc3339_opts(SecondsFormat::Secs, true));
+    let Some((end_params, end_raw)) = end else {
+        return (start_text, None, Some("missing-calendar-end".to_owned()));
+    };
+    if end_params.contains("VALUE=DATE") {
+        return (
+            start_text,
+            None,
+            Some("incompatible-calendar-end".to_owned()),
+        );
+    }
+    let start_zone = if start.ends_with('Z') {
+        "UTC".to_owned()
+    } else {
+        param_value(start_params, "TZID").unwrap_or_else(|| timezone.to_owned())
+    };
+    let end_zone = if end_raw.ends_with('Z') {
+        "UTC".to_owned()
+    } else {
+        param_value(end_params, "TZID").unwrap_or_else(|| start_zone.clone())
+    };
+    if start_zone != end_zone {
+        errors.push(format!(
+            "calendar interval endpoint timezone mismatch: {start_zone} != {end_zone}"
+        ));
+        return (
+            start_text,
+            None,
+            Some("endpoint-timezone-mismatch".to_owned()),
+        );
+    }
+
+    let end_utc = if daily {
+        let start_naive =
+            NaiveDateTime::parse_from_str(start.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok();
+        let end_naive =
+            NaiveDateTime::parse_from_str(end_raw.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok();
+        match (start_naive, end_naive) {
+            (Some(original_start), Some(original_end)) => {
+                let day_offset = original_end
+                    .date()
+                    .signed_duration_since(original_start.date())
+                    .num_days();
+                let selected_end_date = occurrence_date + Duration::days(day_offset);
+                let selected_end = selected_end_date.and_time(original_end.time());
+                if end_zone == "UTC" {
+                    Some(DateTime::<Utc>::from_naive_utc_and_offset(
+                        selected_end,
+                        Utc,
+                    ))
+                } else {
+                    end_zone
+                        .parse::<Tz>()
+                        .ok()
+                        .and_then(|tz| localize(selected_end, tz, &end_zone, errors))
+                }
+            }
+            _ => None,
+        }
+    } else {
+        parse_ics_start(end_raw, false, &end_zone, errors)
+    };
+    let Some(end_utc) = end_utc else {
+        return (start_text, None, Some("invalid-calendar-end".to_owned()));
+    };
+    if end_utc <= start_utc {
+        errors.push("calendar interval end must be after start".to_owned());
+        return (
+            start_text,
+            None,
+            Some("non-positive-calendar-interval".to_owned()),
+        );
+    }
+    (
+        start_text,
+        Some(end_utc.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        None,
+    )
 }
 
 pub(crate) fn normalize_ics_utc(raw: &str) -> Option<String> {
@@ -555,20 +649,13 @@ pub(crate) fn calendar_event(calendar: &CalendarEvidence) -> Result<JournalEvent
         .as_deref()
         .unwrap_or(&calendar.occurrence_date.to_string())
         .replace(':', "");
-    let event_id = format!(
-        "evidence.ics.{}.{}.{}",
-        calendar.uid.replace(['/', '#', ' '], "_"),
-        occurrence,
-        calendar.sequence
+    let logical_id = format!(
+        "{:x}",
+        Sha256::digest(format!("{}\0{occurrence}", calendar.uid).as_bytes())
     );
-    let supersedes = (calendar.sequence > 1).then(|| {
-        format!(
-            "evidence.ics.{}.{}.{}",
-            calendar.uid.replace(['/', '#', ' '], "_"),
-            occurrence,
-            calendar.sequence - 1
-        )
-    });
+    let event_id = format!("evidence.ics.{logical_id}.{}", calendar.sequence);
+    let supersedes = (calendar.sequence > 1)
+        .then(|| format!("evidence.ics.{logical_id}.{}", calendar.sequence - 1));
     let mut event = JournalEvent {
         schema_version: JOURNAL_SCHEMA_VERSION,
         event_id,
@@ -606,6 +693,7 @@ pub(crate) fn calendar_event(calendar: &CalendarEvidence) -> Result<JournalEvent
     };
     event.payload["intervalStart"] = calendar.interval_start.clone().into();
     event.payload["intervalEnd"] = calendar.interval_end.clone().into();
+    event.payload["unsupportedReason"] = calendar.unsupported_reason.clone().into();
     event.payload["summary"] = serde_json::json!(calendar.summary);
     event.integrity_hash = event_hash(&event).map_err(CompanionError::Serialize)?;
     Ok(event)
@@ -858,17 +946,27 @@ pub(crate) fn claude_hook_event_from_payload(
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| CompanionError::InvalidClaudeHook("missing session id".to_owned()))?;
-    let observed_at = payload
+    let supplied_observed_at = payload
         .get("timestamp")
         .or_else(|| payload.get("observed_at"))
         .or_else(|| payload.get("observedAt"))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(now_string);
-    let explicit_date = normalize_timestamp(&observed_at)
-        .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
-        .map(|timestamp| timestamp.date_naive())
-        .unwrap_or_else(|| Utc::now().date_naive());
+        .and_then(Value::as_str);
+    let observed_at = match supplied_observed_at {
+        Some(raw) => normalize_timestamp(raw).ok_or_else(|| {
+            CompanionError::InvalidClaudeHook(
+                "lifecycle timestamp must be a valid RFC 3339 instant".to_owned(),
+            )
+        })?,
+        None => now_string(),
+    };
+    let explicit_date = DateTime::parse_from_rfc3339(&observed_at)
+        .map_err(|_| {
+            CompanionError::InvalidClaudeHook(
+                "lifecycle timestamp must be a valid RFC 3339 instant".to_owned(),
+            )
+        })?
+        .date_naive();
+    let opaque_session_id = format!("session:{}", sha256_str(session_id));
     let cwd = payload
         .get("cwd")
         .or_else(|| payload.get("workspace"))
@@ -877,7 +975,7 @@ pub(crate) fn claude_hook_event_from_payload(
     let mut lifecycle_payload = serde_json::json!({
         "schemaVersion": CLAUDE_HOOK_SCHEMA_VERSION,
         "lifecycleKind": kind,
-        "sessionId": session_id,
+        "sessionId": opaque_session_id.clone(),
         "observedAt": observed_at,
         "repository": repo,
         "summary": format!("Claude Code {kind} captured locally for repository {repo}"),
@@ -891,13 +989,13 @@ pub(crate) fn claude_hook_event_from_payload(
     }
     let mut event = JournalEvent {
         schema_version: JOURNAL_SCHEMA_VERSION,
-        event_id: format!("evidence.claude.{session_id}.{kind}"),
+        event_id: format!("evidence.claude.{}.{kind}", sha256_str(session_id)),
         event_type: "evidence.claude.lifecycle".to_owned(),
         observed_at: observed_at.clone(),
         source: SourceProvenance {
             kind: "claude-code".to_owned(),
             adapter: CLAUDE_COLLECTOR.to_owned(),
-            reference: format!("{repo}#{session_id}"),
+            reference: format!("{repo}#{opaque_session_id}"),
         },
         collector: CollectorProvenance {
             name: CLAUDE_COLLECTOR.to_owned(),
@@ -930,4 +1028,129 @@ pub(crate) fn find_repo_link(cwd: Option<&str>) -> Option<String> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(ToOwned::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn scan(body: &str, date: &str) -> Result<Vec<CalendarEvidence>, Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let path = directory.path().join("calendar.ics");
+        fs::write(&path, body)?;
+        scan_ics_file(&path, NaiveDate::parse_from_str(date, "%Y-%m-%d")?)
+            .map_err(|errors| std::io::Error::other(errors.join("; ")).into())
+    }
+
+    #[test]
+    fn timed_event_without_end_remains_unsupported() -> Result<(), Box<dyn std::error::Error>> {
+        let events = scan(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:missing-end@example.test\nDTSTART;TZID=America/New_York:20260308T090000\nSUMMARY:Unknown duration\nEND:VEVENT\nEND:VCALENDAR\n",
+            "2026-03-08",
+        )?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interval_start.as_deref(),
+            Some("2026-03-08T13:00:00Z")
+        );
+        assert_eq!(events[0].interval_end, None);
+        assert_eq!(
+            events[0].unsupported_reason.as_deref(),
+            Some("missing-calendar-end")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn calendar_endpoints_are_normalized_independently_across_dst(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let events = scan(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:spring@example.test\nDTSTART;TZID=America/New_York:20260308T013000\nDTEND;TZID=America/New_York:20260308T033000\nSUMMARY:DST crossing\nEND:VEVENT\nEND:VCALENDAR\n",
+            "2026-03-08",
+        )?;
+        assert_eq!(
+            events[0].interval_start.as_deref(),
+            Some("2026-03-08T06:30:00Z")
+        );
+        assert_eq!(
+            events[0].interval_end.as_deref(),
+            Some("2026-03-08T07:30:00Z")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn old_daily_recurrence_selects_target_directly_without_iteration_cap(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let events = scan(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:old-daily@example.test\nDTSTART;TZID=America/New_York:20240101T090000\nDTEND;TZID=America/New_York:20240101T100000\nRRULE:FREQ=DAILY\nSUMMARY:Old recurring event\nEND:VEVENT\nEND:VCALENDAR\n",
+            "2026-03-08",
+        )?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].interval_start.as_deref(),
+            Some("2026-03-08T13:00:00Z")
+        );
+        assert_eq!(
+            events[0].interval_end.as_deref(),
+            Some("2026-03-08T14:00:00Z")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_is_a_tombstone_with_opaque_identity() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let events = scan(
+            "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:private.person@example.test\nDTSTART;TZID=America/New_York:20260308T090000\nDTEND;TZID=America/New_York:20260308T100000\nSTATUS:CANCELLED\nSEQUENCE:2\nSUMMARY:Cancelled secret meeting\nEND:VEVENT\nEND:VCALENDAR\n",
+            "2026-03-08",
+        )?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].status, "CANCELLED");
+        assert_eq!(
+            events[0].unsupported_reason.as_deref(),
+            Some("calendar-event-cancelled")
+        );
+        let journal = calendar_event(&events[0])?;
+        assert!(!journal.event_id.contains("private.person@example.test"));
+        assert!(!journal
+            .supersedes
+            .as_deref()
+            .unwrap_or_default()
+            .contains("private.person@example.test"));
+        Ok(())
+    }
+
+    #[test]
+    fn claude_lifecycle_rejects_non_timestamp_metadata_and_hashes_session_ids(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let malicious = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "password=hunter2",
+            "timestamp": "token=abc123 /home/alice/private",
+        });
+        let error = match claude_hook_event_from_payload(directory.path(), &malicious) {
+            Ok(_) => {
+                return Err(std::io::Error::other("malformed timestamp was accepted").into());
+            }
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("valid RFC 3339"));
+
+        let valid = serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "password=hunter2",
+            "timestamp": "2026-07-24T10:00:00Z",
+        });
+        let event = claude_hook_event_from_payload(directory.path(), &valid)?;
+        assert!(!event.event_id.contains("password=hunter2"));
+        assert!(!event.source.reference.contains("password=hunter2"));
+        assert!(!event.payload["sessionId"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("password=hunter2"));
+        Ok(())
+    }
 }
