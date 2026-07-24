@@ -1,50 +1,41 @@
 use crate::*;
 
 pub(crate) fn atomic_write(path: &Path, body: &[u8]) -> Result<(), CompanionError> {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let tmp = path.with_extension(format!(
-        "{}.tmp-{}-{nonce}",
-        path.extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("data"),
-        std::process::id()
-    ));
-    let result = (|| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)
-            .map_err(|source| CompanionError::Open {
-                path: tmp.clone(),
-                source,
-            })?;
-        file.write_all(body)
-            .and_then(|_| file.sync_all())
-            .map_err(|source| CompanionError::Write {
-                path: tmp.clone(),
-                source,
-            })?;
-        fs::rename(&tmp, path).map_err(|source| CompanionError::Write {
-            path: path.to_path_buf(),
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut file =
+        tempfile::NamedTempFile::new_in(parent).map_err(|source| CompanionError::Open {
+            path: parent.to_path_buf(),
             source,
         })?;
-        if let Some(parent) = path.parent() {
-            File::open(parent)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|source| CompanionError::Write {
-                    path: parent.to_path_buf(),
-                    source,
-                })?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    file.write_all(body)
+        .and_then(|_| file.as_file().sync_all())
+        .map_err(|source| CompanionError::Write {
+            path: file.path().to_path_buf(),
+            source,
+        })?;
+    file.persist(path).map_err(|error| CompanionError::Write {
+        path: path.to_path_buf(),
+        source: error.error,
+    })?;
+    sync_parent_directory(parent)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(parent: &Path) -> Result<(), CompanionError> {
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source| CompanionError::Write {
+            path: parent.to_path_buf(),
+            source,
+        })
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_parent: &Path) -> Result<(), CompanionError> {
+    Ok(())
 }
 
 pub(crate) fn persist_result(data_dir: &Path, result: &RunResult) -> Result<(), CompanionError> {

@@ -129,6 +129,7 @@ pub(crate) fn append_journal_event(
     let path = journal_path(data_dir);
     let mut file = OpenOptions::new()
         .create(true)
+        .read(true)
         .append(true)
         .open(&path)
         .map_err(|source| CompanionError::Open {
