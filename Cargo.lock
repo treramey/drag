@@ -661,6 +661,7 @@ version = "0.8.0"
 dependencies = [
  "assert_cmd",
  "chrono",
+ "chrono-tz",
  "clap",
  "predicates",
  "rusqlite",

@@ -191,6 +191,167 @@ fn collect_git_activity_emits_point_evidence_candidates_and_isolates_failures(
 }
 
 #[test]
+fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_and_safety(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let calendar = dir.path().join("work.ics");
+    std::fs::write(
+        &calendar,
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Drag Test//ICS//EN\r\nBEGIN:VTIMEZONE\r\nTZID:America/New_York\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:daily-standup@example.test\r\nDTSTART;TZID=America/New_York:20260308T013000\r\nDTEND;TZID=America/New_York:20260308T023000\r\nEXDATE;TZID=America/New_York:20260309T013000\r\nRRULE:FREQ=DAILY;COUNT=3\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Daily standup\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cancelled@example.test\r\nDTSTART;TZID=America/New_York:20260308T110000\r\nDTEND;TZID=America/New_York:20260308T120000\r\nSTATUS:CANCELLED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Cancelled meeting\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:all-day@example.test\r\nDTSTART;VALUE=DATE:20260308\r\nDTEND;VALUE=DATE:20260309\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSUMMARY:Office holiday\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:update@example.test\r\nDTSTART;TZID=America/New_York:20260308T140000\r\nDTEND;TZID=America/New_York:20260308T150000\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260301T120000Z\r\nSEQUENCE:1\r\nSUMMARY:Planning v1\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:update@example.test\r\nDTSTART;TZID=America/New_York:20260308T143000\r\nDTEND;TZID=America/New_York:20260308T153000\r\nSTATUS:CONFIRMED\r\nLAST-MODIFIED:20260302T120000Z\r\nSEQUENCE:2\r\nSUMMARY:Planning v2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+    )?;
+
+    let output = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "collect",
+            "--date",
+            "2026-03-08",
+            "--ics",
+            calendar.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let collected: Value = serde_json::from_slice(&output)?;
+    assert_eq!(collected["networkAccess"], false);
+    assert_eq!(
+        collected["calendar"]["events"]
+            .as_array()
+            .ok_or("events")?
+            .len(),
+        4
+    );
+    assert_eq!(
+        collected["calendar"]["failures"]
+            .as_array()
+            .ok_or("failures")?
+            .len(),
+        0
+    );
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "import"])
+        .assert()
+        .success();
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "import"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"imported\": 0"));
+
+    let bundle_out = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "bundle",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bundle: Value = serde_json::from_slice(&bundle_out)?;
+    let evidence = bundle["evidence"].as_array().ok_or("evidence")?;
+    assert_eq!(evidence.len(), 4);
+    assert!(evidence.iter().all(|event| event["source"] == "ics-local"));
+    assert!(!evidence.iter().any(|event| event["reference"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("cancelled@example.test")));
+
+    let standup = evidence
+        .iter()
+        .find(|event| {
+            event["reference"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("daily-standup@example.test#2026-03-08")
+        })
+        .ok_or("standup occurrence")?;
+    assert_eq!(standup["originalTimezone"], "America/New_York");
+    assert_eq!(standup["intervalStartUtc"], "2026-03-08T06:30:00Z");
+    assert_eq!(standup["intervalEndUtc"], "2026-03-08T07:30:00Z");
+    assert_eq!(standup["elapsedSeconds"], 3600);
+    assert!(standup["summary"]
+        .as_str()
+        .ok_or("summary")?
+        .contains("Daily standup"));
+
+    let all_day = evidence
+        .iter()
+        .find(|event| {
+            event["reference"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("all-day@example.test")
+        })
+        .ok_or("all day")?;
+    assert_eq!(all_day["elapsedSeconds"], Value::Null);
+    assert_eq!(all_day["intervalStartUtc"], Value::Null);
+
+    let updated = evidence
+        .iter()
+        .find(|event| {
+            event["reference"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("update@example.test")
+                && event["supersedes"].is_string()
+        })
+        .ok_or("updated event")?;
+    let superseded_id = updated["supersedes"].as_str().ok_or("supersedes")?;
+    let original = evidence
+        .iter()
+        .find(|event| event["id"] == superseded_id)
+        .ok_or("original")?;
+    assert_eq!(original["supersededBy"], updated["id"]);
+    Ok(())
+}
+
+#[test]
+fn collect_local_ics_fails_safely_for_bad_duplicate_floating_missing_zone_and_partial_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let bad = dir.path().join("bad.ics");
+    std::fs::write(
+        &bad,
+        "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:floating@example.test\nDTSTART:20260308T090000\nDTEND:20260308T100000\nEND:VEVENT\nBEGIN:VEVENT\nUID:missing-zone@example.test\nDTSTART;TZID=Missing/Zone:20260308T090000\nDTEND;TZID=Missing/Zone:20260308T100000\nEND:VEVENT\nBEGIN:VEVENT\nUID:partial@example.test\nDTSTART;TZID=America/New_York:20260308T090000\n",
+    )?;
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "collect",
+            "--date",
+            "2026-03-08",
+            "--ics",
+            bad.to_string_lossy().as_ref(),
+            "--ics",
+            bad.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "floating time requires explicit timezone",
+        ))
+        .stdout(predicate::str::contains("unknown timezone Missing/Zone"))
+        .stdout(predicate::str::contains("unterminated VEVENT"));
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "import"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"imported\": 0"));
+    Ok(())
+}
+
+#[test]
 fn collect_git_activity_covers_shallow_rewritten_and_unusual_subject_fixtures(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
