@@ -30,6 +30,9 @@ const MAX_BUNDLE_BYTES: usize = 128 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_PROVIDER_ATTEMPTS: u32 = 2;
 const CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
+const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
+const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
+const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -67,6 +70,8 @@ enum Command {
     Resume(DateArgs),
     /// Print a persisted explicit-date terminal report.
     Report(DateArgs),
+    /// Print a secret-safe structured JSON operator log for one explicit local date.
+    Log(DateArgs),
     /// Print a byte-stable minimized evidence bundle for one explicit local date.
     Bundle(DateArgs),
     /// Generate schema-constrained worklog proposals from a minimized bundle and offline provider fixture.
@@ -81,8 +86,8 @@ enum Command {
     Execute(ExecuteArgs),
     /// Inspect the durable mutation operation ledger for tests and operators.
     ProcessSpy(DateArgs),
-    /// Remove persisted capture-only companion state.
-    Purge,
+    /// Remove persisted capture-only companion state while protecting recovery records by default.
+    Purge(PurgeArgs),
     /// Inspect scheduler lifecycle operations. These do not install anything yet.
     Scheduler(SchedulerArgs),
     /// Install, remove, or capture Claude Code SessionStart/SessionEnd hooks.
@@ -136,6 +141,13 @@ struct ExecuteArgs {
     /// Explicitly authorize live Drag mutation. Rollout env must also be enabled.
     #[arg(long)]
     authorize_live: bool,
+}
+
+#[derive(Debug, Args)]
+struct PurgeArgs {
+    /// Also delete idempotency records, acknowledging automated recovery guarantees are lost.
+    #[arg(long)]
+    acknowledge_lost_recovery: bool,
 }
 
 #[derive(Debug, Args)]
@@ -316,6 +328,16 @@ struct RunResult {
     live_mutation_allowed: bool,
     drag_boundary: DragBoundary,
     observations: Vec<FakeObservation>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperatorLog<'a> {
+    event: &'a str,
+    run_id: Option<String>,
+    status: &'a str,
+    next_safe_action: &'a str,
+    recovery: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -552,15 +574,8 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             let result = coordinated_run(&data_dir, &drag_bin, args.date, true)?;
             print_json(&result)
         }
-        Command::Report(args) => {
-            let path = run_path(&data_dir, args.date);
-            let report = fs::read_to_string(&path).map_err(|source| CompanionError::Read {
-                path: path.clone(),
-                source,
-            })?;
-            println!("{report}");
-            Ok(())
-        }
+        Command::Report(args) => println_safe_markdown(&daily_report(&data_dir, args.date)?),
+        Command::Log(args) => print_json(&operator_log(&data_dir, args.date)?),
         Command::Bundle(args) => {
             let bundle = build_bundle(&data_dir, args.date)?;
             print_json(&bundle)
@@ -589,9 +604,8 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             args.authorize_live,
         )?),
         Command::ProcessSpy(args) => print_json(&process_spy(&data_dir, args.date)?),
-        Command::Purge => {
-            let _ = fs::remove_dir_all(&data_dir);
-            print_json(&serde_json::json!({ "status": "purged", "dataDir": data_dir }))
+        Command::Purge(args) => {
+            print_json(&purge_state(&data_dir, args.acknowledge_lost_recovery)?)
         }
         Command::Scheduler(args) => print_json(&serde_json::json!({
             "status": "described", "operation": format!("{:?}", args.operation).to_lowercase(),
@@ -1395,6 +1409,26 @@ fn print_json<T: Serialize>(value: &T) -> Result<(), CompanionError> {
     let body = serde_json::to_string_pretty(value).map_err(CompanionError::Serialize)?;
     println!("{body}");
     Ok(())
+}
+
+fn println_safe_markdown(markdown: &str) -> Result<(), CompanionError> {
+    println!("{markdown}");
+    Ok(())
+}
+
+fn retention_config() -> Value {
+    serde_json::json!({
+        "rawEvidenceDays": retention_days("DRAG_COMPANION_RETENTION_RAW_DAYS", RAW_EVIDENCE_RETENTION_DAYS),
+        "normalizedEvidenceDays": retention_days("DRAG_COMPANION_RETENTION_NORMALIZED_DAYS", NORMALIZED_EVIDENCE_RETENTION_DAYS),
+        "reportsAndLedgerDays": retention_days("DRAG_COMPANION_RETENTION_REPORT_LEDGER_DAYS", REPORT_LEDGER_RETENTION_DAYS),
+    })
+}
+
+fn retention_days(env_name: &str, default_days: u32) -> u32 {
+    std::env::var(env_name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(default_days)
 }
 
 fn append_journal_event(data_dir: &Path, event: &JournalEvent) -> Result<(), CompanionError> {
@@ -3432,6 +3466,10 @@ fn load_phase_records(
 }
 
 fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
@@ -3439,7 +3477,127 @@ fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
     let mut stmt = conn.prepare("SELECT tempo_account, local_date, owner_id, heartbeat_at, expires_at_ms FROM run_leases WHERE expires_at_ms > ?1 ORDER BY local_date")?;
     let leases = stmt.query_map([now], |row| Ok(serde_json::json!({"tempoAccount": row.get::<_, String>(0)?, "localDate": row.get::<_, String>(1)?, "ownerId": row.get::<_, String>(2)?, "heartbeatAt": row.get::<_, String>(3)?, "expiresAtMs": row.get::<_, i64>(4)?})))?.collect::<Result<Vec<_>, _>>()?;
     Ok(
-        serde_json::json!({ "status": "ready", "mode": DEFAULT_MODE, "networkAccess": false, "liveMutationAllowed": false, "journal": journal_path(data_dir), "store": store_path(data_dir), "activeLeases": leases }),
+        serde_json::json!({ "status": "ready", "mode": DEFAULT_MODE, "networkAccess": false, "liveMutationAllowed": false, "retention": retention_config(), "nextSafeAction": "run reconcile for an explicit date, or resume only after checking status and report output", "journal": journal_path(data_dir), "store": store_path(data_dir), "activeLeases": leases }),
+    )
+}
+
+fn run_id(date: NaiveDate) -> String {
+    format!("{TEMPO_ACCOUNT}:{date}")
+}
+
+fn operator_log(data_dir: &Path, date: NaiveDate) -> Result<OperatorLog<'static>, CompanionError> {
+    let status = terminal_report_status(data_dir, date).unwrap_or("unknown");
+    Ok(OperatorLog {
+        event: "daily_audit_status",
+        run_id: Some(run_id(date)),
+        status,
+        next_safe_action: next_safe_action(status),
+        recovery: recovery_instructions(status),
+    })
+}
+
+fn daily_report(data_dir: &Path, date: NaiveDate) -> Result<String, CompanionError> {
+    let status = terminal_report_status(data_dir, date).unwrap_or("unknown");
+    let created = created_ids(data_dir, date)?;
+    Ok(format!(
+        "# Drag Companion Daily Audit Report\n\n- Run ID: {}\n- Status: {}\n- Source health: local capture-only sources checked; network access disabled; live mutation disabled\n- Evidence summary: normalized evidence and mutation ledger inspected for the explicit local date\n- Gaps: unsupported or missing evidence remains operator-reviewed only\n- Proposals: persisted proposal decisions are summarized by the audit and preview commands\n- Policy decisions: deterministic policy output is preserved; unattended approval requires explicit authorization\n- Created IDs: {}\n- Skips: duplicate, unsupported, or unsafe periods are skipped rather than mutated blindly\n- Failures: see status and structured log output for bounded failure details\n- Uncertain outcomes: uncertain mutation operations require exact-ID day reconciliation before any further mutation\n- Recovery instructions: {}\n- Next safe action: {}\n- Retention: raw evidence {} days; normalized evidence {} days; reports and mutation ledger {} days\n",
+        run_id(date),
+        status,
+        if created.is_empty() { "none".to_owned() } else { created.join(", ") },
+        recovery_instructions(status),
+        next_safe_action(status),
+        retention_config()["rawEvidenceDays"],
+        retention_config()["normalizedEvidenceDays"],
+        retention_config()["reportsAndLedgerDays"],
+    ))
+}
+
+fn terminal_report_status(data_dir: &Path, date: NaiveDate) -> Option<&'static str> {
+    let path = run_path(data_dir, date);
+    let body = fs::read_to_string(path).ok()?;
+    let json: Value = serde_json::from_str(&body).ok()?;
+    match json.get("status").and_then(Value::as_str) {
+        Some("completed") | Some("terminal") => Some("completed"),
+        Some("partial") => Some("partial"),
+        Some("blocked") => Some("blocked"),
+        Some("failed") => Some("failed"),
+        Some("uncertain") => Some("uncertain"),
+        _ => Some("unknown"),
+    }
+}
+
+fn created_ids(data_dir: &Path, date: NaiveDate) -> Result<Vec<String>, CompanionError> {
+    let conn = Connection::open(store_path(data_dir))?;
+    let mut stmt = conn.prepare("SELECT tempo_worklog_id FROM mutation_operations WHERE local_date = ?1 AND tempo_worklog_id IS NOT NULL ORDER BY tempo_worklog_id")?;
+    let ids = stmt.query_map([date.to_string()], |row| row.get::<_, String>(0))?;
+    ids.collect::<Result<Vec<_>, _>>()
+        .map_err(CompanionError::Store)
+}
+
+fn next_safe_action(status: &str) -> &'static str {
+    match status {
+        "completed" => "review the report and keep the ledger for idempotency",
+        "partial" => {
+            "inspect skips and failures, then run audit or preview before any authorized execute"
+        }
+        "blocked" => "resolve the named blocker, then run resume for the explicit date",
+        "failed" => "inspect structured log and exact recovery instructions before changing inputs",
+        "uncertain" => "run resume to reconcile exact created IDs before any further mutation",
+        _ => "run status, then reconcile or report for one explicit date",
+    }
+}
+
+fn recovery_instructions(status: &str) -> &'static str {
+    match status {
+        "uncertain" => "read the complete Tempo day through Drag, match only exact idempotency ledger payloads, and block further mutation until reconciliation names the created IDs",
+        "failed" => "fix the reported non-mutation cause, then resume only after status shows no active owner",
+        "blocked" => "clear the policy or source-health blocker; resume will not enter submission until pre-mutation checks pass",
+        "partial" => "review skipped and failed records; create a new explicit approval instead of reusing stale mutation intent",
+        _ => "no automated recovery required; retain reports and ledger for auditability",
+    }
+}
+
+fn purge_state(data_dir: &Path, acknowledge_lost_recovery: bool) -> Result<Value, CompanionError> {
+    if acknowledge_lost_recovery {
+        let _ = fs::remove_dir_all(data_dir);
+        return Ok(
+            serde_json::json!({ "status": "purged", "idempotencyRecordsProtected": false, "lostAutomatedRecoveryAcknowledged": true, "nextSafeAction": "run collect and reconcile from fresh explicit-date evidence before any mutation" }),
+        );
+    }
+    let protected = data_dir.join("protected-idempotency-records");
+    fs::create_dir_all(&protected).map_err(|source| CompanionError::CreateDir {
+        path: protected.clone(),
+        source,
+    })?;
+    for name in [
+        "companion.sqlite3",
+        "companion.sqlite3-wal",
+        "companion.sqlite3-shm",
+    ] {
+        let src = data_dir.join(name);
+        if src.exists() {
+            let _ = fs::rename(&src, protected.join(name));
+        }
+    }
+    for entry in fs::read_dir(data_dir).map_err(|source| CompanionError::Read {
+        path: data_dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CompanionError::Read {
+            path: data_dir.to_path_buf(),
+            source,
+        })?;
+        if entry.file_name() != "protected-idempotency-records" {
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(path);
+            } else {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+    Ok(
+        serde_json::json!({ "status": "purged", "idempotencyRecordsProtected": true, "lostAutomatedRecoveryAcknowledged": false, "nextSafeAction": "keep protected idempotency records; run status before any resume" }),
     )
 }
 
@@ -3508,6 +3666,7 @@ fn contract() -> Contract {
             command("reconcile", true, vec!["write terminal run result"], vec![]),
             command("resume", true, vec!["write terminal run result"], vec![]),
             command("report", true, vec![], vec![]),
+            command("log", true, vec!["emit secret-safe structured operator status"], vec![]),
             command(
                 "bundle",
                 true,

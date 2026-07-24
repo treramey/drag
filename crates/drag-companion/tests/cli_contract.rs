@@ -8,6 +8,159 @@ fn companion() -> Result<Command, Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn operator_reports_logs_retention_and_purge_are_safe() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+
+    let status = companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status)?;
+    assert_eq!(status["retention"]["rawEvidenceDays"], 30);
+    assert_eq!(status["retention"]["normalizedEvidenceDays"], 90);
+    assert_eq!(status["retention"]["reportsAndLedgerDays"], 365);
+    assert!(status["nextSafeAction"]
+        .as_str()
+        .ok_or("next safe")?
+        .contains("resume only after"));
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            "2026-07-24",
+        ])
+        .assert()
+        .success();
+
+    let report = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "report",
+            "--date",
+            "2026-07-24",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Run ID"))
+        .stdout(predicate::str::contains("Source health"))
+        .stdout(predicate::str::contains("Evidence summary"))
+        .stdout(predicate::str::contains("Gaps"))
+        .stdout(predicate::str::contains("Proposals"))
+        .stdout(predicate::str::contains("Policy decisions"))
+        .stdout(predicate::str::contains("Created IDs"))
+        .stdout(predicate::str::contains("Skips"))
+        .stdout(predicate::str::contains("Failures"))
+        .stdout(predicate::str::contains("Uncertain outcomes"))
+        .stdout(predicate::str::contains("Recovery instructions"))
+        .stdout(predicate::str::contains("Next safe action"))
+        .get_output()
+        .stdout
+        .clone();
+    let report = String::from_utf8(report)?;
+    assert!(!report.contains("/home/"));
+    assert!(!report.to_ascii_lowercase().contains("token="));
+    assert!(!report.contains("retry mutation blindly"));
+
+    let log = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "log",
+            "--date",
+            "2026-07-24",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let log_text = String::from_utf8(log.clone())?;
+    assert!(!log_text.contains("/home/"));
+    let log: Value = serde_json::from_slice(log_text.as_bytes())?;
+    assert_eq!(log["event"], "daily_audit_status");
+    assert!(log["nextSafeAction"].is_string());
+
+    let purge = companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "purge"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let purge: Value = serde_json::from_slice(&purge)?;
+    assert_eq!(purge["idempotencyRecordsProtected"], true);
+    assert_eq!(purge["lostAutomatedRecoveryAcknowledged"], false);
+    assert!(data_dir.join("protected-idempotency-records").exists());
+
+    Ok(())
+}
+
+#[test]
+fn golden_operator_reports_cover_all_terminal_states() -> Result<(), Box<dyn std::error::Error>> {
+    for state in ["completed", "partial", "blocked", "failed", "uncertain"] {
+        let dir = tempdir()?;
+        let data_dir = dir.path().join("state");
+        companion()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "status"])
+            .assert()
+            .success();
+        let runs = data_dir.join("runs");
+        std::fs::create_dir_all(&runs)?;
+        std::fs::write(
+            runs.join("2026-07-25.json"),
+            serde_json::json!({ "date": "2026-07-25", "status": state }).to_string(),
+        )?;
+
+        let report = companion()?
+            .args([
+                "--data-dir",
+                data_dir.to_string_lossy().as_ref(),
+                "report",
+                "--date",
+                "2026-07-25",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let report = String::from_utf8(report)?;
+        assert!(
+            report.contains(&format!("Status: {state}")),
+            "missing {state}: {report}"
+        );
+        for heading in [
+            "Run ID",
+            "Source health",
+            "Evidence summary",
+            "Gaps",
+            "Proposals",
+            "Policy decisions",
+            "Created IDs",
+            "Skips",
+            "Failures",
+            "Uncertain outcomes",
+            "Recovery instructions",
+            "Next safe action",
+        ] {
+            assert!(report.contains(heading), "{state} missing {heading}");
+        }
+        assert!(!report.contains("/home/"));
+        assert!(!report.to_ascii_lowercase().contains("token="));
+        assert!(!report.contains("retry mutation blindly"));
+    }
+    Ok(())
+}
+
+#[test]
 fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
     companion()?
         .arg("--help")
@@ -18,6 +171,7 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("reconcile"))
         .stdout(predicate::str::contains("resume"))
         .stdout(predicate::str::contains("report"))
+        .stdout(predicate::str::contains("log"))
         .stdout(predicate::str::contains("purge"))
         .stdout(predicate::str::contains("scheduler"))
         .stdout(predicate::str::contains("claude-hook"));
@@ -66,6 +220,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         "reconcile",
         "resume",
         "report",
+        "log",
         "purge",
         "scheduler",
         "claude-hook",
