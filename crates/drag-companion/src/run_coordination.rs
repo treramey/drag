@@ -174,6 +174,10 @@ pub(crate) fn acquire_companion_state_lock(
     acquire_companion_state_lock_inner(data_dir, exclusive, false)
 }
 
+#[expect(
+    dead_code,
+    reason = "integration helper for exclusive rollout/execute coordination"
+)]
 pub(crate) fn acquire_companion_state_lock_wait(
     data_dir: &Path,
     exclusive: bool,
@@ -204,14 +208,17 @@ fn acquire_companion_state_lock_inner(
         .write(true)
         .open(&path)
         .map_err(|source| CompanionError::Open { path, source })?;
-    let lock_result = if exclusive && wait {
-        FileExt::lock_exclusive(&file)
-    } else if exclusive {
-        FileExt::try_lock_exclusive(&file)
-    } else if wait {
-        FileExt::lock_shared(&file)
-    } else {
-        FileExt::try_lock_shared(&file)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let lock_result = loop {
+        let attempt = if exclusive {
+            FileExt::try_lock_exclusive(&file)
+        } else {
+            FileExt::try_lock_shared(&file)
+        };
+        if !wait || attempt.is_ok() || std::time::Instant::now() >= deadline {
+            break attempt;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
     };
     lock_result.map_err(|_| {
         CompanionError::Proposal(

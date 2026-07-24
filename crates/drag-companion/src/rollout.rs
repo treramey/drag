@@ -168,9 +168,9 @@ pub(crate) fn handle_rollout(data_dir: &Path, args: RolloutArgs) -> Result<(), C
                 let gate = args
                     .gate
                     .unwrap_or_else(|| stage_gate_name(&state.stage).to_owned());
-                *gate_mut(&mut state, &gate)? = RolloutGate::default();
+                reset_gate_and_downstream(&mut state, &gate)?;
                 demote_after_unsafe_reset(&mut state, &gate);
-            } else if let Some(expansion) = args.expansion {
+            } else if let Some(expansion) = args.expansion.filter(|s| !s.trim().is_empty()) {
                 if !state.general_expansions.contains(&expansion) {
                     state.general_expansions.push(expansion);
                 }
@@ -258,6 +258,52 @@ pub(crate) fn demote_after_unsafe_reset(state: &mut RolloutState, gate: &str) {
     }
 }
 
+pub(crate) fn reset_gate_and_downstream(
+    state: &mut RolloutState,
+    gate: &str,
+) -> Result<(), CompanionError> {
+    let start = gate_order_index(gate)?;
+    let start = if start == gate_order_index("general")? {
+        gate_order_index("restricted")?
+    } else {
+        start
+    };
+    if start <= gate_order_index("fixture")? {
+        state.fixture = RolloutGate::default();
+    }
+    if start <= gate_order_index("replay")? {
+        state.replay = RolloutGate::default();
+    }
+    if start <= gate_order_index("shadow")? {
+        state.shadow = RolloutGate::default();
+    }
+    if start <= gate_order_index("reviewed")? {
+        state.reviewed = RolloutGate::default();
+    }
+    if start <= gate_order_index("restricted")? {
+        state.restricted = RolloutGate::default();
+    }
+    if start <= gate_order_index("general")? {
+        state.general = RolloutGate::default();
+        state.general_expansions.clear();
+    }
+    Ok(())
+}
+
+fn gate_order_index(gate: &str) -> Result<usize, CompanionError> {
+    match gate {
+        "fixture" => Ok(0),
+        "replay" | "historical-replay" => Ok(1),
+        "shadow" => Ok(2),
+        "reviewed" | "reviewed-batches" => Ok(3),
+        "restricted" | "restricted-autonomy" => Ok(4),
+        "general" | "general-autonomy" => Ok(5),
+        other => Err(CompanionError::Proposal(format!(
+            "unknown rollout gate {other}"
+        ))),
+    }
+}
+
 pub(crate) fn gate_passed(gate: &str, g: &RolloutGate) -> bool {
     match gate {
         "fixture" => g.schema_valid && g.provenance_retained && g.secrets_redacted,
@@ -284,7 +330,7 @@ pub(crate) fn gate_passed(gate: &str, g: &RolloutGate) -> bool {
                 && g.uncertain_outcome_retries == 0
                 && g.privacy_incidents == 0
         }
-        "general" | "general-autonomy" => true,
+        "general" | "general-autonomy" => false,
         _ => false,
     }
 }

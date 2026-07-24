@@ -8,8 +8,12 @@ pub(crate) struct Contract {
     pub(crate) config_dir: &'static str,
     pub(crate) data_dir: &'static str,
     pub(crate) adapters: Adapters,
-    pub(crate) network_access: bool,
-    pub(crate) live_mutation_allowed: bool,
+    pub(crate) default_network_access: bool,
+    pub(crate) possible_network_access: bool,
+    pub(crate) conditional_network_access: Vec<&'static str>,
+    pub(crate) default_live_mutation_allowed: bool,
+    pub(crate) possible_live_mutation_allowed: bool,
+    pub(crate) conditional_live_mutation_allowed: Vec<&'static str>,
     pub(crate) drag_boundary: DragBoundary,
     pub(crate) commands: Vec<CommandContract>,
 }
@@ -34,8 +38,12 @@ pub(crate) struct CommandContract {
     pub(crate) name: &'static str,
     pub(crate) requires_explicit_date: bool,
     pub(crate) side_effects: Vec<&'static str>,
-    pub(crate) network_access: bool,
-    pub(crate) live_mutation_allowed: bool,
+    pub(crate) default_network_access: bool,
+    pub(crate) possible_network_access: bool,
+    pub(crate) conditional_network_access: Vec<&'static str>,
+    pub(crate) default_live_mutation_allowed: bool,
+    pub(crate) possible_live_mutation_allowed: bool,
+    pub(crate) conditional_live_mutation_allowed: Vec<&'static str>,
     pub(crate) operations: Vec<&'static str>,
 }
 
@@ -59,8 +67,18 @@ pub(crate) fn contract() -> Contract {
         config_dir: "$DRAG_COMPANION_CONFIG or .drag-companion/config.json",
         data_dir: "$DRAG_COMPANION_DATA or .drag-companion",
         adapters: adapters(),
-        network_access: false,
-        live_mutation_allowed: false,
+        default_network_access: false,
+        possible_network_access: true,
+        conditional_network_access: vec![
+            "read/audit/preview/execute may invoke Drag public CLI operations that contact Tempo depending on Drag cache/config",
+        ],
+        default_live_mutation_allowed: false,
+        possible_live_mutation_allowed: true,
+        conditional_live_mutation_allowed: vec![
+            "execute requires --authorize-live",
+            "execute requires DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1",
+            "execute requires persisted rollout general-autonomy permission",
+        ],
         drag_boundary: drag_boundary(),
         commands: vec![
             command("status", false, vec![], vec![]),
@@ -93,7 +111,7 @@ pub(crate) fn contract() -> Contract {
                 vec!["read minimized bundle", "persist schema-valid proposals and safe provider metadata"],
                 vec![],
             ),
-            command("read", true, vec![], vec!["drag list through public CLI"]),
+            command("read", true, vec![], vec!["drag list through public CLI"]).with_possible_network(vec!["drag public CLI may contact Tempo depending on Drag cache/config"]),
             command(
                 "audit",
                 true,
@@ -103,8 +121,8 @@ pub(crate) fn contract() -> Contract {
                     "local duplicate and overlap comparison",
                     "deterministic unattended policy decisions require --authorize-unattended before approval",
                 ],
-            ),
-            command("preview", true, vec![], vec!["drag log --json - --dry-run through public CLI"]),
+            ).with_possible_network(vec!["drag list through public CLI may contact Tempo depending on Drag cache/config"]),
+            command("preview", true, vec![], vec!["drag log --json - --dry-run through public CLI"]).with_possible_network(vec!["drag dry-run public CLI may perform schema/client validation without creating worklogs"]),
             command(
                 "execute",
                 true,
@@ -116,13 +134,14 @@ pub(crate) fn contract() -> Contract {
                     "drag list complete day before create",
                     "drag log --json - only when --authorize-live and rollout env are enabled",
                 ],
-            ),
+            ).with_possible_network(vec!["drag list complete day before create", "drag log submission when live mutation conditions pass"]).with_possible_live_mutation(vec!["--authorize-live", "DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1", "persisted rollout permits general-autonomy"]),
             command(
                 "rollout",
                 false,
                 vec!["persist staged autonomy promotion evidence and reset reasons"],
                 vec!["status", "record", "promote", "effective-mode"],
             ),
+            command("replay", false, vec!["read recorded fixtures and compare deterministic outputs"], vec![]),
             command(
                 "process-spy",
                 true,
@@ -162,6 +181,7 @@ pub(crate) fn contract() -> Contract {
                 ],
                 vec!["install", "remove", "capture"],
             ),
+            command("contract", false, vec![], vec![]),
         ],
     }
 }
@@ -176,9 +196,27 @@ pub(crate) fn command(
         name,
         requires_explicit_date,
         side_effects,
-        network_access: false,
-        live_mutation_allowed: false,
+        default_network_access: false,
+        possible_network_access: false,
+        conditional_network_access: Vec::new(),
+        default_live_mutation_allowed: false,
+        possible_live_mutation_allowed: false,
+        conditional_live_mutation_allowed: Vec::new(),
         operations,
+    }
+}
+
+impl CommandContract {
+    fn with_possible_network(mut self, conditions: Vec<&'static str>) -> Self {
+        self.possible_network_access = true;
+        self.conditional_network_access = conditions;
+        self
+    }
+
+    fn with_possible_live_mutation(mut self, conditions: Vec<&'static str>) -> Self {
+        self.possible_live_mutation_allowed = true;
+        self.conditional_live_mutation_allowed = conditions;
+        self
     }
 }
 

@@ -424,12 +424,14 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     assert_eq!(installed["status"], "installed");
     assert_eq!(installed["hostSchedulerMutated"], false);
     let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
+    let catch_up_service = std::fs::read_to_string(systemd.join("drag-companion-catch-up.service"))?;
     let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
-    assert!(service.contains("scheduler catch-up"));
-    assert!(!service.contains("scheduler run --date"));
+    assert!(service.contains("scheduler run --date"));
+    assert!(service.contains("date +%%F"));
+    assert!(catch_up_service.contains("scheduler catch-up"));
     assert!(service.contains("data & state'"));
     assert!(timer.contains("18:45:00"));
-    assert!(timer.contains("Persistent=true"));
+    assert!(timer.contains("Persistent=false"));
     assert_eq!(
         std::fs::read_to_string(systemd.join("unrelated.timer"))?,
         "keep me"
@@ -448,12 +450,15 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
             .arg(&launchd),
     )?;
     let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
-    assert!(plist.contains("scheduler catch-up"));
-    assert!(!plist.contains("scheduler run --date"));
+    let catch_up_plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.catch-up.plist"))?;
+    assert!(plist.contains("scheduler run --date"));
+    assert!(plist.contains("date +%F"));
+    assert!(catch_up_plist.contains("scheduler catch-up"));
     assert!(plist.contains("data &amp; state"));
     assert!(plist.contains("<integer>18</integer>"));
     assert!(plist.contains("<integer>45</integer>"));
-    assert!(plist.contains("RunAtLoad"));
+    assert!(!plist.contains("RunAtLoad"));
+    assert!(catch_up_plist.contains("RunAtLoad"));
 
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -1005,6 +1010,36 @@ fn rollout_resets_unsafe_gate_expands_general_once_and_execute_needs_persisted_s
     )?;
     assert_eq!(gated["status"], "gated");
     assert_eq!(gated["liveMutationAllowed"], false);
+
+    seed_general_autonomy_rollout(data_dir.to_string_lossy().as_ref())?;
+    let general_reset = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "record",
+        "--gate",
+        "general",
+        "--unsafe-reason",
+        "unsafe general create",
+    ]))?;
+    assert_eq!(general_reset["stage"], "shadow");
+    assert_eq!(general_reset["gates"]["restricted"]["passed"], false);
+    assert_eq!(general_reset["liveMutationAllowed"], false);
+    for _ in 0..3 {
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote",
+        ]))?;
+    }
+    let still_blocked = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "status",
+    ]))?;
+    assert_eq!(still_blocked["liveMutationAllowed"], false);
     Ok(())
 }
 
@@ -1024,8 +1059,15 @@ fn contract_is_machine_readable_and_capture_only_by_default(
     assert_eq!(contract["defaultMode"], "capture-only");
     assert_eq!(contract["adapters"]["collector"], "fake");
     assert_eq!(contract["adapters"]["mutator"], "disabled");
-    assert_eq!(contract["networkAccess"], false);
-    assert_eq!(contract["liveMutationAllowed"], false);
+    assert_eq!(contract["defaultNetworkAccess"], false);
+    assert_eq!(contract["possibleNetworkAccess"], true);
+    assert_eq!(contract["defaultLiveMutationAllowed"], false);
+    assert_eq!(contract["possibleLiveMutationAllowed"], true);
+    assert!(contract["conditionalLiveMutationAllowed"]
+        .as_array()
+        .ok_or("top-level live conditions")?
+        .iter()
+        .any(|item| item == "execute requires DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1"));
 
     let commands = contract["commands"].as_array().ok_or("commands array")?;
     for required in [
@@ -1071,6 +1113,11 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         .ok_or("live conditions")?
         .iter()
         .any(|item| item == "--authorize-live"));
+    let replay = commands
+        .iter()
+        .find(|command| command["name"] == "replay")
+        .ok_or("replay command")?;
+    assert_eq!(replay["requiresExplicitDate"], false);
 
     let scheduler = commands
         .iter()
