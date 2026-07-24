@@ -103,7 +103,8 @@ fn operator_reports_logs_retention_and_purge_are_safe() -> Result<(), Box<dyn st
     let purge: Value = serde_json::from_slice(&purge)?;
     assert_eq!(purge["idempotencyRecordsProtected"], true);
     assert_eq!(purge["lostAutomatedRecoveryAcknowledged"], false);
-    assert!(data_dir.join("protected-idempotency-records").exists());
+    assert!(data_dir.join("companion.sqlite3").exists());
+    assert!(!data_dir.join("protected-idempotency-records").exists());
 
     Ok(())
 }
@@ -205,7 +206,7 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
 fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destructively(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
-    let data = dir.path().join("data");
+    let data = dir.path().join("data & state");
     let systemd = dir.path().join("systemd");
     let launchd = dir.path().join("launchd");
     std::fs::create_dir_all(&systemd)?;
@@ -228,6 +229,8 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
     let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
     assert!(service.contains("scheduler run --date"));
+    assert!(service.contains("date +%%F"));
+    assert!(service.contains("data & state'"));
     assert!(timer.contains("18:45:00"));
     assert!(timer.contains("Persistent=true"));
     assert_eq!(
@@ -249,9 +252,29 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     )?;
     let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
     assert!(plist.contains("scheduler run --date"));
+    assert!(plist.contains("date +%F"));
+    assert!(plist.contains("data &amp; state"));
     assert!(plist.contains("<integer>18</integer>"));
     assert!(plist.contains("<integer>45</integer>"));
     assert!(plist.contains("RunAtLoad"));
+
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args([
+            "scheduler",
+            "install",
+            "--platform",
+            "launchd",
+            "--timezone",
+            "America/New_York",
+            "--target-dir",
+        ])
+        .arg(&launchd)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "launchd calendar intervals use the system timezone",
+        ));
     Ok(())
 }
 
@@ -326,6 +349,11 @@ fn scheduler_catch_up_fixtures_cover_dst_timezone_sleep_duplicate_disabled_and_o
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let data = dir.path().join("data");
+    json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "enable"]),
+    )?;
 
     for (today, last_success, selected) in [
         ("2026-03-09", "2026-03-05", "2026-03-06"),
@@ -421,6 +449,20 @@ fn scheduler_migration_preserves_operation_keys_and_kill_switch_forces_shadow(
     );
     assert!(data.join("scheduler.json.bak").exists());
 
+    let resumed = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "run", "--date", "2026-07-22"]),
+    )?;
+    assert_eq!(resumed["status"], "ran");
+    assert_eq!(resumed["result"]["resumed"], true);
+    let duplicate = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "run", "--date", "2026-07-22"]),
+    )?;
+    assert_eq!(duplicate["status"], "duplicate");
+
     std::fs::write(data.join("scheduler.kill"), "operator stop")?;
     let shadow = json_output(
         companion()?
@@ -433,6 +475,41 @@ fn scheduler_migration_preserves_operation_keys_and_kill_switch_forces_shadow(
 }
 
 #[test]
+fn scheduler_rejects_corrupt_state_without_replacing_or_enabling_it(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data)?;
+    let state = data.join("scheduler.json");
+    std::fs::write(&state, "{not-json")?;
+
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args(["scheduler", "enable"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("scheduler state schema"));
+    assert_eq!(std::fs::read_to_string(&state)?, "{not-json");
+
+    for invalid in [
+        serde_json::json!({"schemaVersion": 2, "enabled": true, "operationKeys": "not-an-array"}),
+        serde_json::json!({"schemaVersion": "2", "enabled": true, "operationKeys": []}),
+        serde_json::json!({"schemaVersion": 99, "enabled": true, "operationKeys": []}),
+    ] {
+        let text = serde_json::to_string(&invalid)?;
+        std::fs::write(&state, &text)?;
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "enable"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("scheduler state schema"));
+        assert_eq!(std::fs::read_to_string(&state)?, text);
+    }
+    Ok(())
+}
+
+#[test]
 fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
@@ -441,7 +518,7 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
             .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
             .args(["scheduler", "status"]),
     )?;
-    assert_eq!(status["dragMachineContract"]["requiredVersion"], 1);
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 9);
     assert_eq!(status["dragMachineContract"]["compatible"], true);
     assert_eq!(status["package"]["name"], "drag-companion");
     assert_eq!(status["package"]["independent"], true);
@@ -497,7 +574,7 @@ fn rollout_persists_exact_stage_gates_and_forces_shadow_failures(
             "--gate",
             "replay",
             "--eligible-days",
-            "19",
+            "29",
             "--proposals",
             "100",
             "--issue-attribution-precision",
@@ -928,19 +1005,22 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
     let evidence = bundle["evidence"].as_array().ok_or("evidence")?;
     assert_eq!(evidence.len(), 4);
     assert!(evidence.iter().all(|event| event["source"] == "ics-local"));
-    assert!(!evidence.iter().any(|event| event["reference"]
+    assert!(!evidence.iter().any(|event| event["id"]
         .as_str()
         .unwrap_or_default()
         .contains("cancelled@example.test")));
+    assert!(evidence.iter().all(|event| event["reference"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("local-reference:sha256:")));
+    assert!(evidence.iter().all(|event| !event["reference"]
+        .as_str()
+        .unwrap_or_default()
+        .contains(calendar.to_string_lossy().as_ref())));
 
     let standup = evidence
         .iter()
-        .find(|event| {
-            event["reference"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("daily-standup@example.test#2026-03-08")
-        })
+        .find(|event| event["summary"] == "Daily standup")
         .ok_or("standup occurrence")?;
     assert_eq!(standup["originalTimezone"], "America/New_York");
     assert_eq!(standup["intervalStartUtc"], "2026-03-08T06:30:00Z");
@@ -953,25 +1033,14 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
 
     let all_day = evidence
         .iter()
-        .find(|event| {
-            event["reference"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("all-day@example.test")
-        })
+        .find(|event| event["summary"] == "Office holiday")
         .ok_or("all day")?;
     assert_eq!(all_day["elapsedSeconds"], Value::Null);
     assert_eq!(all_day["intervalStartUtc"], Value::Null);
 
     let updated = evidence
         .iter()
-        .find(|event| {
-            event["reference"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("update@example.test")
-                && event["supersedes"].is_string()
-        })
+        .find(|event| event["summary"] == "Planning v2" && event["supersedes"].is_string())
         .ok_or("updated event")?;
     let superseded_id = updated["supersedes"].as_str().ok_or("supersedes")?;
     let original = evidence
@@ -979,6 +1048,39 @@ fn collect_local_ics_imports_bounded_calendar_evidence_with_recurrence_updates_a
         .find(|event| event["id"] == superseded_id)
         .ok_or("original")?;
     assert_eq!(original["supersededBy"], updated["id"]);
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "collect",
+            "--date",
+            "2026-03-10",
+            "--ics",
+            calendar.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "import"])
+        .assert()
+        .success();
+    let dst_bundle = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "bundle",
+        "--date",
+        "2026-03-10",
+    ]))?;
+    let dst_standup = dst_bundle["evidence"]
+        .as_array()
+        .ok_or("DST evidence")?
+        .iter()
+        .find(|event| event["summary"] == "Daily standup")
+        .ok_or("DST standup occurrence")?;
+    assert_eq!(dst_standup["intervalStartUtc"], "2026-03-10T05:30:00Z");
+    assert_eq!(dst_standup["intervalEndUtc"], "2026-03-10T06:30:00Z");
+    assert_eq!(dst_standup["elapsedSeconds"], 3600);
     Ok(())
 }
 
@@ -1220,6 +1322,17 @@ fn capture_survives_restart_and_imports_idempotently_into_versioned_store(
         )?;
         assert_eq!(present, 1, "missing table {table}");
     }
+    let schema_version: i64 =
+        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
+    assert_eq!(schema_version, 2);
+    let decision_columns: Vec<String> = conn
+        .prepare("PRAGMA table_info(policy_decisions)")?
+        .query_map([], |row| row.get(1))?
+        .collect::<Result<_, _>>()?;
+    assert!(decision_columns.contains(&"reason_codes_json".to_owned()));
+    assert!(decision_columns.contains(&"evidence_trace_json".to_owned()));
     Ok(())
 }
 
@@ -1352,7 +1465,7 @@ fn seed_bundle_event(
     let conn =
         rusqlite::Connection::open(std::path::Path::new(data_dir).join("companion.sqlite3"))?;
     conn.execute(
-        "INSERT INTO evidence_events (event_id, event_type, observed_at, source_kind, source_adapter, source_reference, collector_name, collector_version, timestamp_source, timezone, explicit_date, privacy_classification, privacy_redacted, retention_policy, retain_until, supersedes, payload_json, integrity_hash) VALUES (?1, 'evidence.captured', '2026-03-08T00:00:00Z', 'fixture', 'fixture', ?2, 'fixture', 'test', ?3, ?4, '2026-03-08', 'local-fixture', 0, 'retain-until-user-purge', NULL, ?5, ?6, ?7)",
+        "INSERT INTO evidence_events (event_id, event_type, observed_at, source_kind, source_adapter, source_reference, collector_name, collector_version, timestamp_source, timezone, explicit_date, privacy_classification, privacy_redacted, retention_policy, retain_until, supersedes, payload_json, integrity_hash) VALUES (?1, 'evidence.captured', ?3, 'fixture', 'fixture', ?2, 'fixture', 'test', 'fixture-observed-at', ?4, '2026-03-08', 'local-fixture', 0, 'retain-until-user-purge', NULL, ?5, ?6, ?7)",
         rusqlite::params![id, reference, timestamp, timezone, supersedes, payload.to_string(), format!("sha256:{id}")],
     )?;
     Ok(())
@@ -1460,7 +1573,10 @@ fn bundle_handles_dedupe_supersession_contradictions_health_and_abandoned_sessio
     assert_eq!(bundle["evidence"][0]["abandonedSession"], true);
     assert_eq!(bundle["evidence"][0]["supersededBy"], "evidence.b");
     assert_eq!(bundle["evidence"][1]["elapsedSeconds"], 1800);
-    assert_eq!(bundle["contradictions"][0]["key"], "tempo-1");
+    assert!(bundle["contradictions"][0]["key"]
+        .as_str()
+        .ok_or("contradiction key")?
+        .starts_with("local-reference:sha256:"));
     assert_eq!(bundle["sourceHealth"][0]["health"], "degraded");
     Ok(())
 }
@@ -1473,7 +1589,7 @@ fn bundle_redacts_secrets_private_paths_and_instruction_framing(
     seed_bundle_event(
         &data_dir,
         "evidence.secret",
-        "safe#secret",
+        "/home/tmr/private/calendar.ics#secret",
         "2026-03-08T12:00:00Z",
         "UTC",
         None,
@@ -1592,6 +1708,28 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
         "echo keep-tool"
     );
     assert!(!serde_json::to_string(&removed)?.contains("drag-companion claude-hook capture"));
+    Ok(())
+}
+
+#[test]
+fn claude_hook_install_rejects_unknown_shapes_without_overwriting_them(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let settings = dir.path().join("settings.json");
+    let original = r#"{"theme":"dark","hooks":"managed-by-another-tool"}"#;
+    std::fs::write(&settings, original)?;
+
+    companion()?
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("hooks must be a JSON object"));
+    assert_eq!(std::fs::read_to_string(settings)?, original);
     Ok(())
 }
 
@@ -1834,6 +1972,25 @@ fn propose_rejects_schema_drift_invented_ids_overlaps_tools_and_invalid_json_wit
             "overlapping periods",
         ),
         (
+            "duplicate-id",
+            {
+                let mut v = valid_provider_response();
+                v["unsupportedPeriods"][0]["id"] = serde_json::json!("proposal-1");
+                v
+            },
+            "duplicate proposal or period id",
+        ),
+        (
+            "reversed-period",
+            {
+                let mut v = valid_provider_response();
+                v["proposals"][0]["supportedTime"]["end"] =
+                    serde_json::json!("2026-03-08T12:00:00Z");
+                v
+            },
+            "period end must be after start",
+        ),
+        (
             "tool-attempt",
             {
                 let mut v = valid_provider_response();
@@ -1968,8 +2125,14 @@ fn fake_drag(
     pages: Vec<Value>,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let bin = dir.path().join("fake-drag");
-    let page0 = serde_json::to_string(pages.first().unwrap_or(&serde_json::json!({})))?;
-    let page1 = serde_json::to_string(pages.get(1).unwrap_or(&serde_json::json!({})))?;
+    let page0 = serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "data": pages.first().unwrap_or(&serde_json::json!({})),
+    }))?;
+    let page1 = serde_json::to_string(&serde_json::json!({
+        "ok": true,
+        "data": pages.get(1).unwrap_or(&serde_json::json!({})),
+    }))?;
     std::fs::write(
         &bin,
         format!(
@@ -1977,13 +2140,17 @@ fn fake_drag(
 set -euo pipefail
 log="{}/commands.log"
 echo "$*" >> "$log"
+if [[ "$*" == *" schema" ]]; then
+  printf '{{"ok":true,"data":{{"schemaVersion":9,"name":"drag"}}}}'
+  exit 0
+fi
 if [[ "$*" == *" log "* ]]; then
   cat > "{}/stdin.json"
   if [[ "$*" != *"--dry-run"* ]]; then echo live mutation >&2; exit 9; fi
   printf '{{"status":"validated","dryRun":true}}'
   exit 0
 fi
-if [[ "$*" == *"--continue token-2"* ]]; then
+if [[ "$*" == *"--continue-from token-2"* ]]; then
   cat <<'JSON'
 {}
 JSON
@@ -2047,8 +2214,8 @@ fn seed_general_autonomy_rollout(data_dir: &str) -> Result<(), Box<dyn std::erro
         r#"{
   "stage": "general-autonomy",
   "fixture": {"eligibleDays":0,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
-  "replay": {"eligibleDays":20,"proposals":100,"issueAttributionPrecision":0.99,"supportedDurationPrecision":0.99,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
-  "shadow": {"eligibleDays":20,"proposals":100,"issueAttributionPrecision":0.99,"supportedDurationPrecision":0.99,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "replay": {"eligibleDays":30,"proposals":100,"issueAttributionPrecision":0.99,"supportedDurationPrecision":0.99,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "shadow": {"eligibleDays":30,"proposals":100,"issueAttributionPrecision":0.99,"supportedDurationPrecision":0.99,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
   "reviewed": {"eligibleDays":10,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":10,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
   "restricted": {"eligibleDays":20,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
   "general": {"eligibleDays":0,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
@@ -2071,8 +2238,12 @@ set -euo pipefail
 log="{0}/commands.log"
 state="{0}/remote.jsonl"
 echo "$*" >> "$log"
+if [[ "$*" == *" schema" ]]; then
+  printf '{{"ok":true,"data":{{"schemaVersion":9,"name":"drag"}}}}'
+  exit 0
+fi
 if [[ "$*" == *" list "* ]]; then
-  printf '{{"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":['
+  printf '{{"ok":true,"data":{{"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":['
   first=1
   if [[ -f "$state" ]]; then
     while IFS= read -r line; do
@@ -2081,18 +2252,19 @@ if [[ "$*" == *" list "* ]]; then
       printf '%s' "$line"
     done < "$state"
   fi
-  printf ']}}'
+  printf ']}}}}'
   exit 0
 fi
 if [[ "$*" == *" log "* ]]; then
   payload=$(cat)
   echo "$payload" > "{0}/last-stdin.json"
   if [[ "${{DRAG_FAULT:-}}" == "stdin" ]]; then exit 7; fi
+  if [[ -n "${{DRAG_EXEC_HOLD_SECONDS:-}}" ]]; then sleep "$DRAG_EXEC_HOLD_SECONDS"; fi
   id="tempo-$(( $(wc -l < "$state" 2>/dev/null || echo 0) + 1 ))"
   worklog=$(printf '%s' "$payload" | python3 -c 'import json,sys; p=json.load(sys.stdin); p["id"]=sys.argv[1]; print(json.dumps(p,separators=(",",":")))' "$id")
   echo "$worklog" >> "$state"
   if [[ "${{DRAG_FAULT:-}}" == "after-remote" ]]; then echo dropped >&2; exit 1; fi
-  printf '{{"tempoWorklogId":"%s"}}' "$id"
+  printf '{{"ok":true,"data":{{"id":"%s"}}}}' "$id"
   if [[ "${{DRAG_FAULT:-}}" == "after-response" ]]; then exit 1; fi
   exit 0
 fi
@@ -2152,6 +2324,28 @@ fn execute_is_gated_by_default_and_process_spy_starts_empty(
         .as_array()
         .ok_or("ops")?
         .is_empty());
+
+    seed_general_autonomy_rollout(&data)?;
+    std::fs::write(data_dir.join("scheduler.kill"), "operator stop")?;
+    let killed = companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(serde_json::from_slice::<Value>(&killed)?["status"], "gated");
+    assert!(!dir.path().join("commands.log").exists());
     Ok(())
 }
 
@@ -2188,7 +2382,7 @@ fn execute_persists_exact_payload_before_drag_confirms_id_and_reruns_idempotentl
     }
     let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
     assert_eq!(commands.matches(" log ").count(), 1);
-    assert!(commands.matches("list --date 2026-03-08").count() >= 2);
+    assert!(commands.matches("list 2026-03-08").count() >= 2);
     let spy = companion()?
         .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
         .assert()
@@ -2211,6 +2405,114 @@ fn execute_persists_exact_payload_before_drag_confirms_id_and_reruns_idempotentl
         )?)?
     );
     assert_eq!(op["submittingIntent"]["persistedBeforeDrag"], true);
+    assert_eq!(op["payload"]["issueKey"], "DRAG-154");
+    assert_eq!(op["payload"]["durationOrInterval"], "60m");
+    assert_eq!(op["payload"]["when"], "2026-03-08");
+    assert_eq!(op["payload"]["start"], "13:00");
+    assert!(op["payload"].get("end").is_none());
+
+    companion()?
+        .args(["--data-dir", &data, "purge"])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let retained: (String, String) = conn.query_row(
+        "SELECT state, payload_json FROM mutation_operations LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(retained.0, "confirmed");
+    assert_eq!(serde_json::from_str::<Value>(&retained.1)?, op["payload"]);
+    drop(conn);
+
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success();
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+    Ok(())
+}
+
+#[test]
+fn concurrent_execute_allows_only_one_live_submitter_per_account_and_date(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy().into_owned();
+    seed_approved_payload(
+        &data,
+        "proposal-concurrent",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&dir)?;
+    let args = [
+        "--data-dir",
+        data.as_str(),
+        "--drag-bin",
+        drag.to_str().ok_or("drag path")?,
+        "execute",
+        "--date",
+        "2026-03-08",
+        "--authorize-live",
+    ];
+    let mut first = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
+        .args(args)
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .env("DRAG_EXEC_HOLD_SECONDS", "0.5")
+        .stdout(std::process::Stdio::null())
+        .spawn()?;
+    for _ in 0..100 {
+        if std::fs::read_to_string(dir.path().join("commands.log"))
+            .is_ok_and(|commands| commands.contains(" log "))
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    companion()?
+        .args([
+            "--data-dir",
+            data.as_str(),
+            "purge",
+            "--acknowledge-lost-recovery",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("companion state is busy"));
+    assert!(data_dir.join("companion.sqlite3").exists());
+
+    let second = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
+        .args(args)
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .output()?;
+    assert!(!second.status.success());
+    assert!(String::from_utf8(second.stderr)?.contains("run already owned"));
+    assert!(first.wait()?.success());
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
     Ok(())
 }
 
@@ -2493,9 +2795,44 @@ fn drag_read_follows_continuations_preserving_date_and_never_mutates(
     assert_eq!(json["worklogs"].as_array().ok_or("worklogs")?.len(), 2);
     assert_eq!(json["worklogs"][0]["start"], "2026-03-08T15:00:00Z");
     let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
-    assert!(commands.contains("list --date 2026-03-08"));
-    assert!(commands.contains("--continue token-2"));
+    assert!(commands.contains("list 2026-03-08"));
+    assert!(commands.contains("--continue-from token-2"));
     assert!(!commands.contains(" log "));
+    Ok(())
+}
+
+#[test]
+fn drag_read_accepts_schema_v9_envelopes_and_nested_overnight_intervals(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let drag = fake_drag(
+        &dir,
+        vec![serde_json::json!({
+            "date": "2026-03-08",
+            "worklogs": [{
+                "id": "751393",
+                "issueKey": "DRAG-151",
+                "interval": {"startTime": "23:30", "endTime": "00:15"},
+                "description": "overnight maintenance",
+                "attributes": [{"key": "_Account_", "value": "RD"}]
+            }],
+            "pagination": {
+                "selectedDate": "2026-03-08",
+                "next": null,
+                "totalsComplete": true
+            }
+        })],
+    )?;
+    let output = json_output(companion()?.args([
+        "--drag-bin",
+        drag.to_string_lossy().as_ref(),
+        "read",
+        "--date",
+        "2026-03-08",
+    ]))?;
+    assert_eq!(output["worklogs"][0]["start"], "2026-03-08T23:30:00Z");
+    assert_eq!(output["worklogs"][0]["end"], "2026-03-09T00:15:00Z");
+    assert_eq!(output["worklogs"][0]["attributes"]["_Account_"], "RD");
     Ok(())
 }
 
@@ -2586,7 +2923,10 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
     }
     let dir = tempdir()?;
     let drag = dir.path().join("bad-drag");
-    std::fs::write(&drag, "#!/usr/bin/env bash\necho timeout >&2\nexit 1\n")?;
+    std::fs::write(
+        &drag,
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"schemaVersion\":9}'; exit 0; fi\necho timeout >&2\nexit 1\n",
+    )?;
     std::process::Command::new("chmod")
         .args(["+x", drag.to_str().ok_or("drag")?])
         .status()?;
@@ -2650,7 +2990,7 @@ fn drag_audit_normalizes_existing_worklogs_and_never_live_mutates(
     assert_eq!(json["duplicateProposalIds"][0], "proposal-audit");
     assert_eq!(json["overlappingProposalIds"][0], "proposal-audit");
     let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
-    assert!(commands.contains("list --date 2026-03-08"));
+    assert!(commands.contains("list 2026-03-08"));
     assert!(!commands.contains(" log "));
     Ok(())
 }
@@ -2799,6 +3139,21 @@ fn audit_policy_decisions_are_deterministic_exhaustive_and_preserve_unsupported_
             "missing {code}"
         );
     }
+    let persisted: (String, String, String, String) = conn.query_row(
+        "SELECT d.decision, d.reason_codes_json, d.evidence_trace_json, p.state FROM policy_decisions d JOIN proposals p ON p.id = d.proposal_id WHERE d.proposal_id = 'proposal-approved'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert_eq!(persisted.0, "approved");
+    assert_eq!(
+        serde_json::from_str::<Value>(&persisted.1)?,
+        serde_json::json!([])
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&persisted.2)?,
+        serde_json::json!(["evidence.git.abc123"])
+    );
+    assert_eq!(persisted.3, "approved");
     Ok(())
 }
 

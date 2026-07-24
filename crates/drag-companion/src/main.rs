@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use chrono::{
     DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone,
-    Utc,
+    Timelike, Utc,
 };
 use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
@@ -21,7 +21,7 @@ const DEFAULT_MODE: &str = "capture-only";
 const COLLECTOR_ADAPTER: &str = "fake";
 const MUTATOR_ADAPTER: &str = "disabled";
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
-const STORE_SCHEMA_VERSION: i64 = 1;
+const STORE_SCHEMA_VERSION: i64 = 2;
 const CLAUDE_HOOK_SCHEMA_VERSION: u32 = 1;
 const CLAUDE_COLLECTOR: &str = "claude-code-session-hook";
 const PROPOSAL_SCHEMA_VERSION: u32 = 1;
@@ -35,7 +35,7 @@ const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
 const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
 const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
 const SCHEDULER_SCHEMA_VERSION: u32 = 2;
-const DRAG_MACHINE_CONTRACT_VERSION: u32 = 1;
+const DRAG_MACHINE_CONTRACT_VERSION: u32 = 9;
 const DEFAULT_SCHEDULE_TIME: &str = "18:45";
 const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
 
@@ -201,6 +201,10 @@ struct RolloutRecordArgs {
     uncertain_outcome_retries: u64,
     #[arg(long, default_value_t = 0)]
     privacy_incidents: u64,
+    #[arg(long, default_value_t = 0)]
+    fabricated_material_fields: u64,
+    #[arg(long, default_value_t = 0)]
+    unsafe_retries: u64,
     /// Unsafe proposal reason. Resets the applicable gate.
     #[arg(long)]
     unsafe_reason: Option<String>,
@@ -681,6 +685,11 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
     let data_dir = cli
         .data_dir
         .unwrap_or_else(|| PathBuf::from(".drag-companion"));
+    let _state_lock = match &cli.command {
+        Command::Contract => None,
+        Command::Purge(_) => Some(acquire_companion_state_lock(&data_dir, true)?),
+        _ => Some(acquire_companion_state_lock(&data_dir, false)?),
+    };
 
     match cli.command {
         Command::Status => print_json(&status_payload(&data_dir)?),
@@ -1051,7 +1060,7 @@ fn run_replay(fixtures_dir: &Path, artifacts_dir: Option<&Path>) -> Result<Value
         let path = dir.join("replay-report.json");
         let text = serde_json::to_string_pretty(&report).map_err(CompanionError::Serialize)?;
         reject_replay_secret(&path, &text)?;
-        fs::write(&path, text).map_err(|source| CompanionError::Write { path, source })?;
+        atomic_write(&path, text.as_bytes())?;
     }
     Ok(report)
 }
@@ -1147,14 +1156,14 @@ fn scheduler_status(data_dir: &Path) -> Result<Value, CompanionError> {
                 source,
             }
         })?)
-        .unwrap_or_else(|_| serde_json::json!({}))
+        .map_err(|error| CompanionError::Proposal(format!("scheduler state schema: {error}")))?
     } else {
         serde_json::json!({})
     };
     Ok(serde_json::json!({
         "status": "ok",
         "schemaVersion": SCHEDULER_SCHEMA_VERSION,
-        "enabled": state.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        "enabled": state.get("enabled").and_then(Value::as_bool).unwrap_or(false),
         "killSwitchActive": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
         "mode": DEFAULT_MODE,
         "shadowModeForced": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
@@ -1177,15 +1186,31 @@ fn install_scheduler(
         path: data_dir.to_path_buf(),
         source,
     })?;
+    validate_time_and_timezone(&args.at, &args.timezone)?;
+    let timezone_prefix = if args.timezone == "local" {
+        String::new()
+    } else {
+        format!("TZ={} ", shell_quote(&args.timezone))
+    };
     let command = format!(
-        "{} --data-dir {} --drag-bin {} scheduler run --date %Y-%m-%d",
-        std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("drag-companion"))
-            .display(),
-        data_dir.display(),
-        drag_bin.display()
+        "{}{} --data-dir {} --drag-bin {} scheduler run --date \"$({}date +%F)\"",
+        timezone_prefix,
+        shell_quote(
+            &std::env::current_exe()
+                .unwrap_or_else(|_| PathBuf::from("drag-companion"))
+                .to_string_lossy()
+        ),
+        shell_quote(&data_dir.to_string_lossy()),
+        shell_quote(&drag_bin.to_string_lossy()),
+        timezone_prefix,
     );
     let installed = if args.platform == "launchd" {
+        if args.timezone != "local" {
+            return Err(CompanionError::Proposal(
+                "launchd calendar intervals use the system timezone; configure local or use systemd for an explicit IANA timezone"
+                    .to_owned(),
+            ));
+        }
         let plist = args.target_dir.join("email.trevors.drag-companion.plist");
         write_owned_file(&plist, &render_launchd(&command, &args.at, &args.timezone)?)?;
         vec![plist]
@@ -1248,6 +1273,12 @@ fn set_scheduler_enabled(data_dir: &Path, enabled: bool) -> Result<(), Companion
     let mut state = scheduler_status(data_dir)?["state"].clone();
     state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
     state["enabled"] = serde_json::json!(enabled);
+    if state.get("operationKeys").is_none() {
+        state["operationKeys"] = serde_json::json!([]);
+    }
+    if state.get("resumable").is_none() {
+        state["resumable"] = serde_json::json!(true);
+    }
     write_scheduler_state(data_dir, state)?;
     print_json(
         &serde_json::json!({ "status": if enabled { "enabled" } else { "disabled" }, "hostSchedulerMutated": false }),
@@ -1298,20 +1329,24 @@ fn scheduler_run_date(
     }
     let op_key = format!("scheduler.run.{date}");
     let mut state = status["state"].clone();
-    let mut keys = state["operationKeys"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    if keys.iter().any(|key| key == &serde_json::json!(op_key)) {
+    let mut keys = state["operationKeys"].as_array().cloned().ok_or_else(|| {
+        CompanionError::Proposal(
+            "scheduler state schema: operationKeys must be an array of strings".to_owned(),
+        )
+    })?;
+    let existing_key = keys.iter().any(|key| key == &serde_json::json!(op_key));
+    if existing_key && run_path(data_dir, date).exists() {
         return print_json(
             &serde_json::json!({ "status": "duplicate", "date": date, "operationKey": op_key, "mutationAllowed": false }),
         );
     }
-    keys.push(serde_json::json!(op_key));
-    state["operationKeys"] = Value::Array(keys);
-    state["lastAttemptedDate"] = serde_json::json!(date.to_string());
-    write_scheduler_state(data_dir, state)?;
-    let result = coordinated_run(data_dir, drag_bin, date, false)?;
+    if !existing_key {
+        keys.push(serde_json::json!(op_key));
+        state["operationKeys"] = Value::Array(keys);
+        state["lastAttemptedDate"] = serde_json::json!(date.to_string());
+        write_scheduler_state(data_dir, state)?;
+    }
+    let result = coordinated_run(data_dir, drag_bin, date, existing_key)?;
     print_json(
         &serde_json::json!({ "status": "ran", "date": date, "operationKey": op_key, "mutationAllowed": false, "result": result }),
     )
@@ -1334,18 +1369,37 @@ fn latest_eligible_missed_workday(
 }
 
 fn render_systemd_service(command: &str) -> String {
-    format!("# managed-by=drag-companion\n[Unit]\nDescription=Drag companion explicit-date reconciliation\n[Service]\nType=oneshot\nExecStart={command}\n")
+    let command = command.replace('%', "%%");
+    format!("# managed-by=drag-companion\n[Unit]\nDescription=Drag companion explicit-date reconciliation\n[Service]\nType=oneshot\nExecStart=/bin/sh -c {}\n", shell_quote(&command))
 }
 
 fn render_systemd_timer(at: &str, timezone: &str) -> Result<String, CompanionError> {
     validate_time_and_timezone(at, timezone)?;
-    Ok(format!("# managed-by=drag-companion\n[Unit]\nDescription=Run Drag companion at {at} {timezone}\n[Timer]\nOnCalendar=*-*-* {at}:00\nPersistent=true\nWakeSystem=false\n[Install]\nWantedBy=timers.target\n"))
+    let timezone_suffix = if timezone == "local" {
+        String::new()
+    } else {
+        format!(" {timezone}")
+    };
+    Ok(format!("# managed-by=drag-companion\n[Unit]\nDescription=Run Drag companion at {at} {timezone}\n[Timer]\nOnCalendar=*-*-* {at}:00{timezone_suffix}\nPersistent=true\nWakeSystem=false\n[Install]\nWantedBy=timers.target\n"))
 }
 
 fn render_launchd(command: &str, at: &str, timezone: &str) -> Result<String, CompanionError> {
     validate_time_and_timezone(at, timezone)?;
     let (hour, minute) = at.split_once(':').unwrap_or(("18", "45"));
-    Ok(format!("<!-- managed-by=drag-companion timezone={timezone} -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-companion</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{command}</string></array><key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict><key>RunAtLoad</key><true/></dict></plist>\n"))
+    Ok(format!("<!-- managed-by=drag-companion timezone={} -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-companion</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{}</string></array><key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict><key>RunAtLoad</key><true/></dict></plist>\n", xml_escape(timezone), xml_escape(command)))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
 }
 
 fn validate_time_and_timezone(at: &str, timezone: &str) -> Result<(), CompanionError> {
@@ -1386,10 +1440,7 @@ fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {
             path.display()
         )));
     }
-    fs::write(path, content).map_err(|source| CompanionError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
+    atomic_write(path, content.as_bytes())
 }
 
 fn write_scheduler_state(data_dir: &Path, state: Value) -> Result<(), CompanionError> {
@@ -1398,15 +1449,7 @@ fn write_scheduler_state(data_dir: &Path, state: Value) -> Result<(), CompanionE
         source,
     })?;
     let path = scheduler_state_path(data_dir);
-    let tmp = path.with_extension("json.tmp");
-    fs::write(
-        &tmp,
-        serde_json::to_vec_pretty(&state).map_err(CompanionError::Serialize)?,
-    )
-    .map_err(|source| CompanionError::Write {
-        path: tmp.clone(),
-        source,
-    })?;
+    let body = serde_json::to_vec_pretty(&state).map_err(CompanionError::Serialize)?;
     if path.exists() {
         let backup = path.with_extension("json.bak");
         fs::copy(&path, &backup).map_err(|source| CompanionError::Write {
@@ -1414,7 +1457,7 @@ fn write_scheduler_state(data_dir: &Path, state: Value) -> Result<(), CompanionE
             source,
         })?;
     }
-    fs::rename(&tmp, &path).map_err(|source| CompanionError::Write { path, source })
+    atomic_write(&path, &body)
 }
 
 fn migrate_scheduler_state(data_dir: &Path) -> Result<(), CompanionError> {
@@ -1426,14 +1469,73 @@ fn migrate_scheduler_state(data_dir: &Path) -> Result<(), CompanionError> {
         path: path.clone(),
         source,
     })?;
-    let mut state: Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-    if state["schemaVersion"].as_u64().unwrap_or(0) < SCHEDULER_SCHEMA_VERSION as u64 {
-        state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
-        state["resumable"] = serde_json::json!(true);
-        if state.get("operationKeys").is_none() {
-            state["operationKeys"] = serde_json::json!([]);
+    let mut state: Value = serde_json::from_str(&raw)
+        .map_err(|error| CompanionError::Proposal(format!("scheduler state schema: {error}")))?;
+    let object = state.as_object_mut().ok_or_else(|| {
+        CompanionError::Proposal("scheduler state schema: expected a JSON object".to_owned())
+    })?;
+    let version = match object.get("schemaVersion") {
+        Some(value) => value.as_u64().ok_or_else(|| {
+            CompanionError::Proposal(
+                "scheduler state schema: schemaVersion must be an unsigned integer".to_owned(),
+            )
+        })?,
+        None => 0,
+    };
+    if version > u64::from(SCHEDULER_SCHEMA_VERSION) {
+        return Err(CompanionError::Proposal(format!(
+            "scheduler state schema version {version} is newer than supported version {SCHEDULER_SCHEMA_VERSION}"
+        )));
+    }
+    if version < u64::from(SCHEDULER_SCHEMA_VERSION) {
+        object.insert(
+            "schemaVersion".to_owned(),
+            serde_json::json!(SCHEDULER_SCHEMA_VERSION),
+        );
+        object.insert("resumable".to_owned(), serde_json::json!(true));
+        if !object.contains_key("operationKeys") {
+            object.insert("operationKeys".to_owned(), serde_json::json!([]));
         }
+    }
+    validate_scheduler_state(object)?;
+    if version < u64::from(SCHEDULER_SCHEMA_VERSION) {
         write_scheduler_state(data_dir, state)?;
+    }
+    Ok(())
+}
+
+fn validate_scheduler_state(object: &serde_json::Map<String, Value>) -> Result<(), CompanionError> {
+    if object
+        .get("operationKeys")
+        .and_then(Value::as_array)
+        .is_none_or(|keys| !keys.iter().all(Value::is_string))
+    {
+        return Err(CompanionError::Proposal(
+            "scheduler state schema: operationKeys must be an array of strings".to_owned(),
+        ));
+    }
+    for field in ["platform", "at", "timezone", "lastAttemptedDate"] {
+        if object.get(field).is_some_and(|value| !value.is_string()) {
+            return Err(CompanionError::Proposal(format!(
+                "scheduler state schema: {field} must be a string"
+            )));
+        }
+    }
+    if object.get("installedFiles").is_some_and(|value| {
+        value
+            .as_array()
+            .is_none_or(|items| !items.iter().all(Value::is_string))
+    }) {
+        return Err(CompanionError::Proposal(
+            "scheduler state schema: installedFiles must be an array of strings".to_owned(),
+        ));
+    }
+    for field in ["enabled", "resumable"] {
+        if object.get(field).is_some_and(|value| !value.is_boolean()) {
+            return Err(CompanionError::Proposal(format!(
+                "scheduler state schema: {field} must be a boolean"
+            )));
+        }
     }
     Ok(())
 }
@@ -1441,7 +1543,9 @@ fn migrate_scheduler_state(data_dir: &Path) -> Result<(), CompanionError> {
 fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
     let mut settings = read_settings(settings_path)?;
     if !settings.is_object() {
-        settings = serde_json::json!({});
+        return Err(CompanionError::InvalidClaudeHook(
+            "settings must be a JSON object".to_owned(),
+        ));
     }
     let Some(settings_object) = settings.as_object_mut() else {
         return Err(CompanionError::InvalidClaudeHook(
@@ -1452,7 +1556,9 @@ fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
         .entry("hooks")
         .or_insert_with(|| serde_json::json!({}));
     if !hooks.is_object() {
-        *hooks = serde_json::json!({});
+        return Err(CompanionError::InvalidClaudeHook(
+            "hooks must be a JSON object".to_owned(),
+        ));
     }
     let Some(hooks_object) = hooks.as_object_mut() else {
         return Err(CompanionError::InvalidClaudeHook(
@@ -1464,7 +1570,9 @@ fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
             .entry(event)
             .or_insert_with(|| serde_json::json!([]));
         if !list.is_array() {
-            *list = serde_json::json!([]);
+            return Err(CompanionError::InvalidClaudeHook(format!(
+                "{event} hooks must be an array"
+            )));
         }
         let Some(arr) = list.as_array_mut() else {
             return Err(CompanionError::InvalidClaudeHook(format!(
@@ -1664,6 +1772,8 @@ fn parse_ics_event(
     let all_day = start_params.contains("VALUE=DATE");
     let timezone = if all_day {
         "all-day".to_owned()
+    } else if start_value.ends_with('Z') {
+        "UTC".to_owned()
     } else if let Some(tzid) = param_value(&start_params, "TZID") {
         tzid
     } else {
@@ -1741,17 +1851,49 @@ fn occurrence_starts(
     let Some(first) = parse_ics_start(raw, all_day, timezone, errors) else {
         return Vec::new();
     };
-    let count = rrule
-        .and_then(|rule| {
-            rule.split(';')
-                .find_map(|part| part.strip_prefix("COUNT=")?.parse::<usize>().ok())
-        })
-        .unwrap_or(1)
-        .min(400);
+    let explicit_count = rrule.and_then(|rule| {
+        rule.split(';')
+            .find_map(|part| part.strip_prefix("COUNT=")?.parse::<usize>().ok())
+    });
     let daily = rrule.is_some_and(|rule| rule.contains("FREQ=DAILY"));
+    let count = explicit_count
+        .unwrap_or_else(|| {
+            if daily {
+                let first_local_date = if all_day {
+                    first.date_naive()
+                } else {
+                    first
+                        .with_timezone(&timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC))
+                        .date_naive()
+                };
+                date.signed_duration_since(first_local_date)
+                    .num_days()
+                    .max(0) as usize
+                    + 1
+            } else {
+                1
+            }
+        })
+        .min(400);
+    let local_base = (!all_day && daily)
+        .then(|| NaiveDateTime::parse_from_str(raw.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok())
+        .flatten();
+    let recurrence_tz = timezone.parse::<Tz>().unwrap_or(chrono_tz::UTC);
     let mut starts = Vec::new();
     for index in 0..count {
-        let candidate = if daily {
+        let candidate = if let Some(base) = local_base {
+            let local = base + Duration::days(index as i64);
+            match recurrence_tz.from_local_datetime(&local) {
+                LocalResult::Single(value) => value.with_timezone(&Utc),
+                LocalResult::Ambiguous(early, _) => early.with_timezone(&Utc),
+                LocalResult::None => {
+                    errors.push(format!(
+                        "nonexistent local recurrence {local} in {timezone}"
+                    ));
+                    continue;
+                }
+            }
+        } else if daily {
             first + Duration::days(index as i64)
         } else {
             first
@@ -1790,6 +1932,11 @@ fn parse_ics_start(
             .and_hms_opt(0, 0, 0)
             .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
     }
+    if let Some(raw) = raw.strip_suffix('Z') {
+        return NaiveDateTime::parse_from_str(raw, "%Y%m%dT%H%M%S")
+            .ok()
+            .map(|value| DateTime::<Utc>::from_naive_utc_and_offset(value, Utc));
+    }
     let tz: Tz = match timezone.parse() {
         Ok(tz) => tz,
         Err(_) => {
@@ -1801,7 +1948,10 @@ fn parse_ics_start(
     match tz.from_local_datetime(&naive) {
         LocalResult::Single(dt) => Some(dt.with_timezone(&Utc)),
         LocalResult::Ambiguous(early, _) => Some(early.with_timezone(&Utc)),
-        LocalResult::None => Some(tz.from_utc_datetime(&naive).with_timezone(&Utc)),
+        LocalResult::None => {
+            errors.push(format!("nonexistent local time {naive} in {timezone}"));
+            None
+        }
     }
 }
 
@@ -1814,8 +1964,8 @@ fn event_duration(
     timezone: &str,
 ) -> Option<Duration> {
     if !all_day {
-        let s = NaiveDateTime::parse_from_str(start, "%Y%m%dT%H%M%S").ok()?;
-        let e = NaiveDateTime::parse_from_str(end, "%Y%m%dT%H%M%S").ok()?;
+        let s = NaiveDateTime::parse_from_str(start.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok()?;
+        let e = NaiveDateTime::parse_from_str(end.trim_end_matches('Z'), "%Y%m%dT%H%M%S").ok()?;
         return Some(e - s);
     }
     let mut errors = Vec::new();
@@ -2077,10 +2227,7 @@ fn write_settings(path: &Path, settings: &Value) -> Result<(), CompanionError> {
         })?;
     }
     let body = serde_json::to_vec_pretty(settings).map_err(CompanionError::Serialize)?;
-    fs::write(path, body).map_err(|source| CompanionError::Write {
-        path: path.to_path_buf(),
-        source,
-    })
+    atomic_write(path, &body)
 }
 
 fn is_our_hook_entry(entry: &Value) -> bool {
@@ -2193,7 +2340,7 @@ fn claude_hook_event_from_payload(
         payload: lifecycle_payload,
         integrity_hash: String::new(),
     };
-    event.integrity_hash = event_hash(&event).unwrap_or_default();
+    event.integrity_hash = event_hash(&event).map_err(CompanionError::Serialize)?;
     Ok(event)
 }
 
@@ -2249,6 +2396,11 @@ fn append_journal_event(data_dir: &Path, event: &JournalEvent) -> Result<(), Com
             path: path.clone(),
             source,
         })?;
+    file.lock_exclusive()
+        .map_err(|source| CompanionError::Open {
+            path: path.clone(),
+            source,
+        })?;
     let mut body = serde_json::to_vec(event).map_err(CompanionError::Serialize)?;
     body.push(b'\n');
     file.write_all(&body)
@@ -2256,7 +2408,11 @@ fn append_journal_event(data_dir: &Path, event: &JournalEvent) -> Result<(), Com
             path: path.clone(),
             source,
         })?;
-    file.sync_data()
+    file.sync_data().map_err(|source| CompanionError::Write {
+        path: path.clone(),
+        source,
+    })?;
+    file.unlock()
         .map_err(|source| CompanionError::Write { path, source })
 }
 
@@ -2373,6 +2529,26 @@ fn migrate(conn: &mut Connection) -> Result<(), CompanionError> {
 	         CREATE TABLE IF NOT EXISTS proposal_drag_resolutions (proposal_id TEXT NOT NULL REFERENCES proposals(id), name TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (proposal_id, name));
 	         CREATE TABLE IF NOT EXISTS proposal_policy_fields (proposal_id TEXT PRIMARY KEY REFERENCES proposals(id), evidence_refs_json TEXT NOT NULL, issue_key TEXT NOT NULL, supported_start TEXT NOT NULL, supported_end TEXT NOT NULL, description_facts_json TEXT NOT NULL, confidence REAL NOT NULL, limitations_json TEXT NOT NULL);"
 	    )?;
+    for ddl in [
+        "ALTER TABLE policy_decisions ADD COLUMN reason_codes_json TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE policy_decisions ADD COLUMN evidence_trace_json TEXT NOT NULL DEFAULT '[]'",
+    ] {
+        if let Err(error) = tx.execute(ddl, []) {
+            if !error.to_string().contains("duplicate column name") {
+                return Err(error.into());
+            }
+        }
+    }
+    let newest: Option<i64> =
+        tx.query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })?;
+    if newest.is_some_and(|version| version > STORE_SCHEMA_VERSION) {
+        return Err(CompanionError::Proposal(format!(
+            "store schema version {} is newer than supported version {STORE_SCHEMA_VERSION}",
+            newest.unwrap_or_default()
+        )));
+    }
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
         params![STORE_SCHEMA_VERSION, now_string()],
@@ -2432,7 +2608,7 @@ fn build_bundle(data_dir: &Path, date: NaiveDate) -> Result<EvidenceBundle, Comp
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     let mut stmt = conn.prepare(
-        "SELECT event_id, source_adapter, source_reference, timestamp_source, timezone, supersedes, payload_json \
+        "SELECT event_id, source_adapter, source_reference, observed_at, timezone, supersedes, payload_json \
          FROM evidence_events WHERE explicit_date = ?1 ORDER BY event_id ASC",
     )?;
     let rows = stmt.query_map([date.to_string()], |row| {
@@ -2448,6 +2624,7 @@ fn build_bundle(data_dir: &Path, date: NaiveDate) -> Result<EvidenceBundle, Comp
     })?;
 
     let mut evidence = Vec::new();
+    let mut contradiction_keys = std::collections::BTreeMap::new();
     for row in rows {
         let (
             id,
@@ -2474,10 +2651,14 @@ fn build_bundle(data_dir: &Path, date: NaiveDate) -> Result<EvidenceBundle, Comp
             (Some(start), Some(end)) => elapsed(start, end),
             _ => None,
         };
+        contradiction_keys.insert(
+            id.clone(),
+            minimized_reference(reference.split('#').next().unwrap_or(&reference)),
+        );
         evidence.push(BundleEvidence {
             id,
             source,
-            reference,
+            reference: minimized_reference(&reference),
             original_timestamp,
             original_timezone,
             observed_at_utc: normalize_timestamp(&point),
@@ -2505,11 +2686,8 @@ fn build_bundle(data_dir: &Path, date: NaiveDate) -> Result<EvidenceBundle, Comp
     let mut contradictions = Vec::new();
     let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
     for item in &evidence {
-        if let Some(key) = item.reference.split('#').next() {
-            by_key
-                .entry(key.to_owned())
-                .or_default()
-                .push(item.id.clone());
+        if let Some(key) = contradiction_keys.get(&item.id) {
+            by_key.entry(key.clone()).or_default().push(item.id.clone());
         }
     }
     for (key, ids) in by_key.into_iter().filter(|(_, ids)| ids.len() > 1) {
@@ -2772,12 +2950,16 @@ fn validate_provider_response(
         .map(|item| item.id.as_str())
         .collect::<std::collections::BTreeSet<_>>();
     let mut periods: Vec<(&str, &str, &str)> = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
     for proposal in &response.proposals {
         if proposal.id.trim().is_empty()
             || proposal.description_facts.is_empty()
             || proposal.limitations.is_empty()
         {
             return Err("missing required proposal fields".to_owned());
+        }
+        if !ids.insert(proposal.id.as_str()) {
+            return Err(format!("duplicate proposal or period id {}", proposal.id));
         }
         if proposal.issue_candidate.key.trim().is_empty()
             || !(0.0..=1.0).contains(&proposal.confidence)
@@ -2795,6 +2977,12 @@ fn validate_provider_response(
     for unsupported in &response.unsupported_periods {
         if unsupported.id.trim().is_empty() || unsupported.reason.trim().is_empty() {
             return Err("missing unsupported period fields".to_owned());
+        }
+        if !ids.insert(unsupported.id.as_str()) {
+            return Err(format!(
+                "duplicate proposal or period id {}",
+                unsupported.id
+            ));
         }
         validate_refs(&unsupported.evidence_refs, &evidence_ids)?;
         validate_period(&unsupported.start, &unsupported.end)?;
@@ -2877,13 +3065,14 @@ fn persist_proposals(
     date: NaiveDate,
     response: &ProviderResponse,
 ) -> Result<(), CompanionError> {
-    conn.execute("INSERT OR IGNORE INTO daily_bundles (id, explicit_date, state) VALUES (?1, ?2, 'proposed')", params![bundle_id, date.to_string()])?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("INSERT OR IGNORE INTO daily_bundles (id, explicit_date, state) VALUES (?1, ?2, 'proposed')", params![bundle_id, date.to_string()])?;
     for proposal in &response.proposals {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO proposals (id, bundle_id, state) VALUES (?1, ?2, 'proposed')",
             params![proposal.id, bundle_id],
         )?;
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 proposal.id,
@@ -2898,8 +3087,9 @@ fn persist_proposals(
         )?;
     }
     for unsupported in &response.unsupported_periods {
-        conn.execute("INSERT OR REPLACE INTO unsupported_periods (id, explicit_date, reason, state) VALUES (?1, ?2, ?3, 'proposed')", params![unsupported.id, date.to_string(), unsupported.reason])?;
+        tx.execute("INSERT OR REPLACE INTO unsupported_periods (id, explicit_date, reason, state) VALUES (?1, ?2, ?3, 'proposed')", params![unsupported.id, date.to_string(), unsupported.reason])?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -2990,19 +3180,21 @@ struct PreviewResult {
 }
 
 fn read_drag_day(drag_bin: &Path, date: NaiveDate) -> Result<DragReadResult, CompanionError> {
+    verify_drag_contract(drag_bin)?;
     let mut continuation: Option<String> = None;
+    let mut seen_continuations = std::collections::BTreeSet::new();
     let mut worklogs = Vec::new();
     let mut pages = 0;
+    let mut expected_total = None;
     loop {
         let mut args = vec![
             "--output".to_owned(),
             "json".to_owned(),
             "list".to_owned(),
-            "--date".to_owned(),
             date.to_string(),
         ];
         if let Some(next) = &continuation {
-            args.push("--continue".to_owned());
+            args.push("--continue-from".to_owned());
             args.push(next.clone());
         }
         let page = drag_json(drag_bin, &args, None, false)?;
@@ -3019,16 +3211,46 @@ fn read_drag_day(drag_bin: &Path, date: NaiveDate) -> Result<DragReadResult, Com
                 )
             })?;
         for item in items {
-            worklogs.push(normalize_worklog(item)?);
+            worklogs.push(normalize_worklog(item, date)?);
         }
-        let total = page.get("total").and_then(Value::as_u64);
-        continuation = page
-            .get("continuation")
+        let page_total = page.get("total").and_then(Value::as_u64);
+        if let Some(total) = page_total {
+            if expected_total
+                .replace(total)
+                .is_some_and(|expected| expected != total)
+            {
+                return Err(reconcile_error(
+                    ReconcileErrorKind::IncompleteRead,
+                    "worklog total changed between continuation pages",
+                ));
+            }
+        }
+        let pagination = page.get("pagination");
+        continuation = pagination
+            .and_then(|value| value.get("next"))
+            .or_else(|| page.get("continuation"))
             .or_else(|| page.get("next"))
             .and_then(Value::as_str)
             .map(ToOwned::to_owned);
         if continuation.is_none() {
+            if pagination.is_some()
+                && pagination
+                    .and_then(|value| value.get("totalsComplete"))
+                    .and_then(Value::as_bool)
+                    != Some(true)
+            {
+                return Err(reconcile_error(
+                    ReconcileErrorKind::IncompleteRead,
+                    "Drag pagination ended before totals were complete",
+                ));
+            }
             break;
+        }
+        if !seen_continuations.insert(continuation.clone().unwrap_or_default()) {
+            return Err(reconcile_error(
+                ReconcileErrorKind::IncompleteRead,
+                "Drag continuation cycle detected",
+            ));
         }
         if pages > 128 {
             return Err(reconcile_error(
@@ -3036,9 +3258,12 @@ fn read_drag_day(drag_bin: &Path, date: NaiveDate) -> Result<DragReadResult, Com
                 "page-bound exhaustion",
             ));
         }
-        if total.is_some_and(|total| worklogs.len() as u64 >= total) {
-            break;
-        }
+    }
+    if expected_total.is_some_and(|total| worklogs.len() as u64 != total) {
+        return Err(reconcile_error(
+            ReconcileErrorKind::IncompleteRead,
+            "Drag returned an incomplete worklog total",
+        ));
     }
     Ok(DragReadResult {
         status: "read",
@@ -3048,6 +3273,37 @@ fn read_drag_day(drag_bin: &Path, date: NaiveDate) -> Result<DragReadResult, Com
         network_access: true,
         live_mutation_allowed: false,
     })
+}
+
+fn verify_drag_contract(drag_bin: &Path) -> Result<(), CompanionError> {
+    let schema = drag_json(
+        drag_bin,
+        &[
+            "--output".to_owned(),
+            "json".to_owned(),
+            "schema".to_owned(),
+        ],
+        None,
+        true,
+    )?;
+    let version = schema
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "Drag schema response omitted schemaVersion",
+            )
+        })?;
+    if version != u64::from(DRAG_MACHINE_CONTRACT_VERSION) {
+        return Err(reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!(
+                "unsupported Drag schemaVersion {version}; expected {DRAG_MACHINE_CONTRACT_VERSION}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn audit_drag_day(
@@ -3091,6 +3347,7 @@ fn audit_drag_day(
         &overlapping_proposal_ids,
         authorize_unattended,
     );
+    persist_policy_decisions(data_dir, &decisions)?;
     let unsupported_periods = unsupported_period_decisions(data_dir, date)?;
     Ok(AuditResult {
         status: "audited",
@@ -3108,6 +3365,38 @@ fn audit_drag_day(
         network_access: true,
         live_mutation_allowed: false,
     })
+}
+
+fn persist_policy_decisions(
+    data_dir: &Path,
+    decisions: &[PolicyDecision],
+) -> Result<(), CompanionError> {
+    let conn = Connection::open(store_path(data_dir))?;
+    let tx = conn.unchecked_transaction()?;
+    for decision in decisions {
+        let decision_id = format!("policy.v{POLICY_SCHEMA_VERSION}.{}", decision.proposal_id);
+        let reason_codes =
+            serde_json::to_string(&decision.reason_codes).map_err(CompanionError::Serialize)?;
+        let evidence_trace =
+            serde_json::to_string(&decision.evidence_trace).map_err(CompanionError::Serialize)?;
+        tx.execute(
+            "INSERT INTO policy_decisions (id, proposal_id, decision, decided_at, reason_codes_json, evidence_trace_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(id) DO UPDATE SET decision = excluded.decision, decided_at = excluded.decided_at, reason_codes_json = excluded.reason_codes_json, evidence_trace_json = excluded.evidence_trace_json",
+            params![
+                decision_id,
+                decision.proposal_id,
+                decision.decision,
+                now_string(),
+                reason_codes,
+                evidence_trace,
+            ],
+        )?;
+        tx.execute(
+            "UPDATE proposals SET state = ?1 WHERE id = ?2",
+            params![decision.decision, decision.proposal_id],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn evaluate_policy_decisions(
@@ -3250,8 +3539,9 @@ fn preview_drag_payload(
     date: NaiveDate,
     proposal_id: Option<&str>,
 ) -> Result<PreviewResult, CompanionError> {
-    let mut payloads = proposal_payloads(data_dir, date, proposal_id)?;
-    let (_, payload) = payloads.pop().ok_or_else(|| {
+    verify_drag_contract(drag_bin)?;
+    let payloads = proposal_payloads(data_dir, date, proposal_id)?;
+    let (_, payload) = payloads.into_iter().next().ok_or_else(|| {
         reconcile_error(
             ReconcileErrorKind::IncompleteRead,
             "no proposal payload available",
@@ -3331,30 +3621,51 @@ fn drag_json(
         } else {
             ReconcileErrorKind::TransportAmbiguity
         };
-        return Err(reconcile_error(kind, stderr.trim().to_owned()));
+        let message = redact(stderr.trim());
+        return Err(reconcile_error(
+            kind,
+            if message.is_empty() {
+                "Drag command failed with redacted diagnostics".to_owned()
+            } else {
+                message
+            },
+        ));
     }
-    serde_json::from_slice(&output.stdout).map_err(|e| {
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|e| {
         reconcile_error(
             ReconcileErrorKind::SchemaIncompatibility,
             format!("invalid Drag JSON: {e}"),
         )
-    })
+    })?;
+    if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        return value.get("data").cloned().ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "Drag success envelope omitted data",
+            )
+        });
+    }
+    Ok(value)
 }
 
 fn assert_compatible_drag_page(page: &Value, date: NaiveDate) -> Result<(), CompanionError> {
-    let schema = page
+    let legacy_schema = page
         .get("schemaVersion")
         .or_else(|| page.get("schema_version"))
-        .and_then(Value::as_u64)
-        .unwrap_or(1);
-    if schema != 1 {
+        .and_then(Value::as_u64);
+    if legacy_schema.is_some_and(|schema| schema != 1) {
         return Err(reconcile_error(
             ReconcileErrorKind::SchemaIncompatibility,
-            format!("unsupported schemaVersion {schema}"),
+            format!(
+                "unsupported legacy page schemaVersion {}",
+                legacy_schema.unwrap_or_default()
+            ),
         ));
     }
     let selected = page
-        .get("selectedDate")
+        .get("pagination")
+        .and_then(|pagination| pagination.get("selectedDate"))
+        .or_else(|| page.get("selectedDate"))
         .or_else(|| page.get("date"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
@@ -3378,38 +3689,44 @@ fn assert_compatible_drag_page(page: &Value, date: NaiveDate) -> Result<(), Comp
     Ok(())
 }
 
-fn normalize_worklog(item: &Value) -> Result<NormalizedWorklog, CompanionError> {
+fn normalize_worklog(
+    item: &Value,
+    selected_date: NaiveDate,
+) -> Result<NormalizedWorklog, CompanionError> {
     let id = str_field(item, &["tempoWorklogId", "id"])?;
     let issue_key = str_field(item, &["issueKey", "issue"])?;
-    let start = normalize_timestamp(&str_field(item, &["start", "started", "intervalStart"])?)
-        .ok_or_else(|| {
-            reconcile_error(
-                ReconcileErrorKind::SchemaIncompatibility,
-                "invalid worklog start",
-            )
-        })?;
-    let end = normalize_timestamp(&str_field(item, &["end", "intervalEnd"])?).ok_or_else(|| {
-        reconcile_error(
-            ReconcileErrorKind::SchemaIncompatibility,
-            "invalid worklog end",
-        )
-    })?;
+    let (start, end) = if let Some(interval) = item.get("interval") {
+        let start_time = str_field(interval, &["startTime"])?;
+        let end_time = str_field(interval, &["endTime"])?;
+        canonical_wall_interval(selected_date, &start_time, &end_time)?
+    } else if item.get("durationOrInterval").is_some() {
+        normalize_drag_log_input(item)?
+    } else {
+        let start = normalize_timestamp(&str_field(item, &["start", "started", "intervalStart"])?)
+            .ok_or_else(|| {
+                reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    "invalid worklog start",
+                )
+            })?;
+        let end =
+            normalize_timestamp(&str_field(item, &["end", "intervalEnd"])?).ok_or_else(|| {
+                reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    "invalid worklog end",
+                )
+            })?;
+        (start, end)
+    };
+    validate_period(&start, &end)
+        .map_err(|message| reconcile_error(ReconcileErrorKind::SchemaIncompatibility, message))?;
     let description = item
         .get("description")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim()
         .to_owned();
-    let attributes = item
-        .get("attributes")
-        .and_then(Value::as_object)
-        .map(|attrs| {
-            attrs
-                .iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.trim().to_owned())))
-                .collect()
-        })
-        .unwrap_or_default();
+    let attributes = normalize_attributes(item.get("attributes"))?;
     Ok(NormalizedWorklog {
         tempo_worklog_id: id,
         issue_key,
@@ -3424,42 +3741,89 @@ fn normalize_payload_worklog(
     payload: &Value,
     id: &str,
 ) -> Result<NormalizedWorklog, CompanionError> {
-    Ok(NormalizedWorklog {
-        tempo_worklog_id: id.to_owned(),
-        issue_key: str_field(payload, &["issueKey"])?,
-        start: normalize_timestamp(&str_field(payload, &["start", "intervalStart"])?).ok_or_else(
-            || {
+    let (start, end) = if payload.get("durationOrInterval").is_some() {
+        normalize_drag_log_input(payload)?
+    } else {
+        let start = normalize_timestamp(&str_field(payload, &["start", "intervalStart"])?)
+            .ok_or_else(|| {
                 reconcile_error(
                     ReconcileErrorKind::SchemaIncompatibility,
                     "invalid payload start",
                 )
-            },
-        )?,
-        end: normalize_timestamp(&str_field(payload, &["end", "intervalEnd"])?).ok_or_else(
+            })?;
+        let end = normalize_timestamp(&str_field(payload, &["end", "intervalEnd"])?).ok_or_else(
             || {
                 reconcile_error(
                     ReconcileErrorKind::SchemaIncompatibility,
                     "invalid payload end",
                 )
             },
-        )?,
+        )?;
+        (start, end)
+    };
+    validate_period(&start, &end)
+        .map_err(|message| reconcile_error(ReconcileErrorKind::SchemaIncompatibility, message))?;
+    Ok(NormalizedWorklog {
+        tempo_worklog_id: id.to_owned(),
+        issue_key: str_field(payload, &["issueKey"])?,
+        start,
+        end,
         description: payload
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .trim()
             .to_owned(),
-        attributes: payload
-            .get("attributes")
-            .and_then(Value::as_object)
-            .map(|attrs| {
-                attrs
-                    .iter()
-                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.trim().to_owned())))
-                    .collect()
-            })
-            .unwrap_or_default(),
+        attributes: normalize_attributes(payload.get("attributes"))?,
     })
+}
+
+fn normalize_attributes(
+    value: Option<&Value>,
+) -> Result<std::collections::BTreeMap<String, String>, CompanionError> {
+    let Some(value) = value else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    if value.is_null() {
+        return Ok(std::collections::BTreeMap::new());
+    }
+    if let Some(attributes) = value.as_object() {
+        return attributes
+            .iter()
+            .map(|(key, value)| {
+                value
+                    .as_str()
+                    .map(|value| (key.clone(), value.trim().to_owned()))
+                    .ok_or_else(|| {
+                        reconcile_error(
+                            ReconcileErrorKind::SchemaIncompatibility,
+                            format!("attribute {key} must be a string"),
+                        )
+                    })
+            })
+            .collect();
+    }
+    if let Some(attributes) = value.as_array() {
+        let mut normalized = std::collections::BTreeMap::new();
+        for attribute in attributes {
+            let key = str_field(attribute, &["key"])?;
+            let value = str_field(attribute, &["value"])?;
+            if normalized
+                .insert(key.clone(), value.trim().to_owned())
+                .is_some()
+            {
+                return Err(reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    format!("duplicate attribute {key}"),
+                ));
+            }
+        }
+        return Ok(normalized);
+    }
+    Err(reconcile_error(
+        ReconcileErrorKind::SchemaIncompatibility,
+        "attributes must be an object or key/value array",
+    ))
 }
 
 fn proposal_payloads(
@@ -3481,11 +3845,129 @@ fn proposal_payloads(
         let end = resolve_drag_required_text(&conn, &id, "end")?;
         let description = resolve_drag_required_text(&conn, &id, "description")?;
         let attributes: Value =
-            serde_json::from_str(&resolve_drag_required_text(&conn, &id, "attributes")?)
-                .unwrap_or_else(|_| serde_json::json!({}));
-        out.push((id, serde_json::json!({"issueKey": issue, "start": start, "end": end, "description": description, "attributes": attributes})));
+            serde_json::from_str(&resolve_drag_required_text(&conn, &id, "attributes")?).map_err(
+                |error| {
+                    reconcile_error(
+                        ReconcileErrorKind::SchemaIncompatibility,
+                        format!("invalid resolved attributes for {id}: {error}"),
+                    )
+                },
+            )?;
+        let start = DateTime::parse_from_rfc3339(&start).map_err(|_| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!("invalid resolved start for {id}"),
+            )
+        })?;
+        let end = DateTime::parse_from_rfc3339(&end).map_err(|_| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!("invalid resolved end for {id}"),
+            )
+        })?;
+        let duration_seconds = end.signed_duration_since(start).num_seconds();
+        if duration_seconds <= 0 || duration_seconds % 60 != 0 {
+            return Err(reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!("resolved interval for {id} must be positive and minute-aligned"),
+            ));
+        }
+        if start.date_naive() != date
+            || start.time().second() != 0
+            || start.time().nanosecond() != 0
+        {
+            return Err(reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!(
+                    "resolved start for {id} must use the selected local date and minute precision"
+                ),
+            ));
+        }
+        out.push((
+            id,
+            serde_json::json!({
+                "issueKey": issue,
+                "durationOrInterval": format!("{}m", duration_seconds / 60),
+                "when": date,
+                "start": start.format("%H:%M").to_string(),
+                "description": description,
+                "attributes": attributes,
+            }),
+        ));
     }
     Ok(out)
+}
+
+fn normalize_drag_log_input(payload: &Value) -> Result<(String, String), CompanionError> {
+    let date =
+        NaiveDate::parse_from_str(&str_field(payload, &["when"])?, "%Y-%m-%d").map_err(|_| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "invalid Drag log input date",
+            )
+        })?;
+    let start = parse_clock(&str_field(payload, &["start"])?)?;
+    let duration = str_field(payload, &["durationOrInterval"])?;
+    let minutes = duration
+        .strip_suffix('m')
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "Drag log input duration must be positive whole minutes",
+            )
+        })?;
+    let start = NaiveDateTime::new(date, start);
+    let end = start
+        .checked_add_signed(Duration::minutes(minutes))
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "Drag log input interval overflow",
+            )
+        })?;
+    Ok((
+        canonical_wall_timestamp(start),
+        canonical_wall_timestamp(end),
+    ))
+}
+
+fn canonical_wall_interval(
+    date: NaiveDate,
+    start: &str,
+    end: &str,
+) -> Result<(String, String), CompanionError> {
+    let start = NaiveDateTime::new(date, parse_clock(start)?);
+    let mut end = NaiveDateTime::new(date, parse_clock(end)?);
+    if end <= start {
+        end = end.checked_add_signed(Duration::days(1)).ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "worklog interval overflow",
+            )
+        })?;
+    }
+    Ok((
+        canonical_wall_timestamp(start),
+        canonical_wall_timestamp(end),
+    ))
+}
+
+fn parse_clock(raw: &str) -> Result<chrono::NaiveTime, CompanionError> {
+    ["%H:%M:%S", "%H:%M"]
+        .into_iter()
+        .find_map(|format| chrono::NaiveTime::parse_from_str(raw, format).ok())
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!("invalid worklog clock time {raw}"),
+            )
+        })
+}
+
+fn canonical_wall_timestamp(value: NaiveDateTime) -> String {
+    format!("{}Z", value.format("%Y-%m-%dT%H:%M:%S"))
 }
 
 fn proposal_policy_inputs(
@@ -3610,19 +4092,113 @@ fn elapsed(start: &str, end: &str) -> Option<i64> {
 }
 
 fn redact(raw: &str) -> String {
-    raw.split_whitespace()
-        .filter(|word| {
-            let lower = word.to_ascii_lowercase();
-            !(lower.contains("token=")
-                || lower.contains("password=")
-                || lower.contains("secret")
-                || lower.contains("/home/")
-                || lower.contains("transcript")
-                || lower.contains("ignore")
-                || lower.contains("instruction"))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let words = raw.split_whitespace().collect::<Vec<_>>();
+    let mut safe = Vec::new();
+    let mut skip_next = false;
+    for word in words {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        let lower = word
+            .trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+            })
+            .to_ascii_lowercase();
+        let secret_label = [
+            "token",
+            "password",
+            "passwd",
+            "api_key",
+            "api-key",
+            "apikey",
+            "authorization",
+            "client_secret",
+            "access_token",
+            "refresh_token",
+        ]
+        .iter()
+        .find(|label| lower.starts_with(**label));
+        if secret_label.is_some() {
+            skip_next = lower.ends_with(':') || lower.ends_with('=');
+            continue;
+        }
+        if lower == "bearer" {
+            skip_next = true;
+            continue;
+        }
+        if lower.starts_with("bearer")
+            || lower.starts_with("sk-")
+            || lower.starts_with("ghp_")
+            || lower.starts_with("github_pat_")
+            || lower.starts_with("akia")
+            || lower.contains("secret")
+            || lower.contains("/home/")
+            || lower.contains("/users/")
+            || lower.contains("\\users\\")
+            || lower.contains("transcript")
+            || lower.contains("ignore")
+            || lower.contains("instruction")
+        {
+            continue;
+        }
+        safe.push(word);
+    }
+    safe.join(" ")
+}
+
+fn minimized_reference(reference: &str) -> String {
+    format!("local-reference:{}", sha256_str(reference))
+}
+
+fn atomic_write(path: &Path, body: &[u8]) -> Result<(), CompanionError> {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp = path.with_extension(format!(
+        "{}.tmp-{}-{nonce}",
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("data"),
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp)
+            .map_err(|source| CompanionError::Open {
+                path: tmp.clone(),
+                source,
+            })?;
+        file.write_all(body)
+            .and_then(|_| file.sync_all())
+            .map_err(|source| CompanionError::Write {
+                path: tmp.clone(),
+                source,
+            })?;
+        fs::rename(&tmp, path).map_err(|source| CompanionError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|source| CompanionError::Write {
+                    path: parent.to_path_buf(),
+                    source,
+                })?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn persist_result(data_dir: &Path, result: &RunResult) -> Result<(), CompanionError> {
@@ -3633,7 +4209,7 @@ fn persist_result(data_dir: &Path, result: &RunResult) -> Result<(), CompanionEr
     })?;
     let path = run_path(data_dir, result.date);
     let body = serde_json::to_vec_pretty(result).map_err(CompanionError::Serialize)?;
-    fs::write(&path, body).map_err(|source| CompanionError::Write { path, source })
+    atomic_write(&path, &body)
 }
 
 const TEMPO_ACCOUNT: &str = "default";
@@ -3676,6 +4252,54 @@ struct RunPhaseRecord {
 
 struct AdvisoryRunLock {
     _file: File,
+}
+
+struct CompanionStateLock {
+    _file: File,
+}
+
+fn acquire_companion_state_lock(
+    data_dir: &Path,
+    exclusive: bool,
+) -> Result<CompanionStateLock, CompanionError> {
+    let identity = if data_dir.is_absolute() {
+        data_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| CompanionError::Read {
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(data_dir)
+    };
+    let lock_dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("drag-companion-locks");
+    fs::create_dir_all(&lock_dir).map_err(|source| CompanionError::CreateDir {
+        path: lock_dir.clone(),
+        source,
+    })?;
+    let digest = Sha256::digest(identity.to_string_lossy().as_bytes());
+    let path = lock_dir.join(format!("state-{digest:x}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| CompanionError::Open { path, source })?;
+    let lock_result = if exclusive {
+        FileExt::try_lock_exclusive(&file)
+    } else {
+        FileExt::try_lock_shared(&file)
+    };
+    lock_result.map_err(|_| {
+        CompanionError::Proposal(
+            "companion state is busy; retry after the active command completes".to_owned(),
+        )
+    })?;
+    Ok(CompanionStateLock { _file: file })
 }
 
 fn coordinated_run(
@@ -3865,7 +4489,7 @@ struct RolloutState {
     last_reset_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RolloutGate {
     eligible_days: u64,
@@ -3881,7 +4505,34 @@ struct RolloutGate {
     overlap_violations: u64,
     uncertain_outcome_retries: u64,
     privacy_incidents: u64,
+    #[serde(default)]
+    fabricated_material_fields: u64,
+    #[serde(default)]
+    unsafe_retries: u64,
     passed: bool,
+}
+
+impl Default for RolloutGate {
+    fn default() -> Self {
+        Self {
+            eligible_days: 0,
+            proposals: 0,
+            issue_attribution_precision: 1.0,
+            supported_duration_precision: 1.0,
+            schema_valid: true,
+            provenance_retained: true,
+            secrets_redacted: true,
+            reviewed_batches: 0,
+            incorrect_creates: 0,
+            duplicates: 0,
+            overlap_violations: 0,
+            uncertain_outcome_retries: 0,
+            privacy_incidents: 0,
+            fabricated_material_fields: 0,
+            unsafe_retries: 0,
+            passed: false,
+        }
+    }
 }
 
 impl Default for RolloutState {
@@ -3963,7 +4614,7 @@ fn save_rollout_state(data_dir: &Path, state: &RolloutState) -> Result<(), Compa
     })?;
     let path = rollout_path(data_dir);
     let text = serde_json::to_string_pretty(state).map_err(CompanionError::Serialize)?;
-    fs::write(&path, text).map_err(|source| CompanionError::Write { path, source })
+    atomic_write(&path, text.as_bytes())
 }
 
 fn handle_rollout(data_dir: &Path, args: RolloutArgs) -> Result<(), CompanionError> {
@@ -3981,6 +4632,7 @@ fn handle_rollout(data_dir: &Path, args: RolloutArgs) -> Result<(), CompanionErr
                     .gate
                     .unwrap_or_else(|| stage_gate_name(&state.stage).to_owned());
                 *gate_mut(&mut state, &gate)? = RolloutGate::default();
+                demote_after_unsafe_reset(&mut state, &gate);
             } else if let Some(expansion) = args.expansion {
                 if !state.general_expansions.contains(&expansion) {
                     state.general_expansions.push(expansion);
@@ -3992,8 +4644,12 @@ fn handle_rollout(data_dir: &Path, args: RolloutArgs) -> Result<(), CompanionErr
                 let target = gate_mut(&mut state, &gate)?;
                 target.eligible_days += args.eligible_days;
                 target.proposals += args.proposals;
-                target.issue_attribution_precision = args.issue_attribution_precision;
-                target.supported_duration_precision = args.supported_duration_precision;
+                target.issue_attribution_precision = target
+                    .issue_attribution_precision
+                    .min(args.issue_attribution_precision);
+                target.supported_duration_precision = target
+                    .supported_duration_precision
+                    .min(args.supported_duration_precision);
                 target.schema_valid &= args.schema_valid;
                 target.provenance_retained &= args.provenance_retained;
                 target.secrets_redacted &= args.secrets_redacted;
@@ -4003,6 +4659,8 @@ fn handle_rollout(data_dir: &Path, args: RolloutArgs) -> Result<(), CompanionErr
                 target.overlap_violations += args.overlap_violations;
                 target.uncertain_outcome_retries += args.uncertain_outcome_retries;
                 target.privacy_incidents += args.privacy_incidents;
+                target.fabricated_material_fields += args.fabricated_material_fields;
+                target.unsafe_retries += args.unsafe_retries;
                 target.passed = gate_passed(&gate, target);
             }
             save_rollout_state(data_dir, &state)?;
@@ -4044,14 +4702,35 @@ fn stage_gate_name(stage: &str) -> &str {
     }
 }
 
+fn demote_after_unsafe_reset(state: &mut RolloutState, gate: &str) {
+    let reset_stage = match gate {
+        "fixture" => "capture-only",
+        "replay" | "historical-replay" => "historical-replay",
+        _ => "shadow",
+    };
+    let current_index = ROLLOUT_STAGES
+        .iter()
+        .position(|stage| *stage == state.stage)
+        .unwrap_or(0);
+    let reset_index = ROLLOUT_STAGES
+        .iter()
+        .position(|stage| *stage == reset_stage)
+        .unwrap_or(0);
+    if current_index > reset_index {
+        state.stage = reset_stage.to_owned();
+    }
+}
+
 fn gate_passed(gate: &str, g: &RolloutGate) -> bool {
     match gate {
         "fixture" => g.schema_valid && g.provenance_retained && g.secrets_redacted,
         "replay" | "historical-replay" => {
-            g.eligible_days >= 20
-                && g.proposals >= 100
-                && g.issue_attribution_precision >= 0.99
-                && g.supported_duration_precision >= 0.99
+            g.eligible_days >= 30
+                && g.fabricated_material_fields == 0
+                && g.duplicates == 0
+                && g.overlap_violations == 0
+                && g.unsafe_retries == 0
+                && g.privacy_incidents == 0
         }
         "shadow" => {
             g.eligible_days >= 20
@@ -4104,11 +4783,12 @@ fn rollout_status_value(state: &RolloutState, forced: Option<&str>) -> Value {
     } else {
         state.stage.as_str()
     };
-    serde_json::json!({ "status": "ok", "stage": state.stage, "stages": ROLLOUT_STAGES, "effectiveMode": effective, "forcedShadowReason": forced, "liveMutationAllowed": forced.is_none() && state.stage == "general-autonomy", "lastResetReason": state.last_reset_reason, "gates": state })
+    serde_json::json!({ "status": "ok", "stage": state.stage, "stages": ROLLOUT_STAGES, "effectiveMode": effective, "forcedShadowReason": forced, "liveMutationAllowed": forced.is_none() && state.stage == "general-autonomy" && state.restricted.passed, "lastResetReason": state.last_reset_reason, "gates": state })
 }
 
 fn persisted_live_mutation_allowed(data_dir: &Path) -> Result<bool, CompanionError> {
-    Ok(load_rollout_state(data_dir)?.stage == "general-autonomy")
+    let state = load_rollout_state(data_dir)?;
+    Ok(state.stage == "general-autonomy" && state.restricted.passed)
 }
 
 fn execute_drag_worklogs(
@@ -4117,7 +4797,12 @@ fn execute_drag_worklogs(
     date: NaiveDate,
     authorize_live: bool,
 ) -> Result<ExecuteResult, CompanionError> {
-    if !authorize_live || !live_rollout_enabled() || !persisted_live_mutation_allowed(data_dir)? {
+    if !authorize_live
+        || !live_rollout_enabled()
+        || !persisted_live_mutation_allowed(data_dir)?
+        || scheduler_kill_switch_path(data_dir).exists()
+        || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some()
+    {
         return Ok(ExecuteResult {
             status: "gated",
             selected_date: date,
@@ -4128,11 +4813,33 @@ fn execute_drag_worklogs(
             live_mutation_allowed: false,
         });
     }
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
+    let _lock = acquire_advisory_lock(data_dir, date)?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
-    reconcile_complete_day_and_ledger(&conn, drag_bin, date)?;
-    if date_has_uncertain_operation(&conn, date)? {
+    let owner_id = format!("execute:{}:{}", std::process::id(), now_string());
+    acquire_sqlite_lease(&conn, date, &owner_id)?;
+    let result = execute_drag_worklogs_locked(data_dir, drag_bin, date, &conn);
+    let release = release_sqlite_lease(&conn, date, &owner_id);
+    match (result, release) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(result), Ok(())) => Ok(result),
+    }
+}
+
+fn execute_drag_worklogs_locked(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+    conn: &Connection,
+) -> Result<ExecuteResult, CompanionError> {
+    reconcile_complete_day_and_ledger(conn, drag_bin, date)?;
+    if date_has_unresolved_operation(conn, date)? {
         return Ok(ExecuteResult {
             status: "uncertain",
             selected_date: date,
@@ -4148,11 +4855,15 @@ fn execute_drag_worklogs(
     let mut skipped = 0;
     for (proposal_id, payload) in approved {
         let key = operation_key(TEMPO_ACCOUNT, date, &payload)?;
-        if confirmed_operation(&conn, &key)?.is_some() {
-            skipped += 1;
-            continue;
+        match operation_state(conn, &key)?.as_deref() {
+            Some("confirmed" | "failed") => {
+                skipped += 1;
+                continue;
+            }
+            Some("submitting" | "uncertain") => break,
+            Some(_) | None => {}
         }
-        if date_has_uncertain_operation(&conn, date)? {
+        if date_has_unresolved_operation(conn, date)? {
             break;
         }
         let latest = read_drag_day(drag_bin, date)?;
@@ -4162,12 +4873,12 @@ fn execute_drag_worklogs(
             .iter()
             .any(|existing| same_worklog(existing, &candidate))
         {
-            persist_submitting_operation(&conn, date, &proposal_id, &key, &payload)?;
-            persist_confirmed_operation(&conn, &key, "reconciled-existing")?;
+            persist_submitting_operation(conn, date, &proposal_id, &key, &payload)?;
+            persist_confirmed_operation(conn, &key, "reconciled-existing")?;
             skipped += 1;
             continue;
         }
-        persist_submitting_operation(&conn, date, &proposal_id, &key, &payload)?;
+        persist_submitting_operation(conn, date, &proposal_id, &key, &payload)?;
         let response = drag_json(
             drag_bin,
             &[
@@ -4192,7 +4903,7 @@ fn execute_drag_worklogs(
                             "accepted Drag response missing worklog id",
                         )
                     })?;
-                persist_confirmed_operation(&conn, &key, id)?;
+                persist_confirmed_operation(conn, &key, id)?;
                 submitted += 1;
             }
             Err(
@@ -4201,10 +4912,13 @@ fn execute_drag_worklogs(
                     ..
                 },
             ) => {
-                mark_operation_uncertain(&conn, date, &key)?;
+                mark_operation_uncertain(conn, date, &key)?;
                 return Err(error);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                mark_operation_failed(conn, &key)?;
+                return Err(error);
+            }
         }
     }
     Ok(ExecuteResult {
@@ -4255,8 +4969,10 @@ fn persist_submitting_operation(
 ) -> Result<(), CompanionError> {
     let intent =
         serde_json::json!({"intent":"submit-worklog","persistedBeforeDrag":true,"at":now_string()});
-    conn.execute("INSERT INTO mutation_operations (id, proposal_id, state, idempotency_key, local_date, tempo_account, payload_json, submitting_intent_json, policy_schema_version, payload_schema_version) VALUES (?1, ?2, 'submitting', ?1, ?3, ?4, ?5, ?6, ?7, 1) ON CONFLICT(id) DO NOTHING", params![key, proposal_id, date.to_string(), TEMPO_ACCOUNT, payload.to_string(), intent.to_string(), POLICY_SCHEMA_VERSION])?;
-    conn.execute("INSERT INTO mutation_attempts (id, operation_id, state, attempted_at) VALUES (?1, ?1, 'submitting', ?2) ON CONFLICT(id) DO NOTHING", params![key, now_string()])?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("INSERT INTO mutation_operations (id, proposal_id, state, idempotency_key, local_date, tempo_account, payload_json, submitting_intent_json, policy_schema_version, payload_schema_version) VALUES (?1, ?2, 'submitting', ?1, ?3, ?4, ?5, ?6, ?7, 1) ON CONFLICT(id) DO NOTHING", params![key, proposal_id, date.to_string(), TEMPO_ACCOUNT, payload.to_string(), intent.to_string(), POLICY_SCHEMA_VERSION])?;
+    tx.execute("INSERT INTO mutation_attempts (id, operation_id, state, attempted_at) VALUES (?1, ?1, 'submitting', ?2) ON CONFLICT(id) DO NOTHING", params![key, now_string()])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -4265,14 +4981,16 @@ fn persist_confirmed_operation(
     key: &str,
     tempo_id: &str,
 ) -> Result<(), CompanionError> {
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
         "UPDATE mutation_operations SET state = 'confirmed', tempo_worklog_id = ?1 WHERE id = ?2",
         params![tempo_id, key],
     )?;
-    conn.execute(
+    tx.execute(
         "UPDATE mutation_attempts SET state = 'confirmed' WHERE operation_id = ?1",
         params![key],
     )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -4285,19 +5003,43 @@ fn mark_operation_uncertain(
         "UPDATE mutation_operations SET state = 'uncertain' WHERE id = ?1",
         params![key],
     )?;
+    conn.execute(
+        "UPDATE mutation_attempts SET state = 'uncertain' WHERE operation_id = ?1",
+        params![key],
+    )?;
     finish_run(conn, date, "uncertain")?;
     Ok(())
 }
 
-fn confirmed_operation(conn: &Connection, key: &str) -> Result<Option<String>, CompanionError> {
-    Ok(conn.query_row("SELECT tempo_worklog_id FROM mutation_operations WHERE id = ?1 AND state = 'confirmed'", params![key], |row| row.get(0)).optional()?)
+fn mark_operation_failed(conn: &Connection, key: &str) -> Result<(), CompanionError> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "UPDATE mutation_operations SET state = 'failed' WHERE id = ?1",
+        params![key],
+    )?;
+    tx.execute(
+        "UPDATE mutation_attempts SET state = 'failed' WHERE operation_id = ?1",
+        params![key],
+    )?;
+    tx.commit()?;
+    Ok(())
 }
 
-fn date_has_uncertain_operation(
+fn operation_state(conn: &Connection, key: &str) -> Result<Option<String>, CompanionError> {
+    Ok(conn
+        .query_row(
+            "SELECT state FROM mutation_operations WHERE id = ?1",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn date_has_unresolved_operation(
     conn: &Connection,
     date: NaiveDate,
 ) -> Result<bool, CompanionError> {
-    Ok(conn.query_row("SELECT 1 FROM mutation_operations WHERE tempo_account = ?1 AND local_date = ?2 AND state = 'uncertain' LIMIT 1", params![TEMPO_ACCOUNT, date.to_string()], |row| row.get::<_, i64>(0)).optional()?.is_some())
+    Ok(conn.query_row("SELECT 1 FROM mutation_operations WHERE tempo_account = ?1 AND local_date = ?2 AND state IN ('submitting','uncertain') LIMIT 1", params![TEMPO_ACCOUNT, date.to_string()], |row| row.get::<_, i64>(0)).optional()?.is_some())
 }
 
 fn date_has_mutation_operations(
@@ -4632,25 +5374,46 @@ fn recovery_instructions(status: &str) -> &'static str {
 
 fn purge_state(data_dir: &Path, acknowledge_lost_recovery: bool) -> Result<Value, CompanionError> {
     if acknowledge_lost_recovery {
-        let _ = fs::remove_dir_all(data_dir);
+        if data_dir.exists() {
+            fs::remove_dir_all(data_dir).map_err(|source| CompanionError::Write {
+                path: data_dir.to_path_buf(),
+                source,
+            })?;
+        }
         return Ok(
             serde_json::json!({ "status": "purged", "idempotencyRecordsProtected": false, "lostAutomatedRecoveryAcknowledged": true, "nextSafeAction": "run collect and reconcile from fresh explicit-date evidence before any mutation" }),
         );
     }
-    let protected = data_dir.join("protected-idempotency-records");
-    fs::create_dir_all(&protected).map_err(|source| CompanionError::CreateDir {
-        path: protected.clone(),
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
         source,
     })?;
-    for name in [
-        "companion.sqlite3",
-        "companion.sqlite3-wal",
-        "companion.sqlite3-shm",
-    ] {
-        let src = data_dir.join(name);
-        if src.exists() {
-            let _ = fs::rename(&src, protected.join(name));
-        }
+    let database = store_path(data_dir);
+    if database.exists() {
+        let mut conn = Connection::open(&database)?;
+        migrate(&mut conn)?;
+        migrate_run_coordination(&conn)?;
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "UPDATE mutation_operations SET proposal_id = NULL;
+             DELETE FROM policy_decisions;
+             DELETE FROM proposal_drag_resolutions;
+             DELETE FROM proposal_policy_fields;
+             DELETE FROM proposals;
+             DELETE FROM daily_bundles;
+             DELETE FROM issue_candidates;
+             DELETE FROM evidence_events;
+             DELETE FROM unsupported_periods;
+             DELETE FROM provider_requests;
+             DELETE FROM reports;
+             DELETE FROM run_leases;
+             DELETE FROM run_phases;
+             DELETE FROM coordinated_runs;
+             DELETE FROM leases;
+             DELETE FROM runs;",
+        )?;
+        tx.commit()?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     }
     for entry in fs::read_dir(data_dir).map_err(|source| CompanionError::Read {
         path: data_dir.to_path_buf(),
@@ -4660,13 +5423,23 @@ fn purge_state(data_dir: &Path, acknowledge_lost_recovery: bool) -> Result<Value
             path: data_dir.to_path_buf(),
             source,
         })?;
-        if entry.file_name() != "protected-idempotency-records" {
-            let path = entry.path();
-            if path.is_dir() {
-                let _ = fs::remove_dir_all(path);
-            } else {
-                let _ = fs::remove_file(path);
-            }
+        let path = entry.path();
+        if path == database
+            || entry.file_name() == "companion.sqlite3-wal"
+            || entry.file_name() == "companion.sqlite3-shm"
+        {
+            continue;
+        }
+        if path.is_dir() {
+            fs::remove_dir_all(&path).map_err(|source| CompanionError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        } else {
+            fs::remove_file(&path).map_err(|source| CompanionError::Write {
+                path: path.clone(),
+                source,
+            })?;
         }
     }
     Ok(
