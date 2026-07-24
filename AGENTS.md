@@ -18,3 +18,8 @@ This repository uses the five default triage labels. See `docs/agents/triage-lab
 ### Domain docs
 
 This repository uses a single-context domain-doc layout. See `docs/agents/domain.md`.
+
+### Worktrees
+
+Use Worktrunk (`wt`) for worktree lifecycle operations instead of raw
+`git worktree` commands. Run `wt` from the repository wrapper or a worktree.
