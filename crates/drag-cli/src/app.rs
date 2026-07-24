@@ -23,7 +23,7 @@ use crate::setup::{
 };
 use crate::setup::{
     ConnectionVerifier, EnvironmentSetupPlan, OnboardingSession, OnboardingWorkflow,
-    RemoteConnectionVerifier, SetupCredentials,
+    RemoteConnectionVerifier, SetupCredentials, SetupCredentialsExt,
 };
 use crate::setup_tui::RatatuiOnboardingSession;
 use crate::{CliError, Rendered};

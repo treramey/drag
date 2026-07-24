@@ -4,7 +4,6 @@ use std::future::Future;
 #[cfg(test)]
 use std::io::{self, IsTerminal, Write};
 use std::pin::Pin;
-use url::Url;
 
 use crate::api::ApiClient;
 #[cfg(test)]
@@ -15,11 +14,10 @@ use crate::config::{
     ATLASSIAN_EMAIL_ENV, ATLASSIAN_HOST_ENV, ATLASSIAN_TOKEN_ENV, TEMPO_TOKEN_ENV,
 };
 use crate::CliError;
-
-pub(crate) const ATLASSIAN_TOKEN_URL: &str =
-    "https://id.atlassian.com/manage-profile/security/api-tokens";
-const TEMPO_TOKEN_PATH: &str =
-    "/plugins/servlet/ac/io.tempo.jira/tempo-app#!/configuration/api-integration";
+#[cfg(test)]
+pub(crate) use drag::setup::ATLASSIAN_TOKEN_URL;
+use drag::setup::{CompletedSetup, OnboardingError, OnboardingState, SetupDefaults};
+pub(crate) use drag::setup::{OnboardingScreen, SecretInput, SetupCredentials, TokenPage};
 
 pub(crate) type VerificationFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, CliError>> + Send + 'a>>;
@@ -157,13 +155,6 @@ impl SetupPrompter for TerminalSetupPrompter {
     }
 }
 
-pub(crate) struct SetupCredentials {
-    pub(crate) tempo_token: String,
-    pub(crate) atlassian_user_email: String,
-    pub(crate) atlassian_token: String,
-    pub(crate) hostname: String,
-}
-
 /// A normalized unattended setup request shared by preview and execution.
 pub(crate) struct EnvironmentSetupPlan {
     credentials: SetupCredentials,
@@ -179,8 +170,16 @@ impl EnvironmentSetupPlan {
     }
 }
 
-impl SetupCredentials {
-    pub(crate) fn from_source(
+pub(crate) trait SetupCredentialsExt {
+    fn from_source(source: impl FnMut(&str) -> Result<String, CliError>) -> Result<Self, CliError>
+    where
+        Self: Sized;
+    fn to_credentials(&self, account_id: String) -> Credentials;
+    fn jira_connection(&self) -> JiraCredentials;
+}
+
+impl SetupCredentialsExt for SetupCredentials {
+    fn from_source(
         mut source: impl FnMut(&str) -> Result<String, CliError>,
     ) -> Result<Self, CliError> {
         let hostname = normalize_jira_site(&source(ATLASSIAN_HOST_ENV)?)?;
@@ -195,7 +194,7 @@ impl SetupCredentials {
         })
     }
 
-    pub(crate) fn to_credentials(&self, account_id: String) -> Credentials {
+    fn to_credentials(&self, account_id: String) -> Credentials {
         Credentials {
             tempo_token: self.tempo_token.clone(),
             account_id,
@@ -205,11 +204,23 @@ impl SetupCredentials {
         }
     }
 
-    pub(crate) fn jira_connection(&self) -> JiraCredentials {
+    fn jira_connection(&self) -> JiraCredentials {
         JiraCredentials {
             atlassian_user_email: self.atlassian_user_email.clone(),
             atlassian_token: self.atlassian_token.clone(),
             hostname: self.hostname.clone(),
+        }
+    }
+}
+
+impl From<CompletedSetup> for Credentials {
+    fn from(completed: CompletedSetup) -> Self {
+        Self {
+            tempo_token: completed.tempo_token,
+            account_id: completed.account_id,
+            atlassian_user_email: completed.atlassian_user_email,
+            atlassian_token: completed.atlassian_token,
+            hostname: completed.hostname,
         }
     }
 }
@@ -362,51 +373,15 @@ impl OnboardingSession for LineOnboardingSession {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OnboardingStage {
-    Jira,
-    Tempo,
-    Complete,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OnboardingScreen {
-    JiraDetails,
-    JiraToken,
-    Tempo,
-    Save,
-}
-
-pub(crate) enum SecretInput {
-    Replace(String),
-    Retain,
-}
-
 pub(crate) enum ConnectionOutcome {
     Connected,
     Rejected(CliError),
 }
 
-pub(crate) struct TokenPage {
-    pub(crate) instruction: &'static str,
-    pub(crate) url: Url,
-    pub(crate) open_browser: bool,
-}
-
 pub(crate) struct OnboardingWorkflow<'a> {
     verifier: &'a dyn ConnectionVerifier,
     debug: bool,
-    open_browser: bool,
-    stage: OnboardingStage,
-    screen: OnboardingScreen,
-    hostname_default: Option<String>,
-    email_default: Option<String>,
-    jira_token: Option<String>,
-    tempo_token: Option<String>,
-    jira_page_presented: bool,
-    tempo_page_presented: bool,
-    setup_credentials: Option<SetupCredentials>,
-    account_id: Option<String>,
+    state: OnboardingState,
 }
 
 impl<'a> OnboardingWorkflow<'a> {
@@ -416,82 +391,55 @@ impl<'a> OnboardingWorkflow<'a> {
         debug: bool,
         open_browser: bool,
     ) -> Self {
+        let defaults = SetupDefaults {
+            hostname: existing.hostname.clone(),
+            atlassian_user_email: existing.atlassian_user_email.clone(),
+            atlassian_token: existing.atlassian_token.clone(),
+            tempo_token: existing.tempo_token.clone(),
+        };
         Self {
             verifier,
             debug,
-            open_browser,
-            stage: OnboardingStage::Jira,
-            screen: OnboardingScreen::JiraDetails,
-            hostname_default: existing.hostname.clone(),
-            email_default: existing.atlassian_user_email.clone(),
-            jira_token: existing
-                .atlassian_token
-                .clone()
-                .filter(|value| !value.is_empty()),
-            tempo_token: existing
-                .tempo_token
-                .clone()
-                .filter(|value| !value.is_empty()),
-            jira_page_presented: false,
-            tempo_page_presented: false,
-            setup_credentials: None,
-            account_id: None,
+            state: OnboardingState::new(defaults, open_browser),
         }
     }
 
     pub(crate) fn hostname_default(&self) -> Option<&str> {
-        self.hostname_default.as_deref()
+        self.state.hostname_default()
     }
 
     pub(crate) fn email_default(&self) -> Option<&str> {
-        self.email_default.as_deref()
+        self.state.email_default()
     }
 
     pub(crate) fn can_retain_jira_token(&self) -> bool {
-        self.jira_token.is_some()
+        self.state.can_retain_jira_token()
     }
 
     pub(crate) fn can_retain_tempo_token(&self) -> bool {
-        self.tempo_token.is_some()
+        self.state.can_retain_tempo_token()
     }
 
-    pub(crate) const fn screen(&self) -> OnboardingScreen {
-        self.screen
+    pub(crate) fn screen(&self) -> OnboardingScreen {
+        self.state.screen()
     }
 
     pub(crate) fn continue_from_jira_details(&mut self) -> Result<OnboardingScreen, CliError> {
-        self.require_screen(OnboardingScreen::JiraDetails)?;
-        self.screen = OnboardingScreen::JiraToken;
-        Ok(self.screen)
+        self.state.continue_from_jira_details().map_err(Into::into)
     }
 
     pub(crate) fn continue_with_verified_jira(&mut self) -> Result<OnboardingScreen, CliError> {
-        if !matches!(
-            self.stage,
-            OnboardingStage::Tempo | OnboardingStage::Complete
-        ) {
-            return Err(invalid_onboarding_state());
-        }
-        self.require_screen(OnboardingScreen::JiraToken)?;
-        self.screen = OnboardingScreen::Tempo;
-        Ok(self.screen)
+        self.state.continue_with_verified_jira().map_err(Into::into)
     }
 
     pub(crate) fn continue_with_verified_tempo(&mut self) -> Result<OnboardingScreen, CliError> {
-        self.require_stage(OnboardingStage::Complete)?;
-        self.require_screen(OnboardingScreen::Tempo)?;
-        self.screen = OnboardingScreen::Save;
-        Ok(self.screen)
+        self.state
+            .continue_with_verified_tempo()
+            .map_err(Into::into)
     }
 
     pub(crate) fn back(&mut self) -> Result<Option<OnboardingScreen>, CliError> {
-        self.screen = match self.screen {
-            OnboardingScreen::JiraDetails => return Ok(None),
-            OnboardingScreen::JiraToken => OnboardingScreen::JiraDetails,
-            OnboardingScreen::Tempo => OnboardingScreen::JiraToken,
-            OnboardingScreen::Save => OnboardingScreen::Tempo,
-        };
-        Ok(Some(self.screen))
+        self.state.back().map_err(Into::into)
     }
 
     pub(crate) fn cancel(&self) -> CliError {
@@ -499,43 +447,19 @@ impl<'a> OnboardingWorkflow<'a> {
     }
 
     pub(crate) fn edit_jira(&mut self) -> OnboardingScreen {
-        self.screen = OnboardingScreen::JiraDetails;
-        self.screen
+        self.state.edit_jira()
     }
 
     pub(crate) fn edit_tempo(&mut self) -> Result<OnboardingScreen, CliError> {
-        self.require_stage(OnboardingStage::Complete)?;
-        self.screen = OnboardingScreen::Tempo;
-        Ok(self.screen)
+        self.state.edit_tempo().map_err(Into::into)
     }
 
     pub(crate) fn jira_token_page(&mut self) -> Result<TokenPage, CliError> {
-        self.require_stage(OnboardingStage::Jira)?;
-        self.require_screen(OnboardingScreen::JiraToken)?;
-        let page = TokenPage {
-            instruction: "Create or manage your Atlassian API token:",
-            url: Url::parse(ATLASSIAN_TOKEN_URL)?,
-            open_browser: self.open_browser && !self.jira_page_presented,
-        };
-        self.jira_page_presented = true;
-        Ok(page)
+        self.state.jira_token_page().map_err(Into::into)
     }
 
     pub(crate) fn tempo_token_page(&mut self) -> Result<TokenPage, CliError> {
-        self.require_stage(OnboardingStage::Tempo)?;
-        self.require_screen(OnboardingScreen::Tempo)?;
-        let hostname = self
-            .setup_credentials
-            .as_ref()
-            .map(|credentials| credentials.hostname.as_str())
-            .ok_or_else(invalid_onboarding_state)?;
-        let page = TokenPage {
-            instruction: "Create or manage your Tempo API token:",
-            url: Url::parse(&format!("https://{hostname}{TEMPO_TOKEN_PATH}"))?,
-            open_browser: self.open_browser && !self.tempo_page_presented,
-        };
-        self.tempo_page_presented = true;
-        Ok(page)
+        self.state.tempo_token_page().map_err(Into::into)
     }
 
     pub(crate) async fn connect_jira(
@@ -544,25 +468,11 @@ impl<'a> OnboardingWorkflow<'a> {
         email: String,
         token: SecretInput,
     ) -> Result<ConnectionOutcome, CliError> {
-        self.require_stage(OnboardingStage::Jira)?;
-        self.require_screen(OnboardingScreen::JiraToken)?;
         let hostname = normalize_jira_site(&hostname)?;
-        let email = email.trim();
-        if email.is_empty() {
-            return Err(CliError::InvalidInput(
-                "Atlassian email must not be empty".to_owned(),
-            ));
-        }
-        let email = email.to_owned();
-        self.hostname_default = Some(hostname.clone());
-        self.email_default = Some(email.clone());
-        let atlassian_token = resolve_secret(token, self.jira_token.as_deref())?;
-        let setup_credentials = SetupCredentials {
-            tempo_token: String::new(),
-            atlassian_user_email: email,
-            atlassian_token,
-            hostname,
-        };
+        let setup_credentials = self
+            .state
+            .prepare_jira_connection(hostname, email, token)
+            .map_err(CliError::from)?;
 
         match self
             .verifier
@@ -570,11 +480,9 @@ impl<'a> OnboardingWorkflow<'a> {
             .await
         {
             Ok(account_id) => {
-                self.jira_token = Some(setup_credentials.atlassian_token.clone());
-                self.setup_credentials = Some(setup_credentials);
-                self.account_id = Some(account_id);
-                self.stage = OnboardingStage::Tempo;
-                self.screen = OnboardingScreen::Tempo;
+                self.state
+                    .accept_verified_jira(setup_credentials, account_id)
+                    .map_err(CliError::from)?;
                 Ok(ConnectionOutcome::Connected)
             }
             Err(error) if error.is_authentication() => Ok(ConnectionOutcome::Rejected(error)),
@@ -586,30 +494,22 @@ impl<'a> OnboardingWorkflow<'a> {
         &mut self,
         token: SecretInput,
     ) -> Result<ConnectionOutcome, CliError> {
-        self.require_stage(OnboardingStage::Tempo)?;
-        self.require_screen(OnboardingScreen::Tempo)?;
-        let tempo_token = resolve_secret(token, self.tempo_token.as_deref())?;
-        let setup_credentials = self
-            .setup_credentials
-            .as_mut()
-            .ok_or_else(invalid_onboarding_state)?;
-        setup_credentials.tempo_token = tempo_token;
-        let credentials = setup_credentials.to_credentials(
-            self.account_id
-                .as_ref()
-                .ok_or_else(invalid_onboarding_state)?
-                .clone(),
-        );
+        let attempt = self
+            .state
+            .prepare_tempo_connection(token)
+            .map_err(CliError::from)?;
+        let tempo_credentials = TempoCredentials {
+            tempo_token: attempt.tempo_token,
+            account_id: attempt.account_id,
+        };
 
         match self
             .verifier
-            .verify_tempo(&TempoCredentials::from(&credentials), self.debug)
+            .verify_tempo(&tempo_credentials, self.debug)
             .await
         {
             Ok(()) => {
-                self.tempo_token = Some(setup_credentials.tempo_token.clone());
-                self.stage = OnboardingStage::Complete;
-                self.screen = OnboardingScreen::Save;
+                self.state.accept_verified_tempo().map_err(CliError::from)?;
                 Ok(ConnectionOutcome::Connected)
             }
             Err(error) if error.is_authentication() => Ok(ConnectionOutcome::Rejected(error)),
@@ -618,57 +518,32 @@ impl<'a> OnboardingWorkflow<'a> {
     }
 
     pub(crate) fn invalidate_jira(&mut self) {
-        self.stage = OnboardingStage::Jira;
-        self.screen = OnboardingScreen::JiraToken;
-        self.setup_credentials = None;
-        self.account_id = None;
+        self.state.invalidate_jira();
     }
 
     pub(crate) fn invalidate_tempo(&mut self) -> Result<(), CliError> {
-        if self.stage == OnboardingStage::Jira {
-            return Err(invalid_onboarding_state());
-        }
-        self.stage = OnboardingStage::Tempo;
-        self.screen = OnboardingScreen::Tempo;
-        if let Some(setup_credentials) = &mut self.setup_credentials {
-            setup_credentials.tempo_token.clear();
-        }
-        Ok(())
+        self.state.invalidate_tempo().map_err(Into::into)
     }
 
     pub(crate) fn finish(self) -> Result<Credentials, CliError> {
-        self.require_stage(OnboardingStage::Complete)?;
-        self.require_screen(OnboardingScreen::Save)?;
-        Ok(self
-            .setup_credentials
-            .ok_or_else(invalid_onboarding_state)?
-            .to_credentials(self.account_id.ok_or_else(invalid_onboarding_state)?))
-    }
-
-    fn require_stage(&self, expected: OnboardingStage) -> Result<(), CliError> {
-        if self.stage == expected {
-            Ok(())
-        } else {
-            Err(invalid_onboarding_state())
-        }
-    }
-
-    fn require_screen(&self, expected: OnboardingScreen) -> Result<(), CliError> {
-        if self.screen == expected {
-            Ok(())
-        } else {
-            Err(invalid_onboarding_state())
-        }
+        self.state
+            .finish()
+            .map(Credentials::from)
+            .map_err(Into::into)
     }
 }
 
-fn resolve_secret(input: SecretInput, existing: Option<&str>) -> Result<String, CliError> {
-    match input {
-        SecretInput::Replace(value) if !value.trim().is_empty() => Ok(value.trim().to_owned()),
-        SecretInput::Retain => existing
-            .map(str::to_owned)
-            .ok_or_else(|| CliError::InvalidInput("token is required".to_owned())),
-        SecretInput::Replace(_) => Err(CliError::InvalidInput("token is required".to_owned())),
+impl From<OnboardingError> for CliError {
+    fn from(error: OnboardingError) -> Self {
+        match error {
+            OnboardingError::InvalidState => invalid_onboarding_state(),
+            OnboardingError::TokenRequired => {
+                CliError::InvalidInput("token is required".to_owned())
+            }
+            OnboardingError::AtlassianEmailRequired => {
+                CliError::InvalidInput("Atlassian email must not be empty".to_owned())
+            }
+        }
     }
 }
 

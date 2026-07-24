@@ -6,10 +6,15 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Datelike, Days, NaiveDate};
+use chrono::{DateTime, NaiveDate};
 use chrono_tz::Tz;
 use comfy_table::{presets::UTF8_FULL, ContentArrangement, Table};
 use drag::field_selection::{project_list_result, ListField, ListFieldMask, ListProjectionPlan};
+use drag::list_policy::{
+    dates_to_prefetch, resolve_date_action, stabilize_month_summary,
+    take_reusable_report as take_cached_reusable_report, CachedReport, DateActionResolution,
+    MonthSummaryCache,
+};
 use drag::models::{ListPagination, ScheduleEntity, Worklog, WorklogEntity};
 use drag::pagination::{
     PaginationPlan, TraversalDecision, TraversalError, TraversalState, DEFAULT_PAGE_LIMIT,
@@ -38,12 +43,7 @@ pub(crate) type PendingListReportFuture<'a> =
 pub(crate) type SuspenseFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ListReportSuspenseOutcome, CliError>> + Send + 'a>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ListReportAction {
-    Close,
-    PreviousDate,
-    NextDate,
-}
+pub(crate) use drag::list_policy::DateAction as ListReportAction;
 
 pub(crate) enum ListReportSuspenseOutcome {
     Loaded(Box<ListReport>),
@@ -93,68 +93,7 @@ impl<T> Drop for AbortOnDropTask<T> {
     }
 }
 
-pub(crate) struct CachedListReport {
-    pub(crate) report: ListReport,
-    pub(crate) reusable: bool,
-}
-
-#[derive(Clone)]
-struct MonthSummary {
-    required_duration: String,
-    logged_duration: String,
-    balance_duration: String,
-    required_seconds: i64,
-    logged_seconds: i64,
-    balance_seconds: i64,
-}
-
-impl MonthSummary {
-    fn from_report(report: &ListReport) -> Self {
-        let schedule = report.schedule();
-        Self {
-            required_duration: schedule.month_required_duration.clone(),
-            logged_duration: schedule.month_logged_duration.clone(),
-            balance_duration: schedule.month_current_period_duration.clone(),
-            required_seconds: schedule.seconds.month_required,
-            logged_seconds: schedule.seconds.month_logged,
-            balance_seconds: schedule.seconds.month_balance,
-        }
-    }
-
-    fn apply_to(&self, report: &mut ListReport) {
-        report
-            .details
-            .month_required_duration
-            .clone_from(&self.required_duration);
-        report
-            .details
-            .month_logged_duration
-            .clone_from(&self.logged_duration);
-        report
-            .details
-            .month_current_period_duration
-            .clone_from(&self.balance_duration);
-        report.details.seconds.month_required = self.required_seconds;
-        report.details.seconds.month_logged = self.logged_seconds;
-        report.details.seconds.month_balance = self.balance_seconds;
-    }
-}
-
-fn stabilize_month_summary(
-    summaries: &mut BTreeMap<(i32, u32), MonthSummary>,
-    report: &mut ListReport,
-) {
-    if !report.pagination().totals_complete {
-        return;
-    }
-    let date = report.selected_date();
-    let key = (date.year(), date.month());
-    if let Some(summary) = summaries.get(&key) {
-        summary.apply_to(report);
-    } else {
-        summaries.insert(key, MonthSummary::from_report(report));
-    }
-}
+pub(crate) type CachedListReport = CachedReport<ListReport>;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -634,7 +573,7 @@ pub(crate) async fn run_command(
     }
 
     let mut reports: BTreeMap<NaiveDate, CachedListReport> = BTreeMap::new();
-    let mut month_summaries = BTreeMap::new();
+    let mut month_summaries = MonthSummaryCache::new();
     let mut prefetches: BTreeMap<NaiveDate, AbortOnDropTask<Result<ListReport, CliError>>> =
         BTreeMap::new();
     let initial_report = load_api_report(config_path, now, args.clone(), debug).await?;
@@ -686,14 +625,22 @@ pub(crate) async fn run_command(
             };
             (report, true)
         };
-        stabilize_month_summary(&mut month_summaries, &mut report);
+        stabilize_month_summary(
+            &mut month_summaries,
+            report.selected_date(),
+            report.pagination().totals_complete,
+            &mut report.details,
+        );
         let selected_date = report.selected_date();
         displayed_date = selected_date;
 
-        for date in adjacent_dates(selected_date)? {
-            if reports.contains_key(&date) || prefetches.contains_key(&date) {
-                continue;
-            }
+        for date in dates_to_prefetch(
+            selected_date,
+            reports.keys().copied(),
+            prefetches.keys().copied(),
+        )
+        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?
+        {
             let mut adjacent_args = args.clone();
             adjacent_args.when = Some(date.to_string());
             adjacent_args.continue_from = None;
@@ -741,33 +688,20 @@ pub(crate) fn take_reusable_report(
     reports: &mut BTreeMap<NaiveDate, CachedListReport>,
     date: NaiveDate,
 ) -> Option<ListReport> {
-    if !reports.get(&date).is_some_and(|cached| cached.reusable) {
-        return None;
-    }
-    reports.remove(&date).map(|cached| cached.report)
+    take_cached_reusable_report(reports, date)
 }
 
 fn date_for_list_action(
     date: NaiveDate,
     action: ListReportAction,
 ) -> Result<Option<NaiveDate>, CliError> {
-    let date = match action {
-        ListReportAction::Close => return Ok(None),
-        ListReportAction::PreviousDate => date.checked_sub_days(Days::new(1)),
-        ListReportAction::NextDate => date.checked_add_days(Days::new(1)),
+    match resolve_date_action(date, action) {
+        DateActionResolution::Close => Ok(None),
+        DateActionResolution::Date(date) => Ok(Some(date)),
+        DateActionResolution::OutOfRange => {
+            Err(CliError::InvalidInput("date is out of range".to_owned()))
+        }
     }
-    .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
-    Ok(Some(date))
-}
-
-fn adjacent_dates(date: NaiveDate) -> Result<[NaiveDate; 2], CliError> {
-    let previous = date
-        .checked_sub_days(Days::new(1))
-        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
-    let next = date
-        .checked_add_days(Days::new(1))
-        .ok_or_else(|| CliError::InvalidInput("date is out of range".to_owned()))?;
-    Ok([previous, next])
 }
 
 async fn await_list_report_task(
@@ -2229,8 +2163,18 @@ mod tests {
             false,
         );
 
-        stabilize_month_summary(&mut summaries, &mut first);
-        stabilize_month_summary(&mut summaries, &mut next);
+        stabilize_month_summary(
+            &mut summaries,
+            first.selected_date(),
+            first.pagination().totals_complete,
+            &mut first.details,
+        );
+        stabilize_month_summary(
+            &mut summaries,
+            next.selected_date(),
+            next.pagination().totals_complete,
+            &mut next.details,
+        );
 
         assert_eq!(next.schedule().month_logged_duration, "106h");
         assert_eq!(next.schedule().seconds.month_logged, 106 * 3_600);

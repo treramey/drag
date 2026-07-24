@@ -27,8 +27,8 @@ use super::super::{
     normalize_jira_site, setup_cancelled, App, BrowserLauncher, Config, ConnectionEnvironment,
     ConnectionOutcome, ConnectionVerifier, EnvironmentSetupPlan, JiraCredentials,
     NoopBrowserLauncher, OnboardingFuture, OnboardingSession, OnboardingWorkflow,
-    RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupPrompter, TempoCredentials,
-    VerificationFuture, ATLASSIAN_TOKEN_URL,
+    RatatuiOnboardingSession, SecretInput, SetupCredentials, SetupCredentialsExt, SetupPrompter,
+    TempoCredentials, VerificationFuture, ATLASSIAN_TOKEN_URL,
 };
 use crate::cli::{DoctorArgs, SetupArgs};
 use crate::list::{

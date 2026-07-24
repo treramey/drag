@@ -34,7 +34,11 @@ several peer submodules rather than a single implementation file.
 - `drag::field_selection`: validated list masks and deterministic projection of
   complete reports into stable structured shapes.
 - `drag::pagination`: deterministic bounded and exhaustive traversal plans.
+- `drag::list_policy`: deterministic interactive-list month-summary stabilization,
+  date navigation, reusable-report selection, and adjacent-date prefetch policy.
 - `drag::schedule`: month/day required and logged totals.
+- `drag::setup`: deterministic onboarding state, navigation, credential retention,
+  verification acceptance, invalidation, and completion transitions.
 - `drag_cli::browser`: shared boundary for local default-browser launches.
 - `drag_cli::config`: legacy-compatible maps and atomic secret storage.
 - `drag_cli::api`: authenticated Jira/Tempo requests, pagination, and response
