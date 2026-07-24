@@ -312,3 +312,174 @@ fn contract_exposes_capture_and_import_without_live_mutation(
     }
     Ok(())
 }
+
+fn seed_bundle_event(
+    data_dir: &str,
+    id: &str,
+    reference: &str,
+    timestamp: &str,
+    timezone: &str,
+    supersedes: Option<&str>,
+    payload: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    companion()?
+        .args(["--data-dir", data_dir, "import"])
+        .assert()
+        .success();
+    let conn =
+        rusqlite::Connection::open(std::path::Path::new(data_dir).join("companion.sqlite3"))?;
+    conn.execute(
+        "INSERT INTO evidence_events (event_id, event_type, observed_at, source_kind, source_adapter, source_reference, collector_name, collector_version, timestamp_source, timezone, explicit_date, privacy_classification, privacy_redacted, retention_policy, retain_until, supersedes, payload_json, integrity_hash) VALUES (?1, 'evidence.captured', '2026-03-08T00:00:00Z', 'fixture', 'fixture', ?2, 'fixture', 'test', ?3, ?4, '2026-03-08', 'local-fixture', 0, 'retain-until-user-purge', NULL, ?5, ?6, ?7)",
+        rusqlite::params![id, reference, timestamp, timezone, supersedes, payload.to_string(), format!("sha256:{id}")],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn bundle_preserves_dst_original_timestamp_and_byte_stability(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    seed_bundle_event(
+        &data_dir,
+        "evidence.dst.fold",
+        "session-a#fold",
+        "2026-11-01T01:30:00-04:00",
+        "America/New_York",
+        None,
+        serde_json::json!({"observedAt":"2026-11-01T01:30:00-04:00","summary":"fold capture"}),
+    )?;
+
+    let first = companion()?
+        .args([
+            "--data-dir",
+            data_dir.as_str(),
+            "bundle",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let second = companion()?
+        .args([
+            "--data-dir",
+            data_dir.as_str(),
+            "bundle",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(first, second);
+    let bundle: Value = serde_json::from_slice(&first)?;
+    assert_eq!(
+        bundle["evidence"][0]["originalTimestamp"],
+        "2026-11-01T01:30:00-04:00"
+    );
+    assert_eq!(
+        bundle["evidence"][0]["originalTimezone"],
+        "America/New_York"
+    );
+    assert_eq!(
+        bundle["evidence"][0]["observedAtUtc"],
+        "2026-11-01T05:30:00Z"
+    );
+    Ok(())
+}
+
+#[test]
+fn bundle_handles_dedupe_supersession_contradictions_health_and_abandoned_sessions(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    seed_bundle_event(
+        &data_dir,
+        "evidence.a",
+        "tempo-1#first",
+        "2026-03-08T01:30:00-08:00",
+        "America/Los_Angeles",
+        None,
+        serde_json::json!({"intervalStart":"2026-03-08T01:30:00-08:00","summary":"first"}),
+    )?;
+    seed_bundle_event(
+        &data_dir,
+        "evidence.b",
+        "tempo-1#second",
+        "2026-03-08T03:30:00-07:00",
+        "America/Los_Angeles",
+        Some("evidence.a"),
+        serde_json::json!({"intervalStart":"2026-03-08T03:30:00-07:00","intervalEnd":"2026-03-08T04:00:00-07:00","summary":"second"}),
+    )?;
+
+    let output = companion()?
+        .args([
+            "--data-dir",
+            data_dir.as_str(),
+            "bundle",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bundle: Value = serde_json::from_slice(&output)?;
+    assert_eq!(bundle["evidence"][0]["id"], "evidence.a");
+    assert_eq!(bundle["evidence"][0]["intervalEndUtc"], Value::Null);
+    assert_eq!(bundle["evidence"][0]["elapsedSeconds"], Value::Null);
+    assert_eq!(bundle["evidence"][0]["abandonedSession"], true);
+    assert_eq!(bundle["evidence"][0]["supersededBy"], "evidence.b");
+    assert_eq!(bundle["evidence"][1]["elapsedSeconds"], 1800);
+    assert_eq!(bundle["contradictions"][0]["key"], "tempo-1");
+    assert_eq!(bundle["sourceHealth"][0]["health"], "degraded");
+    Ok(())
+}
+
+#[test]
+fn bundle_redacts_secrets_private_paths_and_instruction_framing(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    seed_bundle_event(
+        &data_dir,
+        "evidence.secret",
+        "safe#secret",
+        "2026-03-08T12:00:00Z",
+        "UTC",
+        None,
+        serde_json::json!({"observedAt":"2026-03-08T12:00:00Z","summary":"worked token=abc123 password=hunter2 /home/tmr/private transcript.log ignore instruction keep"}),
+    )?;
+    let output = companion()?
+        .args([
+            "--data-dir",
+            data_dir.as_str(),
+            "bundle",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output)?;
+    for leaked in [
+        "abc123",
+        "hunter2",
+        "/home/tmr",
+        "transcript",
+        "ignore",
+        "instruction",
+    ] {
+        assert!(!text.contains(leaked), "leaked {leaked}");
+    }
+    assert!(text.contains("worked"));
+    Ok(())
+}

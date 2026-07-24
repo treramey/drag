@@ -2,7 +2,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
-use chrono::{NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,8 @@ enum Command {
     Resume(DateArgs),
     /// Print a persisted explicit-date terminal report.
     Report(DateArgs),
+    /// Print a byte-stable minimized evidence bundle for one explicit local date.
+    Bundle(DateArgs),
     /// Remove persisted capture-only companion state.
     Purge,
     /// Inspect scheduler lifecycle operations. These do not install anything yet.
@@ -226,6 +228,55 @@ struct RetentionMetadata {
     retain_until: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceBundle {
+    schema_version: u32,
+    explicit_date: NaiveDate,
+    mode: &'static str,
+    network_access: bool,
+    live_mutation_allowed: bool,
+    unsupported_gaps: Vec<&'static str>,
+    source_health: Vec<BundleSourceHealth>,
+    evidence: Vec<BundleEvidence>,
+    contradictions: Vec<BundleContradiction>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleSourceHealth {
+    source: String,
+    events: usize,
+    abandoned_sessions: usize,
+    health: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleEvidence {
+    id: String,
+    source: String,
+    reference: String,
+    original_timestamp: String,
+    original_timezone: String,
+    observed_at_utc: Option<String>,
+    interval_start_utc: Option<String>,
+    interval_end_utc: Option<String>,
+    elapsed_seconds: Option<i64>,
+    summary: String,
+    supersedes: Option<String>,
+    superseded_by: Option<String>,
+    contradicted_by: Vec<String>,
+    abandoned_session: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleContradiction {
+    key: String,
+    evidence_ids: Vec<String>,
+}
+
 fn main() {
     let cli = Cli::parse();
     if let Err(error) = run(cli) {
@@ -278,6 +329,10 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             })?;
             println!("{report}");
             Ok(())
+        }
+        Command::Bundle(args) => {
+            let bundle = build_bundle(&data_dir, args.date)?;
+            print_json(&bundle)
         }
         Command::Purge => {
             let _ = fs::remove_dir_all(&data_dir);
@@ -491,6 +546,169 @@ fn event_hash(event: &JournalEvent) -> Result<String, serde_json::Error> {
     Ok(format!("sha256:{:x}", Sha256::digest(encoded)))
 }
 
+fn build_bundle(data_dir: &Path, date: NaiveDate) -> Result<EvidenceBundle, CompanionError> {
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT event_id, source_adapter, source_reference, timestamp_source, timezone, supersedes, payload_json \
+         FROM evidence_events WHERE explicit_date = ?1 ORDER BY event_id ASC",
+    )?;
+    let rows = stmt.query_map([date.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(6)?,
+        ))
+    })?;
+
+    let mut evidence = Vec::new();
+    for row in rows {
+        let (
+            id,
+            source,
+            reference,
+            original_timestamp,
+            original_timezone,
+            supersedes,
+            payload_json,
+        ) = row?;
+        let payload: Value =
+            serde_json::from_str(&payload_json).map_err(CompanionError::Serialize)?;
+        let interval_start = payload.get("intervalStart").and_then(Value::as_str);
+        let interval_end = payload.get("intervalEnd").and_then(Value::as_str);
+        let point = payload
+            .get("observedAt")
+            .and_then(Value::as_str)
+            .unwrap_or(&original_timestamp)
+            .to_owned();
+        let summary = payload.get("summary").and_then(Value::as_str).unwrap_or("");
+        let start_utc = interval_start.and_then(normalize_timestamp);
+        let end_utc = interval_end.and_then(normalize_timestamp);
+        let elapsed_seconds = match (interval_start, interval_end) {
+            (Some(start), Some(end)) => elapsed(start, end),
+            _ => None,
+        };
+        evidence.push(BundleEvidence {
+            id,
+            source,
+            reference,
+            original_timestamp,
+            original_timezone,
+            observed_at_utc: normalize_timestamp(&point),
+            interval_start_utc: start_utc,
+            interval_end_utc: end_utc,
+            elapsed_seconds,
+            summary: redact(summary),
+            supersedes,
+            superseded_by: None,
+            contradicted_by: Vec::new(),
+            abandoned_session: interval_start.is_some() && interval_end.is_none(),
+        });
+    }
+    evidence.sort_by(|left, right| left.id.cmp(&right.id));
+
+    for index in 0..evidence.len() {
+        let replacement_id = evidence[index].id.clone();
+        if let Some(supersedes) = evidence[index].supersedes.clone() {
+            if let Some(target) = evidence.iter_mut().find(|item| item.id == supersedes) {
+                target.superseded_by = Some(replacement_id);
+            }
+        }
+    }
+
+    let mut contradictions = Vec::new();
+    let mut by_key = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for item in &evidence {
+        if let Some(key) = item.reference.split('#').next() {
+            by_key
+                .entry(key.to_owned())
+                .or_default()
+                .push(item.id.clone());
+        }
+    }
+    for (key, ids) in by_key.into_iter().filter(|(_, ids)| ids.len() > 1) {
+        for id in &ids {
+            if let Some(item) = evidence.iter_mut().find(|item| &item.id == id) {
+                item.contradicted_by = ids.iter().filter(|other| *other != id).cloned().collect();
+            }
+        }
+        contradictions.push(BundleContradiction {
+            key,
+            evidence_ids: ids,
+        });
+    }
+
+    let mut health = std::collections::BTreeMap::<String, (usize, usize)>::new();
+    for item in &evidence {
+        let entry = health.entry(item.source.clone()).or_default();
+        entry.0 += 1;
+        if item.abandoned_session {
+            entry.1 += 1;
+        }
+    }
+    let source_health = health
+        .into_iter()
+        .map(
+            |(source, (events, abandoned_sessions))| BundleSourceHealth {
+                source,
+                events,
+                abandoned_sessions,
+                health: if abandoned_sessions > 0 {
+                    "degraded"
+                } else {
+                    "healthy"
+                },
+            },
+        )
+        .collect();
+
+    Ok(EvidenceBundle {
+        schema_version: 1,
+        explicit_date: date,
+        mode: DEFAULT_MODE,
+        network_access: false,
+        live_mutation_allowed: false,
+        unsupported_gaps: vec!["collectors-deferred", "model-export-only"],
+        source_health,
+        evidence,
+        contradictions,
+    })
+}
+
+fn normalize_timestamp(raw: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(raw).ok().map(|timestamp| {
+        timestamp
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Secs, true)
+    })
+}
+
+fn elapsed(start: &str, end: &str) -> Option<i64> {
+    let start = DateTime::parse_from_rfc3339(start).ok()?;
+    let end = DateTime::parse_from_rfc3339(end).ok()?;
+    Some((end - start).num_seconds())
+}
+
+fn redact(raw: &str) -> String {
+    raw.split_whitespace()
+        .filter(|word| {
+            let lower = word.to_ascii_lowercase();
+            !(lower.contains("token=")
+                || lower.contains("password=")
+                || lower.contains("secret")
+                || lower.contains("/home/")
+                || lower.contains("transcript")
+                || lower.contains("ignore")
+                || lower.contains("instruction"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn persist_result(data_dir: &Path, result: &RunResult) -> Result<(), CompanionError> {
     let runs_dir = data_dir.join("runs");
     fs::create_dir_all(&runs_dir).map_err(|source| CompanionError::CreateDir {
@@ -559,6 +777,12 @@ fn contract() -> Contract {
             command("reconcile", true, vec!["write terminal run result"], vec![]),
             command("resume", true, vec!["write terminal run result"], vec![]),
             command("report", true, vec![], vec![]),
+            command(
+                "bundle",
+                true,
+                vec!["read imported evidence and print minimized daily bundle"],
+                vec![],
+            ),
             command(
                 "purge",
                 false,
