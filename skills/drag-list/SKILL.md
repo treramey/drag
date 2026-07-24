@@ -36,7 +36,7 @@ Usage: drag list [OPTIONS] [DATE]
 
 ## Automation policy
 
-Use `drag --output json list` explicitly so an interactive terminal never opens. Use `--fields` to reduce structured output, and preserve `pagination.next` when another segment may be needed. `list` is read-only; its interactive human view can open a Jira URL only after an explicit keypress.
+Use `drag --output json list` explicitly so an interactive terminal never opens. Each worklog includes its Tempo work attributes in `attributes`; use `--fields worklogs.attributes` to select only them. Do not make a second Tempo request to discover attributes already returned by `list`. Use `--fields` to reduce structured output, and preserve `pagination.next` when another segment may be needed. `list` is read-only; its interactive human view can open a Jira URL only after an explicit keypress.
 
 ## Inspect the contract
 

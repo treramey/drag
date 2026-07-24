@@ -981,6 +981,9 @@ async fn stream_worklog_value(
     if plan.includes(ListField::WorklogDescription) {
         worklog.insert("description".to_owned(), json!(entity.description));
     }
+    if plan.includes(ListField::WorklogAttributes) {
+        worklog.insert("attributes".to_owned(), json!(entity.attributes.values));
+    }
     if let Some(link) = link {
         worklog.insert("link".to_owned(), json!(link));
     }
@@ -1050,6 +1053,7 @@ fn to_worklog(entity: WorklogEntity, issue_key: String, timezone: Tz) -> Result<
         issue_id: entity.issue.id,
         duration: format_duration(entity.time_spent_seconds, false),
         description: entity.description,
+        attributes: entity.attributes.values,
         link,
         issue_key,
     })
@@ -1358,6 +1362,7 @@ mod tests {
             },
             description: "not selected".to_owned(),
             time_spent_seconds: 3_600,
+            attributes: Default::default(),
         }
     }
 
@@ -1375,6 +1380,7 @@ mod tests {
             },
             description: format!("description {id}"),
             time_spent_seconds: 3_600,
+            attributes: Default::default(),
         }
     }
 
@@ -1692,12 +1698,29 @@ mod tests {
                     json!({"kind": "pagination"}),
                 ],
             ),
+            (
+                "worklogs.attributes",
+                vec![
+                    json!({
+                        "kind": "worklog",
+                        "worklog": {
+                            "attributes": [{"key": "_Worktype_", "value": "Development"}]
+                        }
+                    }),
+                    json!({"kind": "summary"}),
+                    json!({"kind": "pagination"}),
+                ],
+            ),
         ] {
             let requests = Arc::new(Mutex::new(Requests::default()));
             let mut entity = worklog("visible", "not-a-date", "me", "blocked");
             entity.start_date = "2026-07-14".to_owned();
             entity.start_time = "not-a-time".to_owned();
             entity.issue.self_url = "not a Jira URL".to_owned();
+            entity.attributes.values = vec![drag::models::WorkAttributeValue {
+                key: "_Worktype_".to_owned(),
+                value: "Development".to_owned(),
+            }];
             let fake = FakeListDataSource {
                 worklogs: vec![entity],
                 schedule: Vec::new(),

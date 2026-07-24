@@ -29,6 +29,13 @@ pub struct WorkAttributeValue {
     pub value: String,
 }
 
+/// Work attributes embedded in a Tempo worklog response.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorklogAttributes {
+    #[serde(default)]
+    pub values: Vec<WorkAttributeValue>,
+}
+
 /// Definition returned by Tempo's work-attributes endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +59,8 @@ pub struct WorklogEntity {
     #[serde(default)]
     pub description: String,
     pub time_spent_seconds: i64,
+    #[serde(default)]
+    pub attributes: WorklogAttributes,
 }
 
 fn deserialize_string_or_u64<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -107,6 +116,8 @@ pub struct Worklog {
     pub issue_key: String,
     pub duration: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attributes: Vec<WorkAttributeValue>,
     pub link: String,
 }
 
@@ -183,6 +194,24 @@ mod tests {
         let entity: WorklogEntity = serde_json::from_str(&worklog_json("751393", "275038"))?;
 
         assert_eq!(entity.issue.id, "275038");
+        Ok(())
+    }
+
+    #[test]
+    fn worklog_entity_preserves_embedded_attributes() -> Result<(), serde_json::Error> {
+        let json = worklog_json("751393", "275038").replace(
+            r#""timeSpentSeconds": 3600"#,
+            r#""timeSpentSeconds": 3600,
+                "attributes": {"values": [
+                    {"key": "_Worktype_", "value": "Development"},
+                    {"key": "_Billable_", "value": "true"}
+                ]}"#,
+        );
+        let entity: WorklogEntity = serde_json::from_str(&json)?;
+
+        assert_eq!(entity.attributes.values.len(), 2);
+        assert_eq!(entity.attributes.values[0].key, "_Worktype_");
+        assert_eq!(entity.attributes.values[0].value, "Development");
         Ok(())
     }
 }

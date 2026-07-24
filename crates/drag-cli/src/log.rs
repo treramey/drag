@@ -279,6 +279,7 @@ pub(crate) fn to_worklog(
         issue_id: entity.issue.id,
         duration: format_duration(entity.time_spent_seconds, false),
         description: entity.description,
+        attributes: entity.attributes.values,
         link: format!("https://{hostname}/browse/{issue_key}"),
         issue_key,
     })
@@ -363,6 +364,7 @@ mod tests {
                 },
                 description: request.description.unwrap_or_default(),
                 time_spent_seconds: request.time_spent_seconds,
+                attributes: Default::default(),
             })
         }
 

@@ -22,6 +22,7 @@ pub enum ListField {
     WorklogIssueKey,
     WorklogDuration,
     WorklogDescription,
+    WorklogAttributes,
     WorklogLink,
     Schedule,
     ScheduleMonthRequiredDuration,
@@ -59,6 +60,7 @@ impl ListField {
         (Self::WorklogIssueKey, "worklogs.issueKey"),
         (Self::WorklogDuration, "worklogs.duration"),
         (Self::WorklogDescription, "worklogs.description"),
+        (Self::WorklogAttributes, "worklogs.attributes"),
         (Self::WorklogLink, "worklogs.link"),
         (Self::Schedule, "schedule"),
         (
@@ -121,6 +123,7 @@ impl ListField {
             | Self::WorklogIssueKey
             | Self::WorklogDuration
             | Self::WorklogDescription
+            | Self::WorklogAttributes
             | Self::WorklogLink => Some(Self::Worklogs),
             Self::WorklogIntervalStartTime | Self::WorklogIntervalEndTime => {
                 Some(Self::WorklogInterval)
@@ -208,6 +211,7 @@ impl ListFieldMask {
             ListField::WorklogIssueKey,
             ListField::WorklogDuration,
             ListField::WorklogDescription,
+            ListField::WorklogAttributes,
             ListField::WorklogLink,
         ]
         .into_iter()
@@ -389,6 +393,13 @@ fn project_worklog(worklog: &Worklog, plan: &ListProjectionPlan) -> serde_json::
         ListField::WorklogDescription,
         "description",
         &worklog.description,
+    );
+    insert_selected(
+        &mut result,
+        plan,
+        ListField::WorklogAttributes,
+        "attributes",
+        &worklog.attributes,
     );
     insert_selected(
         &mut result,

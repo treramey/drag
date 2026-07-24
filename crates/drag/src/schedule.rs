@@ -145,6 +145,7 @@ mod tests {
             },
             description: String::new(),
             time_spent_seconds: 21_600,
+            attributes: Default::default(),
         }];
         let schedule = vec![
             ScheduleEntity {
@@ -183,6 +184,7 @@ mod tests {
                 },
                 description: String::new(),
                 time_spent_seconds: 3_600,
+                attributes: Default::default(),
             },
             WorklogEntity {
                 tempo_worklog_id: "2".to_owned(),
@@ -197,6 +199,7 @@ mod tests {
                 },
                 description: String::new(),
                 time_spent_seconds: 7_200,
+                attributes: Default::default(),
             },
         ];
         let schedule = [ScheduleEntity {

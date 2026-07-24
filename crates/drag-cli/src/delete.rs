@@ -161,6 +161,7 @@ mod tests {
                 },
                 description: String::new(),
                 time_spent_seconds: 3_600,
+                attributes: Default::default(),
             })
         }
 
