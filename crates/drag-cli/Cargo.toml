@@ -30,7 +30,7 @@ serde_yaml_ng = "0.10.0"
 schemars.workspace = true
 semver.workspace = true
 tachyonfx = { version = "0.25.1", default-features = false, features = ["sendable", "std-duration"] }
-drag = { version = "0.8.0", path = "../drag" }
+drag = { version = "0.8.1", path = "../drag" }
 thiserror.workspace = true
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 time = "0.3"
