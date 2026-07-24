@@ -5,7 +5,8 @@ use std::process::Command as ProcessCommand;
 use std::time::Instant;
 
 use chrono::{
-    DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone, Utc,
+    DateTime, Datelike, Duration, LocalResult, NaiveDate, NaiveDateTime, SecondsFormat, TimeZone,
+    Utc,
 };
 use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
@@ -33,6 +34,10 @@ const CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
 const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
 const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
 const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
+const SCHEDULER_SCHEMA_VERSION: u32 = 2;
+const DRAG_MACHINE_CONTRACT_VERSION: u32 = 1;
+const DEFAULT_SCHEDULE_TIME: &str = "18:45";
+const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -88,7 +93,7 @@ enum Command {
     ProcessSpy(DateArgs),
     /// Remove persisted capture-only companion state while protecting recovery records by default.
     Purge(PurgeArgs),
-    /// Inspect scheduler lifecycle operations. These do not install anything yet.
+    /// Install, inspect, remove, catch up, or run scheduler-safe explicit-date reconciliation.
     Scheduler(SchedulerArgs),
     /// Install, remove, or capture Claude Code SessionStart/SessionEnd hooks.
     ClaudeHook(ClaudeHookArgs),
@@ -194,16 +199,61 @@ struct ClaudeHookSettingsArgs {
 
 #[derive(Debug, Subcommand)]
 enum SchedulerOperation {
-    /// Describe scheduler installation without mutating host scheduler state.
-    Install,
-    /// Describe scheduler enablement without mutating host scheduler state.
+    /// Install scheduler files into an explicit directory without touching unrelated config.
+    Install(SchedulerInstallArgs),
+    /// Mark the companion scheduler enabled in companion state.
     Enable,
-    /// Describe scheduler disablement without mutating host scheduler state.
+    /// Mark the companion scheduler disabled in companion state.
     Disable,
-    /// Describe scheduler removal without mutating host scheduler state.
-    Uninstall,
+    /// Remove only files previously installed by drag-companion.
+    Uninstall(SchedulerInstallArgs),
     /// Show scheduler status from companion state only.
     Status,
+    /// Select and run the latest eligible missed workday, if any.
+    CatchUp(SchedulerCatchUpArgs),
+    /// Scheduler-safe explicit-date command invoked by host schedulers.
+    Run(SchedulerRunArgs),
+}
+
+#[derive(Debug, Args, Clone)]
+struct SchedulerInstallArgs {
+    /// Host scheduler platform to render. Defaults to the current OS.
+    #[arg(long, value_parser = ["systemd", "launchd"], default_value = default_scheduler_platform())]
+    platform: String,
+    /// Directory containing user scheduler units/agents. Required for non-destructive installs.
+    #[arg(long, value_name = "DIR")]
+    target_dir: PathBuf,
+    /// Local time to run in HH:MM.
+    #[arg(long, default_value = DEFAULT_SCHEDULE_TIME)]
+    at: String,
+    /// IANA timezone or 'local'. Defaults to configured local time.
+    #[arg(long, default_value = DEFAULT_SCHEDULE_TIMEZONE)]
+    timezone: String,
+}
+
+#[derive(Debug, Args)]
+struct SchedulerCatchUpArgs {
+    /// Current local date used by tests and startup/wake reconciliation.
+    #[arg(long, value_parser = parse_date)]
+    today: Option<NaiveDate>,
+    /// Last successfully reconciled local date.
+    #[arg(long, value_parser = parse_date)]
+    last_success: Option<NaiveDate>,
+}
+
+#[derive(Debug, Args)]
+struct SchedulerRunArgs {
+    /// Explicit reconciliation date in YYYY-MM-DD format.
+    #[arg(long, value_parser = parse_date)]
+    date: NaiveDate,
+}
+
+fn default_scheduler_platform() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "launchd"
+    } else {
+        "systemd"
+    }
 }
 
 #[derive(Debug, Error)]
@@ -607,10 +657,7 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
         Command::Purge(args) => {
             print_json(&purge_state(&data_dir, args.acknowledge_lost_recovery)?)
         }
-        Command::Scheduler(args) => print_json(&serde_json::json!({
-            "status": "described", "operation": format!("{:?}", args.operation).to_lowercase(),
-            "mode": DEFAULT_MODE, "hostSchedulerMutated": false,
-        })),
+        Command::Scheduler(args) => handle_scheduler(&data_dir, &drag_bin, args),
         Command::ClaudeHook(args) => match args.operation {
             ClaudeHookOperation::Install(args) => {
                 install_claude_hooks(&args.settings)?;
@@ -632,6 +679,331 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
         },
         Command::Contract => print_json(&contract()),
     }
+}
+
+fn handle_scheduler(
+    data_dir: &Path,
+    drag_bin: &Path,
+    args: SchedulerArgs,
+) -> Result<(), CompanionError> {
+    migrate_scheduler_state(data_dir)?;
+    match args.operation {
+        SchedulerOperation::Install(args) => install_scheduler(data_dir, drag_bin, &args),
+        SchedulerOperation::Uninstall(args) => uninstall_scheduler(data_dir, &args),
+        SchedulerOperation::Enable => set_scheduler_enabled(data_dir, true),
+        SchedulerOperation::Disable => set_scheduler_enabled(data_dir, false),
+        SchedulerOperation::Status => print_json(&scheduler_status(data_dir)?),
+        SchedulerOperation::CatchUp(args) => scheduler_catch_up(data_dir, drag_bin, args),
+        SchedulerOperation::Run(args) => scheduler_run_date(data_dir, drag_bin, args.date),
+    }
+}
+
+fn scheduler_state_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("scheduler.json")
+}
+
+fn scheduler_kill_switch_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("scheduler.kill")
+}
+
+fn scheduler_status(data_dir: &Path) -> Result<Value, CompanionError> {
+    let state_path = scheduler_state_path(data_dir);
+    let state = if state_path.exists() {
+        serde_json::from_str::<Value>(&fs::read_to_string(&state_path).map_err(|source| {
+            CompanionError::Read {
+                path: state_path.clone(),
+                source,
+            }
+        })?)
+        .unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    Ok(serde_json::json!({
+        "status": "ok",
+        "schemaVersion": SCHEDULER_SCHEMA_VERSION,
+        "enabled": state.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        "killSwitchActive": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
+        "mode": DEFAULT_MODE,
+        "shadowModeForced": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
+        "dragMachineContract": { "requiredVersion": DRAG_MACHINE_CONTRACT_VERSION, "compatible": true },
+        "package": { "name": "drag-companion", "independent": true },
+        "state": state,
+    }))
+}
+
+fn install_scheduler(
+    data_dir: &Path,
+    drag_bin: &Path,
+    args: &SchedulerInstallArgs,
+) -> Result<(), CompanionError> {
+    fs::create_dir_all(&args.target_dir).map_err(|source| CompanionError::CreateDir {
+        path: args.target_dir.clone(),
+        source,
+    })?;
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
+    let command = format!(
+        "{} --data-dir {} --drag-bin {} scheduler run --date %Y-%m-%d",
+        std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("drag-companion"))
+            .display(),
+        data_dir.display(),
+        drag_bin.display()
+    );
+    let installed = if args.platform == "launchd" {
+        let plist = args.target_dir.join("email.trevors.drag-companion.plist");
+        write_owned_file(&plist, &render_launchd(&command, &args.at, &args.timezone)?)?;
+        vec![plist]
+    } else {
+        let service = args.target_dir.join("drag-companion.service");
+        let timer = args.target_dir.join("drag-companion.timer");
+        write_owned_file(&service, &render_systemd_service(&command))?;
+        write_owned_file(&timer, &render_systemd_timer(&args.at, &args.timezone)?)?;
+        vec![service, timer]
+    };
+    write_scheduler_state(
+        data_dir,
+        serde_json::json!({
+            "schemaVersion": SCHEDULER_SCHEMA_VERSION,
+            "enabled": true,
+            "platform": args.platform,
+            "at": args.at,
+            "timezone": args.timezone,
+            "installedFiles": installed,
+            "operationKeys": [],
+        }),
+    )?;
+    print_json(
+        &serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
+    )
+}
+
+fn uninstall_scheduler(data_dir: &Path, args: &SchedulerInstallArgs) -> Result<(), CompanionError> {
+    let names = [
+        "drag-companion.service",
+        "drag-companion.timer",
+        "email.trevors.drag-companion.plist",
+    ];
+    let mut removed = Vec::new();
+    for name in names {
+        let path = args.target_dir.join(name);
+        if path.exists() && is_owned_scheduler_file(&path)? {
+            fs::remove_file(&path).map_err(|source| CompanionError::Write {
+                path: path.clone(),
+                source,
+            })?;
+            removed.push(path);
+        }
+    }
+    write_scheduler_state(
+        data_dir,
+        serde_json::json!({
+            "schemaVersion": SCHEDULER_SCHEMA_VERSION,
+            "enabled": false,
+            "removedFiles": removed,
+            "operationKeys": scheduler_status(data_dir)?.get("state").and_then(|s| s.get("operationKeys")).cloned().unwrap_or_else(|| serde_json::json!([])),
+        }),
+    )?;
+    print_json(
+        &serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": false, "removedFiles": removed }),
+    )
+}
+
+fn set_scheduler_enabled(data_dir: &Path, enabled: bool) -> Result<(), CompanionError> {
+    let mut state = scheduler_status(data_dir)?["state"].clone();
+    state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
+    state["enabled"] = serde_json::json!(enabled);
+    write_scheduler_state(data_dir, state)?;
+    print_json(
+        &serde_json::json!({ "status": if enabled { "enabled" } else { "disabled" }, "hostSchedulerMutated": false }),
+    )
+}
+
+fn scheduler_catch_up(
+    data_dir: &Path,
+    drag_bin: &Path,
+    args: SchedulerCatchUpArgs,
+) -> Result<(), CompanionError> {
+    let status = scheduler_status(data_dir)?;
+    if status["killSwitchActive"].as_bool().unwrap_or(false)
+        || !status["enabled"].as_bool().unwrap_or(true)
+    {
+        return print_json(
+            &serde_json::json!({ "status": "shadow", "selectedDate": null, "mutationAllowed": false }),
+        );
+    }
+    let today = args
+        .today
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    let selected = latest_eligible_missed_workday(today, args.last_success);
+    if let Some(date) = selected {
+        scheduler_run_date(data_dir, drag_bin, date)
+    } else {
+        print_json(
+            &serde_json::json!({ "status": "no-op", "selectedDate": null, "mutationAllowed": false }),
+        )
+    }
+}
+
+fn scheduler_run_date(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+) -> Result<(), CompanionError> {
+    let status = scheduler_status(data_dir)?;
+    if status["killSwitchActive"].as_bool().unwrap_or(false) {
+        return print_json(
+            &serde_json::json!({ "status": "shadow", "date": date, "mutationAllowed": false, "reason": "kill-switch" }),
+        );
+    }
+    if !status["enabled"].as_bool().unwrap_or(true) {
+        return print_json(
+            &serde_json::json!({ "status": "disabled", "date": date, "mutationAllowed": false }),
+        );
+    }
+    let op_key = format!("scheduler.run.{date}");
+    let mut state = status["state"].clone();
+    let mut keys = state["operationKeys"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if keys.iter().any(|key| key == &serde_json::json!(op_key)) {
+        return print_json(
+            &serde_json::json!({ "status": "duplicate", "date": date, "operationKey": op_key, "mutationAllowed": false }),
+        );
+    }
+    keys.push(serde_json::json!(op_key));
+    state["operationKeys"] = Value::Array(keys);
+    state["lastAttemptedDate"] = serde_json::json!(date.to_string());
+    write_scheduler_state(data_dir, state)?;
+    let result = coordinated_run(data_dir, drag_bin, date, false)?;
+    print_json(
+        &serde_json::json!({ "status": "ran", "date": date, "operationKey": op_key, "mutationAllowed": false, "result": result }),
+    )
+}
+
+fn latest_eligible_missed_workday(
+    today: NaiveDate,
+    last_success: Option<NaiveDate>,
+) -> Option<NaiveDate> {
+    let start = today - Duration::days(7);
+    let mut candidate = today - Duration::days(1);
+    while candidate >= start {
+        let weekday = candidate.weekday();
+        if weekday.num_days_from_monday() < 5 && last_success.is_none_or(|last| candidate > last) {
+            return Some(candidate);
+        }
+        candidate -= Duration::days(1);
+    }
+    None
+}
+
+fn render_systemd_service(command: &str) -> String {
+    format!("# managed-by=drag-companion\n[Unit]\nDescription=Drag companion explicit-date reconciliation\n[Service]\nType=oneshot\nExecStart={command}\n")
+}
+
+fn render_systemd_timer(at: &str, timezone: &str) -> Result<String, CompanionError> {
+    validate_time_and_timezone(at, timezone)?;
+    Ok(format!("# managed-by=drag-companion\n[Unit]\nDescription=Run Drag companion at {at} {timezone}\n[Timer]\nOnCalendar=*-*-* {at}:00\nPersistent=true\nWakeSystem=false\n[Install]\nWantedBy=timers.target\n"))
+}
+
+fn render_launchd(command: &str, at: &str, timezone: &str) -> Result<String, CompanionError> {
+    validate_time_and_timezone(at, timezone)?;
+    let (hour, minute) = at.split_once(':').unwrap_or(("18", "45"));
+    Ok(format!("<!-- managed-by=drag-companion timezone={timezone} -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-companion</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{command}</string></array><key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict><key>RunAtLoad</key><true/></dict></plist>\n"))
+}
+
+fn validate_time_and_timezone(at: &str, timezone: &str) -> Result<(), CompanionError> {
+    let (hour, minute) = at
+        .split_once(':')
+        .ok_or_else(|| CompanionError::Proposal("invalid scheduler time".to_owned()))?;
+    let hour: u32 = hour
+        .parse()
+        .map_err(|_| CompanionError::Proposal("invalid scheduler hour".to_owned()))?;
+    let minute: u32 = minute
+        .parse()
+        .map_err(|_| CompanionError::Proposal("invalid scheduler minute".to_owned()))?;
+    if hour > 23 || minute > 59 {
+        return Err(CompanionError::Proposal(
+            "invalid scheduler time".to_owned(),
+        ));
+    }
+    if timezone != "local" {
+        timezone
+            .parse::<Tz>()
+            .map_err(|_| CompanionError::Proposal("invalid scheduler timezone".to_owned()))?;
+    }
+    Ok(())
+}
+
+fn is_owned_scheduler_file(path: &Path) -> Result<bool, CompanionError> {
+    let content = fs::read_to_string(path).map_err(|source| CompanionError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(content.contains("managed-by=drag-companion"))
+}
+
+fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {
+    if path.exists() && !is_owned_scheduler_file(path)? {
+        return Err(CompanionError::Proposal(format!(
+            "refusing to overwrite unrelated file {}",
+            path.display()
+        )));
+    }
+    fs::write(path, content).map_err(|source| CompanionError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn write_scheduler_state(data_dir: &Path, state: Value) -> Result<(), CompanionError> {
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
+    let path = scheduler_state_path(data_dir);
+    let tmp = path.with_extension("json.tmp");
+    fs::write(
+        &tmp,
+        serde_json::to_vec_pretty(&state).map_err(CompanionError::Serialize)?,
+    )
+    .map_err(|source| CompanionError::Write {
+        path: tmp.clone(),
+        source,
+    })?;
+    if path.exists() {
+        let backup = path.with_extension("json.bak");
+        fs::copy(&path, &backup).map_err(|source| CompanionError::Write {
+            path: backup,
+            source,
+        })?;
+    }
+    fs::rename(&tmp, &path).map_err(|source| CompanionError::Write { path, source })
+}
+
+fn migrate_scheduler_state(data_dir: &Path) -> Result<(), CompanionError> {
+    let path = scheduler_state_path(data_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = fs::read_to_string(&path).map_err(|source| CompanionError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let mut state: Value = serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+    if state["schemaVersion"].as_u64().unwrap_or(0) < SCHEDULER_SCHEMA_VERSION as u64 {
+        state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
+        state["resumable"] = serde_json::json!(true);
+        if state.get("operationKeys").is_none() {
+            state["operationKeys"] = serde_json::json!([]);
+        }
+        write_scheduler_state(data_dir, state)?;
+    }
+    Ok(())
 }
 
 fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
@@ -3718,8 +4090,13 @@ fn contract() -> Contract {
             command(
                 "scheduler",
                 false,
-                vec![],
-                vec!["install", "enable", "disable", "uninstall", "status"],
+                vec![
+                    "write only owned host scheduler files",
+                    "persist scheduler state atomically with backup",
+                    "run one scheduler-safe explicit-date reconciliation command",
+                    "kill switch forces shadow mode before mutation",
+                ],
+                vec!["install", "enable", "disable", "uninstall", "status", "catch-up", "run"],
             ),
             command(
                 "claude-hook",

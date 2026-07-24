@@ -3,6 +3,11 @@ use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::tempdir;
 
+fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::error::Error>> {
+    let output = cmd.assert().success().get_output().stdout.clone();
+    Ok(serde_json::from_slice(&output)?)
+}
+
 fn companion() -> Result<Command, Box<dyn std::error::Error>> {
     Ok(Command::cargo_bin("drag-companion")?)
 }
@@ -190,7 +195,256 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("enable"))
         .stdout(predicate::str::contains("disable"))
         .stdout(predicate::str::contains("uninstall"))
+        .stdout(predicate::str::contains("catch-up"))
+        .stdout(predicate::str::contains("run"))
         .stdout(predicate::str::contains("status"));
+    Ok(())
+}
+
+#[test]
+fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destructively(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+    let systemd = dir.path().join("systemd");
+    let launchd = dir.path().join("launchd");
+    std::fs::create_dir_all(&systemd)?;
+    std::fs::write(systemd.join("unrelated.timer"), "keep me")?;
+
+    let installed = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "install",
+                "--platform",
+                "systemd",
+                "--target-dir",
+            ])
+            .arg(&systemd),
+    )?;
+    assert_eq!(installed["status"], "installed");
+    assert_eq!(installed["hostSchedulerMutated"], false);
+    let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
+    let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
+    assert!(service.contains("scheduler run --date"));
+    assert!(timer.contains("18:45:00"));
+    assert!(timer.contains("Persistent=true"));
+    assert_eq!(
+        std::fs::read_to_string(systemd.join("unrelated.timer"))?,
+        "keep me"
+    );
+
+    json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "install",
+                "--platform",
+                "launchd",
+                "--target-dir",
+            ])
+            .arg(&launchd),
+    )?;
+    let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
+    assert!(plist.contains("scheduler run --date"));
+    assert!(plist.contains("<integer>18</integer>"));
+    assert!(plist.contains("<integer>45</integer>"));
+    assert!(plist.contains("RunAtLoad"));
+    Ok(())
+}
+
+#[test]
+fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+    let target = dir.path().join("systemd");
+    std::fs::create_dir_all(&target)?;
+    std::fs::write(target.join("drag-companion.timer"), "# unrelated timer")?;
+
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args([
+            "scheduler",
+            "install",
+            "--platform",
+            "systemd",
+            "--target-dir",
+        ])
+        .arg(&target)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to overwrite unrelated file",
+        ));
+    assert_eq!(
+        std::fs::read_to_string(target.join("drag-companion.timer"))?,
+        "# unrelated timer"
+    );
+
+    std::fs::write(
+        target.join("drag-companion.timer"),
+        "# managed-by=drag-companion\n",
+    )?;
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args([
+            "scheduler",
+            "install",
+            "--platform",
+            "systemd",
+            "--target-dir",
+        ])
+        .arg(&target)
+        .assert()
+        .success();
+    std::fs::write(target.join("other.service"), "keep")?;
+    json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "uninstall",
+                "--platform",
+                "systemd",
+                "--target-dir",
+            ])
+            .arg(&target),
+    )?;
+    assert!(!target.join("drag-companion.timer").exists());
+    assert_eq!(
+        std::fs::read_to_string(target.join("other.service"))?,
+        "keep"
+    );
+    Ok(())
+}
+
+#[test]
+fn scheduler_catch_up_fixtures_cover_dst_timezone_sleep_duplicate_disabled_and_old_misses(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+
+    for (today, last_success, selected) in [
+        ("2026-03-09", "2026-03-05", "2026-03-06"),
+        ("2026-11-02", "2026-10-29", "2026-10-30"),
+        ("2026-07-24", "2026-07-21", "2026-07-23"),
+        ("2026-07-27", "2026-07-17", "2026-07-24"),
+    ] {
+        let output = companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "catch-up",
+                "--today",
+                today,
+                "--last-success",
+                last_success,
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let payload: Value = serde_json::from_slice(&output)?;
+        assert_eq!(payload["date"], selected);
+    }
+
+    let duplicate = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "run", "--date", "2026-07-23"]),
+    )?;
+    assert_eq!(duplicate["status"], "duplicate");
+
+    json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "disable"]),
+    )?;
+    let disabled = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "catch-up",
+                "--today",
+                "2026-07-24",
+                "--last-success",
+                "2026-07-10",
+            ]),
+    )?;
+    assert_eq!(disabled["status"], "shadow");
+    json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "enable"]),
+    )?;
+
+    let old = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "catch-up",
+                "--today",
+                "2026-07-24",
+                "--last-success",
+                "2026-07-23",
+            ]),
+    )?;
+    assert_eq!(old["status"], "no-op");
+    Ok(())
+}
+
+#[test]
+fn scheduler_migration_preserves_operation_keys_and_kill_switch_forces_shadow(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data)?;
+    std::fs::write(
+        data.join("scheduler.json"),
+        r#"{"schemaVersion":1,"enabled":true,"operationKeys":["scheduler.run.2026-07-22"]}"#,
+    )?;
+    let status = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "status"]),
+    )?;
+    assert_eq!(status["schemaVersion"], 2);
+    assert_eq!(
+        status["state"]["operationKeys"][0],
+        "scheduler.run.2026-07-22"
+    );
+    assert!(data.join("scheduler.json.bak").exists());
+
+    std::fs::write(data.join("scheduler.kill"), "operator stop")?;
+    let shadow = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "run", "--date", "2026-07-24"]),
+    )?;
+    assert_eq!(shadow["status"], "shadow");
+    assert_eq!(shadow["mutationAllowed"], false);
+    Ok(())
+}
+
+#[test]
+fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let status = json_output(
+        companion()?
+            .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
+            .args(["scheduler", "status"]),
+    )?;
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 1);
+    assert_eq!(status["dragMachineContract"]["compatible"], true);
+    assert_eq!(status["package"]["name"], "drag-companion");
+    assert_eq!(status["package"]["independent"], true);
     Ok(())
 }
 
