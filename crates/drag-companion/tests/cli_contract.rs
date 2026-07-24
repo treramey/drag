@@ -1337,6 +1337,438 @@ fi
     Ok(bin)
 }
 
+fn seed_approved_payload(
+    data_dir: &str,
+    proposal: &str,
+    issue: &str,
+    start: &str,
+    end: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    companion()?
+        .args(["--data-dir", data_dir, "import"])
+        .assert()
+        .success();
+    let conn =
+        rusqlite::Connection::open(std::path::Path::new(data_dir).join("companion.sqlite3"))?;
+    let bundle = format!("bundle-{proposal}");
+    conn.execute("INSERT OR IGNORE INTO daily_bundles (id, explicit_date, state) VALUES (?1,'2026-03-08','proposed')", [&bundle])?;
+    conn.execute(
+        "INSERT INTO proposals (id, bundle_id, state) VALUES (?1, ?2, 'proposed')",
+        rusqlite::params![proposal, bundle],
+    )?;
+    conn.execute("INSERT INTO policy_decisions (id, proposal_id, decision, decided_at) VALUES (?1, ?1, 'approved', '2026-03-08T00:00:00Z')", [proposal])?;
+    for (name, value) in [
+        ("issueKey", issue),
+        ("start", start),
+        ("end", end),
+        ("description", "Execute approved worklog"),
+        ("attributes", r#"{"_Account_":"RD"}"#),
+    ] {
+        conn.execute(
+            "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![proposal, name, value],
+        )?;
+    }
+    Ok(())
+}
+
+fn executable_drag(
+    dir: &tempfile::TempDir,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let bin = dir.path().join("exec-drag");
+    std::fs::write(
+        &bin,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+log="{0}/commands.log"
+state="{0}/remote.jsonl"
+echo "$*" >> "$log"
+if [[ "$*" == *" list "* ]]; then
+  printf '{{"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":['
+  first=1
+  if [[ -f "$state" ]]; then
+    while IFS= read -r line; do
+      [[ $first -eq 1 ]] || printf ','
+      first=0
+      printf '%s' "$line"
+    done < "$state"
+  fi
+  printf ']}}'
+  exit 0
+fi
+if [[ "$*" == *" log "* ]]; then
+  payload=$(cat)
+  echo "$payload" > "{0}/last-stdin.json"
+  if [[ "${{DRAG_FAULT:-}}" == "stdin" ]]; then exit 7; fi
+  id="tempo-$(( $(wc -l < "$state" 2>/dev/null || echo 0) + 1 ))"
+  worklog=$(printf '%s' "$payload" | python3 -c 'import json,sys; p=json.load(sys.stdin); p["id"]=sys.argv[1]; print(json.dumps(p,separators=(",",":")))' "$id")
+  echo "$worklog" >> "$state"
+  if [[ "${{DRAG_FAULT:-}}" == "after-remote" ]]; then echo dropped >&2; exit 1; fi
+  printf '{{"tempoWorklogId":"%s"}}' "$id"
+  if [[ "${{DRAG_FAULT:-}}" == "after-response" ]]; then exit 1; fi
+  exit 0
+fi
+exit 2
+"#,
+            dir.path().display()
+        ),
+    )?;
+    std::process::Command::new("chmod")
+        .args(["+x", bin.to_str().ok_or("bin")?])
+        .status()?;
+    Ok(bin)
+}
+
+#[test]
+fn execute_is_gated_by_default_and_process_spy_starts_empty(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    let drag = executable_drag(&dir)?;
+    let out = companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&out)?;
+    assert_eq!(json["status"], "gated");
+    assert_eq!(json["liveMutationAllowed"], false);
+    assert!(!dir.path().join("commands.log").exists());
+    let spy = companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(serde_json::from_slice::<Value>(&spy)?["operations"]
+        .as_array()
+        .ok_or("ops")?
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn execute_persists_exact_payload_before_drag_confirms_id_and_reruns_idempotently(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    let drag = executable_drag(&dir)?;
+    for _ in 0..2 {
+        companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+            .assert()
+            .success();
+    }
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+    assert!(commands.matches("list --date 2026-03-08").count() >= 2);
+    let spy = companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let spy: Value = serde_json::from_slice(&spy)?;
+    let op = &spy["operations"][0];
+    assert!(op["operationKey"]
+        .as_str()
+        .ok_or("key")?
+        .contains("op.v1.default.2026-03-08"));
+    assert_eq!(op["state"], "confirmed");
+    assert_eq!(op["tempoWorklogId"], "tempo-1");
+    assert_eq!(
+        op["payload"],
+        serde_json::from_str::<Value>(&std::fs::read_to_string(
+            dir.path().join("last-stdin.json")
+        )?)?
+    );
+    assert_eq!(op["submittingIntent"]["persistedBeforeDrag"], true);
+    Ok(())
+}
+
+#[test]
+fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    let drag = executable_drag(&dir)?;
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .env("DRAG_FAULT", "after-remote")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("transport_ambiguity"));
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "resume",
+            "--date",
+            "2026-03-08",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success();
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+    let spy = companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&spy)?["operations"][0]["state"],
+        "confirmed"
+    );
+    Ok(())
+}
+
+#[test]
+fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_duplicate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    let missing = dir.path().join("missing-drag");
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            missing.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("failed to start Drag"));
+    let spy = companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(serde_json::from_slice::<Value>(&spy)?["operations"]
+        .as_array()
+        .ok_or("ops")?
+        .is_empty());
+
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    let drag = executable_drag(&dir)?;
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .env("DRAG_FAULT", "stdin")
+        .assert()
+        .failure();
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+    let blocked = companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&blocked)?["status"],
+        "uncertain"
+    );
+
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-exec",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    let drag = executable_drag(&dir)?;
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .env("DRAG_FAULT", "after-response")
+        .assert()
+        .failure();
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success();
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-one",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_approved_payload(
+        &data,
+        "proposal-two",
+        "DRAG-155",
+        "2026-03-08T15:00:00Z",
+        "2026-03-08T16:00:00Z",
+    )?;
+    let drag = executable_drag(&dir)?;
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success();
+    let spy = companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ops = serde_json::from_slice::<Value>(&spy)?["operations"]
+        .as_array()
+        .ok_or("ops")?
+        .clone();
+    assert_eq!(ops.len(), 2);
+    assert!(ops.iter().all(|op| op["state"] == "confirmed"));
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 2);
+    Ok(())
+}
+
 #[test]
 fn drag_read_follows_continuations_preserving_date_and_never_mutates(
 ) -> Result<(), Box<dyn std::error::Error>> {

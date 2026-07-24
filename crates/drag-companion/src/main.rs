@@ -24,6 +24,7 @@ const STORE_SCHEMA_VERSION: i64 = 1;
 const CLAUDE_HOOK_SCHEMA_VERSION: u32 = 1;
 const CLAUDE_COLLECTOR: &str = "claude-code-session-hook";
 const PROPOSAL_SCHEMA_VERSION: u32 = 1;
+const POLICY_SCHEMA_VERSION: u32 = 1;
 const PROPOSAL_ADAPTER: &str = "provider-fixture";
 const MAX_BUNDLE_BYTES: usize = 128 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
@@ -76,6 +77,10 @@ enum Command {
     Audit(AuditArgs),
     /// Preview exact structured Drag worklog payloads through dry-run only.
     Preview(PreviewArgs),
+    /// Execute approved payloads through Drag with an idempotent operation ledger.
+    Execute(ExecuteArgs),
+    /// Inspect the durable mutation operation ledger for tests and operators.
+    ProcessSpy(DateArgs),
     /// Remove persisted capture-only companion state.
     Purge,
     /// Inspect scheduler lifecycle operations. These do not install anything yet.
@@ -121,6 +126,16 @@ struct PreviewArgs {
     /// Proposal id to preview. Defaults to the first persisted proposal for the date.
     #[arg(long)]
     proposal: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct ExecuteArgs {
+    /// Explicit reconciliation date in YYYY-MM-DD format.
+    #[arg(long, value_parser = parse_date)]
+    date: NaiveDate,
+    /// Explicitly authorize live Drag mutation. Rollout env must also be enabled.
+    #[arg(long)]
+    authorize_live: bool,
 }
 
 #[derive(Debug, Args)]
@@ -530,11 +545,11 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             )
         }
         Command::Reconcile(args) => {
-            let result = coordinated_run(&data_dir, args.date, false)?;
+            let result = coordinated_run(&data_dir, &drag_bin, args.date, false)?;
             print_json(&result)
         }
         Command::Resume(args) => {
-            let result = coordinated_run(&data_dir, args.date, true)?;
+            let result = coordinated_run(&data_dir, &drag_bin, args.date, true)?;
             print_json(&result)
         }
         Command::Report(args) => {
@@ -567,6 +582,13 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             args.date,
             args.proposal.as_deref(),
         )?),
+        Command::Execute(args) => print_json(&execute_drag_worklogs(
+            &data_dir,
+            &drag_bin,
+            args.date,
+            args.authorize_live,
+        )?),
+        Command::ProcessSpy(args) => print_json(&process_spy(&data_dir, args.date)?),
         Command::Purge => {
             let _ = fs::remove_dir_all(&data_dir);
             print_json(&serde_json::json!({ "status": "purged", "dataDir": data_dir }))
@@ -2820,6 +2842,7 @@ struct AdvisoryRunLock {
 
 fn coordinated_run(
     data_dir: &Path,
+    drag_bin: &Path,
     date: NaiveDate,
     resume: bool,
 ) -> Result<CoordinatedRunResult, CompanionError> {
@@ -2831,6 +2854,9 @@ fn coordinated_run(
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
+    if resume && date_has_mutation_operations(&conn, date)? {
+        reconcile_complete_day_and_ledger(&conn, drag_bin, date)?;
+    }
     let owner_id = format!("{}:{}", std::process::id(), now_string());
     let (recovered_lease, skipped_confirmed_work) = acquire_sqlite_lease(&conn, date, &owner_id)?;
 
@@ -2941,7 +2967,279 @@ fn migrate_run_coordination(conn: &Connection) -> Result<(), CompanionError> {
          CREATE TABLE IF NOT EXISTS run_phases (tempo_account TEXT NOT NULL, local_date TEXT NOT NULL, phase TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, error TEXT, PRIMARY KEY (tempo_account, local_date, phase, attempt));
          CREATE TABLE IF NOT EXISTS coordinated_runs (tempo_account TEXT NOT NULL, local_date TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, PRIMARY KEY (tempo_account, local_date));"
     )?;
+    for ddl in [
+        "ALTER TABLE mutation_operations ADD COLUMN local_date TEXT",
+        "ALTER TABLE mutation_operations ADD COLUMN tempo_account TEXT",
+        "ALTER TABLE mutation_operations ADD COLUMN payload_json TEXT",
+        "ALTER TABLE mutation_operations ADD COLUMN submitting_intent_json TEXT",
+        "ALTER TABLE mutation_operations ADD COLUMN tempo_worklog_id TEXT",
+        "ALTER TABLE mutation_operations ADD COLUMN policy_schema_version INTEGER",
+        "ALTER TABLE mutation_operations ADD COLUMN payload_schema_version INTEGER",
+    ] {
+        if let Err(error) = conn.execute(ddl, []) {
+            if !error.to_string().contains("duplicate column name") {
+                return Err(error.into());
+            }
+        }
+    }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecuteResult {
+    status: &'static str,
+    selected_date: NaiveDate,
+    submitted: usize,
+    skipped: usize,
+    uncertain: bool,
+    network_access: bool,
+    live_mutation_allowed: bool,
+}
+
+fn live_rollout_enabled() -> bool {
+    std::env::var("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT")
+        .ok()
+        .as_deref()
+        == Some("1")
+}
+
+fn execute_drag_worklogs(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+    authorize_live: bool,
+) -> Result<ExecuteResult, CompanionError> {
+    if !authorize_live || !live_rollout_enabled() {
+        return Ok(ExecuteResult {
+            status: "gated",
+            selected_date: date,
+            submitted: 0,
+            skipped: 0,
+            uncertain: false,
+            network_access: false,
+            live_mutation_allowed: false,
+        });
+    }
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    reconcile_complete_day_and_ledger(&conn, drag_bin, date)?;
+    if date_has_uncertain_operation(&conn, date)? {
+        return Ok(ExecuteResult {
+            status: "uncertain",
+            selected_date: date,
+            submitted: 0,
+            skipped: 0,
+            uncertain: true,
+            network_access: true,
+            live_mutation_allowed: true,
+        });
+    }
+    let approved = approved_payloads(data_dir, date)?;
+    let mut submitted = 0;
+    let mut skipped = 0;
+    for (proposal_id, payload) in approved {
+        let key = operation_key(TEMPO_ACCOUNT, date, &payload)?;
+        if confirmed_operation(&conn, &key)?.is_some() {
+            skipped += 1;
+            continue;
+        }
+        if date_has_uncertain_operation(&conn, date)? {
+            break;
+        }
+        let latest = read_drag_day(drag_bin, date)?;
+        let candidate = normalize_payload_worklog(&payload, &proposal_id)?;
+        if latest
+            .worklogs
+            .iter()
+            .any(|existing| same_worklog(existing, &candidate))
+        {
+            persist_submitting_operation(&conn, date, &proposal_id, &key, &payload)?;
+            persist_confirmed_operation(&conn, &key, "reconciled-existing")?;
+            skipped += 1;
+            continue;
+        }
+        persist_submitting_operation(&conn, date, &proposal_id, &key, &payload)?;
+        let response = drag_json(
+            drag_bin,
+            &[
+                "--output".into(),
+                "json".into(),
+                "log".into(),
+                "--json".into(),
+                "-".into(),
+            ],
+            Some(&payload),
+            false,
+        );
+        match response {
+            Ok(value) => {
+                let id = value
+                    .get("tempoWorklogId")
+                    .or_else(|| value.get("id"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        reconcile_error(
+                            ReconcileErrorKind::TransportAmbiguity,
+                            "accepted Drag response missing worklog id",
+                        )
+                    })?;
+                persist_confirmed_operation(&conn, &key, id)?;
+                submitted += 1;
+            }
+            Err(
+                error @ CompanionError::DragReconcile {
+                    kind: ReconcileErrorKind::TransportAmbiguity,
+                    ..
+                },
+            ) => {
+                mark_operation_uncertain(&conn, date, &key)?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(ExecuteResult {
+        status: "executed",
+        selected_date: date,
+        submitted,
+        skipped,
+        uncertain: false,
+        network_access: true,
+        live_mutation_allowed: true,
+    })
+}
+
+fn operation_key(
+    account: &str,
+    date: NaiveDate,
+    payload: &Value,
+) -> Result<String, CompanionError> {
+    let canonical = serde_json::to_vec(payload).map_err(CompanionError::Serialize)?;
+    let digest = Sha256::digest(canonical);
+    Ok(format!(
+        "op.v{POLICY_SCHEMA_VERSION}.{account}.{date}.{digest:x}"
+    ))
+}
+
+fn approved_payloads(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<Vec<(String, Value)>, CompanionError> {
+    let approved = {
+        let conn = Connection::open(store_path(data_dir))?;
+        let mut stmt = conn.prepare("SELECT proposal_id FROM policy_decisions WHERE decision = 'approved' ORDER BY proposal_id")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<std::collections::BTreeSet<_>, _>>()?
+    };
+    Ok(proposal_payloads(data_dir, date, None)?
+        .into_iter()
+        .filter(|(id, _)| approved.contains(id))
+        .collect())
+}
+
+fn persist_submitting_operation(
+    conn: &Connection,
+    date: NaiveDate,
+    proposal_id: &str,
+    key: &str,
+    payload: &Value,
+) -> Result<(), CompanionError> {
+    let intent =
+        serde_json::json!({"intent":"submit-worklog","persistedBeforeDrag":true,"at":now_string()});
+    conn.execute("INSERT INTO mutation_operations (id, proposal_id, state, idempotency_key, local_date, tempo_account, payload_json, submitting_intent_json, policy_schema_version, payload_schema_version) VALUES (?1, ?2, 'submitting', ?1, ?3, ?4, ?5, ?6, ?7, 1) ON CONFLICT(id) DO NOTHING", params![key, proposal_id, date.to_string(), TEMPO_ACCOUNT, payload.to_string(), intent.to_string(), POLICY_SCHEMA_VERSION])?;
+    conn.execute("INSERT INTO mutation_attempts (id, operation_id, state, attempted_at) VALUES (?1, ?1, 'submitting', ?2) ON CONFLICT(id) DO NOTHING", params![key, now_string()])?;
+    Ok(())
+}
+
+fn persist_confirmed_operation(
+    conn: &Connection,
+    key: &str,
+    tempo_id: &str,
+) -> Result<(), CompanionError> {
+    conn.execute(
+        "UPDATE mutation_operations SET state = 'confirmed', tempo_worklog_id = ?1 WHERE id = ?2",
+        params![tempo_id, key],
+    )?;
+    conn.execute(
+        "UPDATE mutation_attempts SET state = 'confirmed' WHERE operation_id = ?1",
+        params![key],
+    )?;
+    Ok(())
+}
+
+fn mark_operation_uncertain(
+    conn: &Connection,
+    date: NaiveDate,
+    key: &str,
+) -> Result<(), CompanionError> {
+    conn.execute(
+        "UPDATE mutation_operations SET state = 'uncertain' WHERE id = ?1",
+        params![key],
+    )?;
+    finish_run(conn, date, "uncertain")?;
+    Ok(())
+}
+
+fn confirmed_operation(conn: &Connection, key: &str) -> Result<Option<String>, CompanionError> {
+    Ok(conn.query_row("SELECT tempo_worklog_id FROM mutation_operations WHERE id = ?1 AND state = 'confirmed'", params![key], |row| row.get(0)).optional()?)
+}
+
+fn date_has_uncertain_operation(
+    conn: &Connection,
+    date: NaiveDate,
+) -> Result<bool, CompanionError> {
+    Ok(conn.query_row("SELECT 1 FROM mutation_operations WHERE tempo_account = ?1 AND local_date = ?2 AND state = 'uncertain' LIMIT 1", params![TEMPO_ACCOUNT, date.to_string()], |row| row.get::<_, i64>(0)).optional()?.is_some())
+}
+
+fn date_has_mutation_operations(
+    conn: &Connection,
+    date: NaiveDate,
+) -> Result<bool, CompanionError> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM mutation_operations WHERE tempo_account = ?1 AND local_date = ?2 LIMIT 1",
+            params![TEMPO_ACCOUNT, date.to_string()],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn reconcile_complete_day_and_ledger(
+    conn: &Connection,
+    drag_bin: &Path,
+    date: NaiveDate,
+) -> Result<(), CompanionError> {
+    let read = read_drag_day(drag_bin, date)?;
+    let mut stmt = conn.prepare("SELECT id, payload_json FROM mutation_operations WHERE tempo_account = ?1 AND local_date = ?2 AND state IN ('submitting','uncertain') ORDER BY id")?;
+    let rows = stmt.query_map(params![TEMPO_ACCOUNT, date.to_string()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (key, payload_json) = row?;
+        let payload: Value =
+            serde_json::from_str(&payload_json).map_err(CompanionError::Serialize)?;
+        let candidate = normalize_payload_worklog(&payload, &key)?;
+        if let Some(existing) = read
+            .worklogs
+            .iter()
+            .find(|existing| same_worklog(existing, &candidate))
+        {
+            persist_confirmed_operation(conn, &key, &existing.tempo_worklog_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn process_spy(data_dir: &Path, date: NaiveDate) -> Result<Value, CompanionError> {
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    let mut stmt = conn.prepare("SELECT id, state, payload_json, submitting_intent_json, tempo_worklog_id FROM mutation_operations WHERE local_date = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([date.to_string()], |row| Ok(serde_json::json!({"operationKey": row.get::<_, String>(0)?, "state": row.get::<_, String>(1)?, "payload": row.get::<_, Option<String>>(2)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()), "submittingIntent": row.get::<_, Option<String>>(3)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()), "tempoWorklogId": row.get::<_, Option<String>>(4)?})))?.collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({"selectedDate": date, "operations": rows}))
 }
 
 fn acquire_sqlite_lease(
@@ -3234,6 +3532,24 @@ fn contract() -> Contract {
                 ],
             ),
             command("preview", true, vec![], vec!["drag log --json - --dry-run through public CLI"]),
+            command(
+                "execute",
+                true,
+                vec![
+                    "persist exact payload and submitting intent before Drag invocation",
+                    "persist durable mutation operation ledger",
+                ],
+                vec![
+                    "drag list complete day before create",
+                    "drag log --json - only when --authorize-live and rollout env are enabled",
+                ],
+            ),
+            command(
+                "process-spy",
+                true,
+                vec![],
+                vec!["inspect durable mutation operation ledger"],
+            ),
             command(
                 "purge",
                 false,
