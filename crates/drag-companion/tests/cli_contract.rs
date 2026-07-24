@@ -449,6 +449,265 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
 }
 
 #[test]
+fn rollout_persists_exact_stage_gates_and_forces_shadow_failures(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let status = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "status",
+    ]))?;
+    assert_eq!(status["stage"], "capture-only");
+    assert_eq!(status["effectiveMode"], "capture-only");
+    assert_eq!(status["liveMutationAllowed"], false);
+    assert_eq!(status["stages"].as_array().ok_or("stages")?.len(), 6);
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "record",
+            "--gate",
+            "fixture",
+            "--schema-valid",
+            "--provenance-retained",
+            "--secrets-redacted",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote"
+        ]))?["stage"],
+        "historical-replay"
+    );
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "record",
+            "--gate",
+            "replay",
+            "--eligible-days",
+            "19",
+            "--proposals",
+            "100",
+            "--issue-attribution-precision",
+            "0.99",
+            "--supported-duration-precision",
+            "0.99",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote"
+        ]))?["stage"],
+        "historical-replay"
+    );
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "record",
+            "--gate",
+            "replay",
+            "--eligible-days",
+            "1",
+            "--proposals",
+            "0",
+            "--issue-attribution-precision",
+            "0.99",
+            "--supported-duration-precision",
+            "0.99",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote"
+        ]))?["stage"],
+        "shadow"
+    );
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "record",
+            "--gate",
+            "shadow",
+            "--eligible-days",
+            "20",
+            "--proposals",
+            "100",
+            "--issue-attribution-precision",
+            "0.99",
+            "--supported-duration-precision",
+            "0.99",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote"
+        ]))?["stage"],
+        "reviewed-batches"
+    );
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "record",
+            "--gate",
+            "reviewed",
+            "--eligible-days",
+            "10",
+            "--reviewed-batches",
+            "10",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote"
+        ]))?["stage"],
+        "restricted-autonomy"
+    );
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "record",
+            "--gate",
+            "restricted",
+            "--eligible-days",
+            "20",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "promote"
+        ]))?["stage"],
+        "general-autonomy"
+    );
+
+    for failure in [
+        "--collector-health-failure",
+        "--schema-compatibility-failure",
+        "--lock-failure",
+        "--incomplete-day",
+        "--mutation-uncertainty",
+    ] {
+        let mode = json_output(companion()?.args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "rollout",
+            "effective-mode",
+            failure,
+        ]))?;
+        assert_eq!(mode["effectiveMode"], "shadow");
+        assert_eq!(mode["liveMutationAllowed"], false);
+    }
+    Ok(())
+}
+
+#[test]
+fn rollout_resets_unsafe_gate_expands_general_once_and_execute_needs_persisted_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let reset = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "record",
+        "--gate",
+        "replay",
+        "--unsafe-reason",
+        "overlap violation",
+    ]))?;
+    assert_eq!(reset["lastResetReason"], "overlap violation");
+    assert_eq!(reset["gates"]["replay"]["eligibleDays"], 0);
+    assert_eq!(reset["gates"]["replay"]["passed"], false);
+
+    let one = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "record",
+        "--expansion",
+        "evidence:git",
+    ]))?;
+    assert_eq!(
+        one["gates"]["generalExpansions"]
+            .as_array()
+            .ok_or("expansions")?
+            .len(),
+        1
+    );
+    let dedupe = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "record",
+        "--expansion",
+        "evidence:git",
+    ]))?;
+    assert_eq!(
+        dedupe["gates"]["generalExpansions"]
+            .as_array()
+            .ok_or("expansions")?
+            .len(),
+        1
+    );
+
+    let gated = json_output(
+        companion()?
+            .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+            .args([
+                "--data-dir",
+                data_dir.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-07-24",
+                "--authorize-live",
+            ]),
+    )?;
+    assert_eq!(gated["status"], "gated");
+    assert_eq!(gated["liveMutationAllowed"], false);
+    Ok(())
+}
+
+#[test]
 fn contract_is_machine_readable_and_capture_only_by_default(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let output = companion()?
@@ -1781,6 +2040,25 @@ fn seed_approved_payload(
     Ok(())
 }
 
+fn seed_general_autonomy_rollout(data_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(data_dir)?;
+    std::fs::write(
+        std::path::Path::new(data_dir).join("rollout-state.json"),
+        r#"{
+  "stage": "general-autonomy",
+  "fixture": {"eligibleDays":0,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "replay": {"eligibleDays":20,"proposals":100,"issueAttributionPrecision":0.99,"supportedDurationPrecision":0.99,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "shadow": {"eligibleDays":20,"proposals":100,"issueAttributionPrecision":0.99,"supportedDurationPrecision":0.99,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "reviewed": {"eligibleDays":10,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":10,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "restricted": {"eligibleDays":20,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "general": {"eligibleDays":0,"proposals":0,"issueAttributionPrecision":1.0,"supportedDurationPrecision":1.0,"schemaValid":true,"provenanceRetained":true,"secretsRedacted":true,"reviewedBatches":0,"incorrectCreates":0,"duplicates":0,"overlapViolations":0,"uncertainOutcomeRetries":0,"privacyIncidents":0,"passed":true},
+  "generalExpansions": [],
+  "lastResetReason": null
+}"#,
+    )?;
+    Ok(())
+}
+
 fn executable_drag(
     dir: &tempfile::TempDir,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
@@ -1890,6 +2168,7 @@ fn execute_persists_exact_payload_before_drag_confirms_id_and_reruns_idempotentl
         "2026-03-08T13:00:00Z",
         "2026-03-08T14:00:00Z",
     )?;
+    seed_general_autonomy_rollout(&data)?;
     let drag = executable_drag(&dir)?;
     for _ in 0..2 {
         companion()?
@@ -1948,6 +2227,7 @@ fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
         "2026-03-08T13:00:00Z",
         "2026-03-08T14:00:00Z",
     )?;
+    seed_general_autonomy_rollout(&data)?;
     let drag = executable_drag(&dir)?;
     companion()?
         .args([
@@ -2007,6 +2287,7 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         "2026-03-08T13:00:00Z",
         "2026-03-08T14:00:00Z",
     )?;
+    seed_general_autonomy_rollout(&data)?;
     let missing = dir.path().join("missing-drag");
     companion()?
         .args([
@@ -2045,6 +2326,7 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         "2026-03-08T13:00:00Z",
         "2026-03-08T14:00:00Z",
     )?;
+    seed_general_autonomy_rollout(&data)?;
     let drag = executable_drag(&dir)?;
     companion()?
         .args([
@@ -2095,6 +2377,7 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         "2026-03-08T13:00:00Z",
         "2026-03-08T14:00:00Z",
     )?;
+    seed_general_autonomy_rollout(&data)?;
     let drag = executable_drag(&dir)?;
     companion()?
         .args([
@@ -2145,6 +2428,7 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         "2026-03-08T15:00:00Z",
         "2026-03-08T16:00:00Z",
     )?;
+    seed_general_autonomy_rollout(&data)?;
     let drag = executable_drag(&dir)?;
     companion()?
         .args([
