@@ -40,7 +40,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: release-${{ matrix.target }}
-      - run: cargo build --release --locked --target ${{ matrix.target }} --package drag-cli
+      - run: cargo build --release --locked --target ${{ matrix.target }} --package drag-cli --package drag-companion
 
       - name: Package Unix archive
         if: matrix.archive == 'tar.gz'
@@ -49,7 +49,9 @@ jobs:
           artifact="drag-${{ matrix.target }}"
           mkdir -p "dist/$artifact"
           cp "target/${{ matrix.target }}/release/drag" "dist/$artifact/"
+          cp "target/${{ matrix.target }}/release/drag-companion" "dist/$artifact/"
           cp LICENSE README.md CHANGELOG.md "dist/$artifact/"
+          test -x "dist/$artifact/drag" && test -x "dist/$artifact/drag-companion"
           tar -czf "dist/$artifact.tar.gz" -C dist "$artifact"
           (cd dist && shasum -a 256 "$artifact.tar.gz" > "$artifact.tar.gz.sha256")
 
@@ -60,7 +62,9 @@ jobs:
           $artifact = "drag-${{ matrix.target }}"
           New-Item -ItemType Directory -Path "dist/$artifact"
           Copy-Item "target/${{ matrix.target }}/release/drag.exe" "dist/$artifact/"
+          Copy-Item "target/${{ matrix.target }}/release/drag-companion.exe" "dist/$artifact/"
           Copy-Item LICENSE, README.md, CHANGELOG.md "dist/$artifact/"
+          if (!(Test-Path "dist/$artifact/drag.exe") -or !(Test-Path "dist/$artifact/drag-companion.exe")) { throw "missing release binary" }
           Compress-Archive -Path "dist/$artifact" -DestinationPath "dist/$artifact.zip"
           $hash = (Get-FileHash "dist/$artifact.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $artifact.zip" | Out-File -Encoding ascii "dist/$artifact.zip.sha256"

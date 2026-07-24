@@ -49,13 +49,18 @@ async function install() {
       run("tar", ["-xzf", archive, "-C", installDir, "--strip-components=1"]);
     }
 
-    let binary = path.join(installDir, platform.binary);
-    if (!fs.existsSync(binary)) {
+    const binaries = [platform.binary, platform.companionBinary];
+    for (const name of binaries) {
+      let binary = path.join(installDir, name);
+      if (!fs.existsSync(binary)) {
       const directory = fs.readdirSync(installDir, { withFileTypes: true }).find((entry) => entry.isDirectory());
-      if (directory) fs.renameSync(path.join(installDir, directory.name, platform.binary), binary);
+        if (directory && fs.existsSync(path.join(installDir, directory.name, name))) {
+          fs.renameSync(path.join(installDir, directory.name, name), binary);
+        }
+      }
+      if (!fs.existsSync(binary)) throw new Error(`Released archive did not contain ${name}`);
+      if (process.platform !== "win32") fs.chmodSync(binary, 0o755);
     }
-    if (!fs.existsSync(binary)) throw new Error("Released archive did not contain the Drag binary");
-    if (process.platform !== "win32") fs.chmodSync(binary, 0o755);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }

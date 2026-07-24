@@ -12,6 +12,7 @@ mod list_tui;
 mod log;
 mod output;
 mod recipe_registry;
+mod resolve;
 mod schema;
 mod setup;
 mod setup_tui;
@@ -99,6 +100,7 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
         Command::Delete(args) => app.delete(args).await?,
         Command::Setup(args) => app.setup(args).await?,
         Command::Doctor(args) => app.doctor(args).await?,
+        Command::Resolve(args) => app.resolve(args).await?,
         Command::Tempo(args) => {
             match tempo_openapi::run_command(args.arguments, &path, debug).await? {
                 tempo_openapi::CommandOutput::Rendered(rendered) => rendered,

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::json;
 
-use crate::cli::{DeleteArgs, DoctorArgs, ListArgs, LogArgs, SetupArgs};
+use crate::cli::{DeleteArgs, DoctorArgs, ListArgs, LogArgs, ResolveArgs, SetupArgs};
 #[cfg(test)]
 use crate::config::{normalize_jira_site, JiraCredentials};
 use crate::config::{Config, Credentials, TempoCredentials};
@@ -14,6 +14,7 @@ use crate::delete::{self, ApiDeleteGateway};
 use crate::list::{self, ApiListDataSource, ListReportSession};
 use crate::list_tui::RatatuiListReportSession;
 use crate::log::{self, ApiLogGateway};
+use crate::resolve::{self, ApiResolveGateway};
 #[cfg(test)]
 use crate::setup::LineOnboardingSession;
 #[cfg(test)]
@@ -333,6 +334,13 @@ impl App {
     pub async fn delete(&self, args: DeleteArgs) -> Result<Rendered, CliError> {
         delete::run(&self.path, self.timezone, args, |credentials| {
             ApiDeleteGateway::new(credentials, self.debug)
+        })
+        .await
+    }
+
+    pub async fn resolve(&self, args: ResolveArgs) -> Result<Rendered, CliError> {
+        resolve::run(&self.path, args, |credentials| {
+            ApiResolveGateway::new(credentials, self.debug)
         })
         .await
     }
