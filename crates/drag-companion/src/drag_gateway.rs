@@ -358,12 +358,14 @@ pub(crate) fn ensure_proposal_drag_resolutions(
             &["key"],
         )?;
         let attributes = resolved_required_attribute_values(&resolution, &configured_attributes)?;
+        let tempo_account_id = resolved_tempo_account_id(&resolution)?;
         let description = if proposal.description_facts.is_empty() {
             "Companion proposed worklog".to_owned()
         } else {
             proposal.description_facts.join("; ")
         };
         for (name, value) in [
+            ("tempoAccountId", tempo_account_id),
             ("issueKey", resolved_issue),
             ("start", proposal.start),
             ("end", proposal.end),
@@ -424,6 +426,43 @@ pub(crate) fn proposal_drag_resolution_complete(
         |row| row.get(0),
     )?;
     Ok(count == 5)
+}
+
+pub(crate) fn resolved_tempo_account_id(resolution: &Value) -> Result<String, CompanionError> {
+    resolution
+        .get("tempo")
+        .and_then(|tempo| tempo.get("authenticatedAccountId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "Drag resolve omitted authenticated Tempo account id",
+            )
+        })
+}
+
+pub(crate) fn proposal_tempo_account(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<String, CompanionError> {
+    conn
+        .query_row(
+            "SELECT value FROM proposal_drag_resolutions WHERE proposal_id = ?1 AND name = 'tempoAccountId'",
+            [proposal_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!("proposal {proposal_id} missing authenticated Tempo account id"),
+            )
+        })
 }
 
 pub(crate) fn configured_tempo_work_attributes(
@@ -931,6 +970,24 @@ pub(crate) fn proposal_payloads(
     date: NaiveDate,
     only: Option<&str>,
 ) -> Result<Vec<(String, Value)>, CompanionError> {
+    Ok(proposal_payload_records(data_dir, date, only)?
+        .into_iter()
+        .map(|record| (record.proposal_id, record.payload))
+        .collect())
+}
+
+#[derive(Debug)]
+pub(crate) struct ProposalPayloadRecord {
+    pub(crate) proposal_id: String,
+    pub(crate) tempo_account: String,
+    pub(crate) payload: Value,
+}
+
+pub(crate) fn proposal_payload_records(
+    data_dir: &Path,
+    date: NaiveDate,
+    only: Option<&str>,
+) -> Result<Vec<ProposalPayloadRecord>, CompanionError> {
     let conn = Connection::open(store_path(data_dir))?;
     let mut stmt = conn.prepare("SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1 ORDER BY p.id")?;
     let ids = stmt.query_map([date.to_string()], |row| row.get::<_, String>(0))?;
@@ -940,6 +997,7 @@ pub(crate) fn proposal_payloads(
         if only.is_some_and(|wanted| wanted != id) {
             continue;
         }
+        let tempo_account = proposal_tempo_account(&conn, &id)?;
         let issue = resolve_drag_required_text(&conn, &id, "issueKey")?;
         let start = resolve_drag_required_text(&conn, &id, "start")?;
         let end = resolve_drag_required_text(&conn, &id, "end")?;
@@ -983,9 +1041,10 @@ pub(crate) fn proposal_payloads(
                 ),
             ));
         }
-        out.push((
-            id,
-            serde_json::json!({
+        out.push(ProposalPayloadRecord {
+            proposal_id: id,
+            tempo_account,
+            payload: serde_json::json!({
                 "issueKey": issue,
                 "durationOrInterval": format!("{}m", duration_seconds / 60),
                 "when": date,
@@ -993,7 +1052,7 @@ pub(crate) fn proposal_payloads(
                 "description": description,
                 "attributes": attributes,
             }),
-        ));
+        });
     }
     Ok(out)
 }

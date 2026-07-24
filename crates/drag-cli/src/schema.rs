@@ -593,7 +593,8 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
                     "readOnly": {"const": true},
                     "liveMutationAllowed": {"const": false},
                     "issue": object_schema(&["key", "id"], json!({"key": {"type": "string"}, "id": {"type": "string"}})),
-                    "tempo": object_schema(&["requiredWorkAttributes", "requiredWorkAttributeKeys", "requiredWorkAttributesByKey"], json!({
+                    "tempo": object_schema(&["authenticatedAccountId", "requiredWorkAttributes", "requiredWorkAttributeKeys", "requiredWorkAttributesByKey"], json!({
+                        "authenticatedAccountId": {"type": "string"},
                         "requiredWorkAttributes": {"type": "array", "items": object_schema(&["key", "name", "required"], json!({"key": {"type": "string"}, "name": {"type": "string"}, "required": {"type": "boolean"}}))},
                         "requiredWorkAttributeKeys": {"type": "array", "items": {"type": "string"}},
                         "requiredWorkAttributesByKey": {"type": "object"}

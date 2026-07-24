@@ -144,7 +144,7 @@ pub(crate) struct CoordinatedRunResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RunOwner {
-    pub(crate) tempo_account: &'static str,
+    pub(crate) tempo_account: String,
     pub(crate) local_date: NaiveDate,
     pub(crate) owner_id: String,
 }
@@ -266,27 +266,29 @@ pub(crate) fn coordinated_run(
         source,
     })?;
     ensure_companion_sentinel(data_dir)?;
-    let _lock = acquire_advisory_lock(data_dir, date)?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
+    let account = execution_tempo_account(data_dir, date)?;
+    let _lock = acquire_advisory_lock(data_dir, date, &account)?;
     drop(conn);
     let _retention = enforce_retention(data_dir, RetentionTrigger::Lifecycle)?;
     let conn = Connection::open(store_path(data_dir))?;
-    if resume && date_has_mutation_operations(&conn, date)? {
-        reconcile_complete_day_and_ledger(&conn, drag_bin, date)?;
+    if resume && date_has_mutation_operations(&conn, date, &account)? {
+        reconcile_complete_day_and_ledger(&conn, drag_bin, date, &account)?;
     }
     let owner_id = format!("{}:{}", std::process::id(), now_string());
-    let (recovered_lease, skipped_confirmed_work) = acquire_sqlite_lease(&conn, date, &owner_id)?;
+    let (recovered_lease, skipped_confirmed_work) =
+        acquire_sqlite_lease(&conn, date, &account, &owner_id)?;
 
-    if let Some(status) = terminal_run_status(&conn, date)? {
-        release_sqlite_lease(&conn, date, &owner_id)?;
+    if let Some(status) = terminal_run_status(&conn, date, &account)? {
+        release_sqlite_lease(&conn, date, &account, &owner_id)?;
         return Ok(CoordinatedRunResult {
             date,
             status,
             mode: DEFAULT_MODE,
             owner: RunOwner {
-                tempo_account: TEMPO_ACCOUNT,
+                tempo_account: account.clone(),
                 local_date: date,
                 owner_id,
             },
@@ -296,7 +298,7 @@ pub(crate) fn coordinated_run(
             submission_entered: status != "blocked",
             network_access: false,
             live_mutation_allowed: false,
-            phases: load_phase_records(&conn, date)?,
+            phases: load_phase_records(&conn, date, &account)?,
         });
     }
 
@@ -310,14 +312,14 @@ pub(crate) fn coordinated_run(
         "completed",
     ];
     for phase in phases {
-        if phase_completed(&conn, date, phase)? {
+        if phase_completed(&conn, date, &account, phase)? {
             continue;
         }
         if phase == "submitting" {
             submission_entered = true;
         }
-        if let Err(error) = run_phase(&conn, date, &owner_id, phase) {
-            let _ = release_sqlite_lease(&conn, date, &owner_id);
+        if let Err(error) = run_phase(&conn, date, &account, &owner_id, phase) {
+            let _ = release_sqlite_lease(&conn, date, &account, &owner_id);
             return Err(error);
         }
         if let Ok(ms) = std::env::var("DRAG_COMPANION_TEST_HOLD_MS")
@@ -328,16 +330,16 @@ pub(crate) fn coordinated_run(
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
         }
-        heartbeat_lease(&conn, date, &owner_id)?;
+        heartbeat_lease(&conn, date, &account, &owner_id)?;
     }
-    finish_run(&conn, date, "completed")?;
-    release_sqlite_lease(&conn, date, &owner_id)?;
+    finish_run(&conn, date, &account, "completed")?;
+    release_sqlite_lease(&conn, date, &account, &owner_id)?;
     let result = CoordinatedRunResult {
         date,
         status: "completed",
         mode: DEFAULT_MODE,
         owner: RunOwner {
-            tempo_account: TEMPO_ACCOUNT,
+            tempo_account: account.clone(),
             local_date: date,
             owner_id,
         },
@@ -347,7 +349,7 @@ pub(crate) fn coordinated_run(
         submission_entered,
         network_access: false,
         live_mutation_allowed: false,
-        phases: load_phase_records(&conn, date)?,
+        phases: load_phase_records(&conn, date, &account)?,
     };
     persist_result(data_dir, &terminal_result(date))?;
     Ok(result)
@@ -356,13 +358,15 @@ pub(crate) fn coordinated_run(
 pub(crate) fn acquire_advisory_lock(
     data_dir: &Path,
     date: NaiveDate,
+    account: &str,
 ) -> Result<AdvisoryRunLock, CompanionError> {
     let lock_dir = data_dir.join("locks");
     fs::create_dir_all(&lock_dir).map_err(|source| CompanionError::CreateDir {
         path: lock_dir.clone(),
         source,
     })?;
-    let path = lock_dir.join(format!("{TEMPO_ACCOUNT}-{date}.lock"));
+    let digest = Sha256::digest(account.as_bytes());
+    let path = lock_dir.join(format!("{digest:x}-{date}.lock"));
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -372,7 +376,7 @@ pub(crate) fn acquire_advisory_lock(
         .map_err(|source| CompanionError::Open { path, source })?;
     file.try_lock_exclusive()
         .map_err(|_| CompanionError::RunOwned {
-            account: TEMPO_ACCOUNT.to_owned(),
+            account: account.to_owned(),
             date,
             owner: "os-lock".to_owned(),
             expires_at: "unknown".to_owned(),

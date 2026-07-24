@@ -47,6 +47,7 @@ where
     let issue_key = normalize_issue_key(&args.issue_key)?;
     let config = Config::load(config_path)?;
     let credentials = config.credentials()?;
+    let tempo_account_id = credentials.account_id.clone();
     let gateway = make_gateway(credentials)?;
     let issue_id = gateway.resolve_issue_id(&issue_key).await?;
     let required_work_attributes = gateway.required_work_attributes().await?;
@@ -77,6 +78,7 @@ where
                 "id": issue_id,
             },
             "tempo": {
+                "authenticatedAccountId": tempo_account_id,
                 "requiredWorkAttributes": required_work_attributes.iter().map(|attribute| json!({
                     "key": attribute.key,
                     "name": attribute.name,
@@ -183,6 +185,10 @@ mod tests {
         assert_eq!(rendered.data["liveMutationAllowed"], false);
         assert_eq!(rendered.data["issue"]["key"], "DRAG-143");
         assert_eq!(rendered.data["issue"]["id"], "10001");
+        assert_eq!(
+            rendered.data["tempo"]["authenticatedAccountId"],
+            "account-1"
+        );
         assert_eq!(
             rendered.data["tempo"]["requiredWorkAttributeKeys"],
             serde_json::json!(["_Account_"])

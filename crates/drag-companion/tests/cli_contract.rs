@@ -2377,7 +2377,7 @@ fi
 	fi
 	if [[ "$*" == *" resolve "* ]]; then
 	  if [[ "${{DRAG_FAULT:-}}" == "resolve" ]]; then echo resolve failed >&2; exit 1; fi
-	  printf '{{"ok":true,"data":{{"schemaVersion":1,"readOnly":true,"liveMutationAllowed":false,"issue":{{"key":"DRAG-151","id":"10001"}},"tempo":{{"requiredWorkAttributes":[{{"key":"_Account_","name":"Account","required":true}}],"requiredWorkAttributeKeys":["_Account_"],"requiredWorkAttributesByKey":{{"_Account_":{{"key":"_Account_","name":"Account","required":true}}}}}}}}}}'
+	  printf '{{"ok":true,"data":{{"schemaVersion":1,"readOnly":true,"liveMutationAllowed":false,"issue":{{"key":"DRAG-151","id":"10001"}},"tempo":{{"authenticatedAccountId":"%s","requiredWorkAttributes":[{{"key":"_Account_","name":"Account","required":true}}],"requiredWorkAttributeKeys":["_Account_"],"requiredWorkAttributesByKey":{{"_Account_":{{"key":"_Account_","name":"Account","required":true}}}}}}}}}}' "${{DRAG_FAKE_TEMPO_ACCOUNT:-account-default}}"
 	  exit 0
 	fi
 	if [[ "$*" == *"--continue-from token-2"* ]]; then
@@ -2424,6 +2424,7 @@ fn seed_approved_payload(
         ("end", end),
         ("description", "Execute approved worklog"),
         ("attributes", r#"{"_Account_":"RD"}"#),
+        ("tempoAccountId", "account-default"),
     ] {
         conn.execute(
             "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
@@ -2902,6 +2903,102 @@ fn live_mutation_unverifiable_success_persists_uncertain_and_reconciles_before_r
         assert_eq!(op["state"], "confirmed", "fault {fault}");
         assert_eq!(op["tempoWorklogId"], "tempo-1", "fault {fault}");
     }
+    Ok(())
+}
+
+#[test]
+fn live_mutation_ledger_is_scoped_by_authenticated_tempo_account(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    seed_approved_payload(
+        &data,
+        "proposal-account-b",
+        "DRAG-154",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success();
+    let payload = serde_json::json!({
+        "issueKey": "DRAG-154",
+        "durationOrInterval": "60m",
+        "when": "2026-03-08",
+        "start": "13:00",
+        "description": "Execute approved worklog",
+        "attributes": {"_Account_":"RD"},
+    });
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    conn.execute(
+        "UPDATE proposal_drag_resolutions SET value = 'account-b' WHERE proposal_id = 'proposal-account-b' AND name = 'tempoAccountId'",
+        [],
+    )?;
+    conn.execute(
+        "INSERT INTO mutation_operations (id, proposal_id, state, idempotency_key, local_date, tempo_account, payload_json, submitting_intent_json, policy_schema_version, payload_schema_version) VALUES ('op.v1.account-a.2026-03-08.same-payload', NULL, 'uncertain', 'op.v1.account-a.2026-03-08.same-payload', '2026-03-08', 'account-a', ?1, '{}', 1, 1)",
+        [payload.to_string()],
+    )?;
+    conn.execute(
+        "INSERT INTO mutation_attempts (id, operation_id, state, attempted_at) VALUES ('attempt-account-a', 'op.v1.account-a.2026-03-08.same-payload', 'uncertain', '2026-03-08T00:00:00Z')",
+        [],
+    )?;
+    drop(conn);
+
+    let drag = executable_drag(&dir)?;
+    companion()?
+        .args([
+            "--data-dir",
+            &data,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "execute",
+            "--date",
+            "2026-03-08",
+            "--authorize-live",
+        ])
+        .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+        .assert()
+        .success();
+
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+    let spy = companion()?
+        .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let spy: Value = serde_json::from_slice(&spy)?;
+    let ops = spy["operations"].as_array().ok_or("operations")?;
+    assert_eq!(ops.len(), 2);
+    assert!(ops.iter().any(|op| {
+        op["tempoAccount"] == "account-a"
+            && op["state"] == "uncertain"
+            && op["operationKey"]
+                .as_str()
+                .is_some_and(|key| key.contains("account-a"))
+    }));
+    assert!(ops.iter().any(|op| {
+        op["tempoAccount"] == "account-b"
+            && op["state"] == "confirmed"
+            && op["tempoWorklogId"] == "tempo-1"
+            && op["operationKey"]
+                .as_str()
+                .is_some_and(|key| key.contains("account-b"))
+    }));
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let run_accounts: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT tempo_account FROM coordinated_runs WHERE local_date = '2026-03-08' ORDER BY tempo_account",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    assert_eq!(run_accounts, vec!["account-b".to_owned()]);
     Ok(())
 }
 

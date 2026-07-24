@@ -1137,6 +1137,20 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         contract["commands"]["resolve"]["success"]["properties"]["liveMutationAllowed"]["const"],
         false
     );
+    assert_eq!(
+        contract["commands"]["resolve"]["success"]["properties"]["tempo"]["required"],
+        serde_json::json!([
+            "authenticatedAccountId",
+            "requiredWorkAttributes",
+            "requiredWorkAttributeKeys",
+            "requiredWorkAttributesByKey"
+        ])
+    );
+    assert_eq!(
+        contract["commands"]["resolve"]["success"]["properties"]["tempo"]["properties"]
+            ["authenticatedAccountId"]["type"],
+        "string"
+    );
     let delete_arguments = contract["commands"]["delete"]["arguments"]
         .as_array()
         .ok_or("delete arguments are not an array")?;

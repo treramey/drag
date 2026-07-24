@@ -692,7 +692,7 @@ fn heal_terminal_run_file(
         return Ok(None);
     }
     let conn = Connection::open(database)?;
-    let status = terminal_run_status(&conn, date)?;
+    let status = terminal_run_status(&conn, date, TEMPO_ACCOUNT)?;
     if let Some(status) = status {
         let json = serde_json::json!({
             "date": date,
