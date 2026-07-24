@@ -121,27 +121,20 @@ pub(crate) fn execute_drag_worklogs_locked(
         );
         match response {
             Ok(value) => {
-                let id = value
+                let Some(id) = value
                     .get("tempoWorklogId")
                     .or_else(|| value.get("id"))
                     .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        reconcile_error(
-                            ReconcileErrorKind::TransportAmbiguity,
-                            "accepted Drag response missing worklog id",
-                        )
-                    })?;
+                else {
+                    mark_operation_uncertain(conn, date, &key)?;
+                    return Ok(uncertain_execute_result(date));
+                };
                 persist_confirmed_operation(conn, &key, id)?;
                 submitted += 1;
             }
-            Err(
-                error @ CompanionError::DragReconcile {
-                    kind: ReconcileErrorKind::TransportAmbiguity,
-                    ..
-                },
-            ) => {
+            Err(error) if unverifiable_after_live_spawn(&error) => {
                 mark_operation_uncertain(conn, date, &key)?;
-                return Err(error);
+                return Ok(uncertain_execute_result(date));
             }
             Err(error) => {
                 mark_operation_failed(conn, &key)?;
@@ -158,6 +151,30 @@ pub(crate) fn execute_drag_worklogs_locked(
         network_access: true,
         live_mutation_allowed: true,
     })
+}
+
+pub(crate) fn uncertain_execute_result(date: NaiveDate) -> ExecuteResult {
+    ExecuteResult {
+        status: "uncertain",
+        selected_date: date,
+        submitted: 0,
+        skipped: 0,
+        uncertain: true,
+        network_access: true,
+        live_mutation_allowed: true,
+    }
+}
+
+pub(crate) fn unverifiable_after_live_spawn(error: &CompanionError) -> bool {
+    matches!(
+        error,
+        CompanionError::DragReconcile {
+            kind: ReconcileErrorKind::TransportAmbiguity
+                | ReconcileErrorKind::SchemaIncompatibility
+                | ReconcileErrorKind::IncompleteRead,
+            ..
+        }
+    )
 }
 
 pub(crate) fn operation_key(

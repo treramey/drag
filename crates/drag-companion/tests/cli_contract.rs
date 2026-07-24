@@ -2427,19 +2427,23 @@ if [[ "$*" == *" list "* ]]; then
   printf ']}}}}'
   exit 0
 fi
-if [[ "$*" == *" log "* ]]; then
-  payload=$(cat)
-  echo "$payload" > "{0}/last-stdin.json"
-  if [[ "${{DRAG_FAULT:-}}" == "stdin" ]]; then exit 7; fi
-  if [[ -n "${{DRAG_EXEC_HOLD_SECONDS:-}}" ]]; then sleep "$DRAG_EXEC_HOLD_SECONDS"; fi
-  id="tempo-$(( $(wc -l < "$state" 2>/dev/null || echo 0) + 1 ))"
-  worklog=$(printf '%s' "$payload" | python3 -c 'import json,sys; p=json.load(sys.stdin); p["id"]=sys.argv[1]; print(json.dumps(p,separators=(",",":")))' "$id")
-  echo "$worklog" >> "$state"
-  if [[ "${{DRAG_FAULT:-}}" == "after-remote" ]]; then echo dropped >&2; exit 1; fi
-  printf '{{"ok":true,"data":{{"id":"%s"}}}}' "$id"
-  if [[ "${{DRAG_FAULT:-}}" == "after-response" ]]; then exit 1; fi
-  exit 0
-fi
+	if [[ "$*" == *" log "* ]]; then
+	  payload=$(cat)
+	  echo "$payload" > "{0}/last-stdin.json"
+	  if [[ "${{DRAG_FAULT:-}}" == "stdin" ]]; then exit 7; fi
+	  if [[ -n "${{DRAG_EXEC_HOLD_SECONDS:-}}" ]]; then sleep "$DRAG_EXEC_HOLD_SECONDS"; fi
+	  id="tempo-$(( $(wc -l < "$state" 2>/dev/null || echo 0) + 1 ))"
+	  worklog=$(printf '%s' "$payload" | python3 -c 'import json,sys; p=json.load(sys.stdin); p["id"]=sys.argv[1]; print(json.dumps(p,separators=(",",":")))' "$id")
+	  echo "$worklog" >> "$state"
+	  if [[ "${{DRAG_FAULT:-}}" == "after-remote" ]]; then echo dropped >&2; exit 1; fi
+	  if [[ "${{DRAG_FAULT:-}}" == "malformed-json" ]]; then printf '{{'; exit 0; fi
+	  if [[ "${{DRAG_FAULT:-}}" == "truncated-json" ]]; then printf '{{"ok":true,"data":'; exit 0; fi
+	  if [[ "${{DRAG_FAULT:-}}" == "missing-data" ]]; then printf '{{"ok":true}}'; exit 0; fi
+	  if [[ "${{DRAG_FAULT:-}}" == "missing-id" ]]; then printf '{{"ok":true,"data":{{}}}}'; exit 0; fi
+	  printf '{{"ok":true,"data":{{"id":"%s"}}}}' "$id"
+	  if [[ "${{DRAG_FAULT:-}}" == "after-response" ]]; then exit 1; fi
+	  exit 0
+	fi
 exit 2
 "#,
             dir.path().display()
@@ -2713,8 +2717,8 @@ fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
         .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
         .env("DRAG_FAULT", "after-remote")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("transport_ambiguity"));
+        .success()
+        .stdout(predicate::str::contains(r#""status":"uncertain""#));
     companion()?
         .args([
             "--data-dir",
@@ -2741,6 +2745,109 @@ fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
         serde_json::from_slice::<Value>(&spy)?["operations"][0]["state"],
         "confirmed"
     );
+    Ok(())
+}
+
+#[test]
+fn live_mutation_unverifiable_success_persists_uncertain_and_reconciles_before_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for fault in [
+        "malformed-json",
+        "truncated-json",
+        "missing-data",
+        "missing-id",
+    ] {
+        let dir = tempdir()?;
+        let data_dir = dir.path().join("state");
+        let data = data_dir.to_string_lossy();
+        seed_approved_payload(
+            &data,
+            "proposal-exec",
+            "DRAG-154",
+            "2026-03-08T13:00:00Z",
+            "2026-03-08T14:00:00Z",
+        )?;
+        seed_general_autonomy_rollout(&data)?;
+        let drag = executable_drag(&dir)?;
+
+        let uncertain = companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_FAULT", fault)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&uncertain)?["status"],
+            "uncertain"
+        );
+
+        let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+        let op_state: String =
+            conn.query_row("SELECT state FROM mutation_operations LIMIT 1", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(op_state, "uncertain", "fault {fault}");
+        let run_state: String = conn.query_row(
+            "SELECT state FROM coordinated_runs WHERE local_date = '2026-03-08'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(run_state, "uncertain", "fault {fault}");
+        drop(conn);
+
+        let still_uncertain = companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_FAULT", fault)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&still_uncertain)?["status"],
+            "executed",
+            "fault {fault} should reconcile the full day before considering another submit"
+        );
+
+        let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+        assert_eq!(commands.matches(" log ").count(), 1, "fault {fault}");
+        assert!(
+            commands.matches("list 2026-03-08").count() >= 2,
+            "fault {fault}"
+        );
+        let spy = companion()?
+            .args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let op = serde_json::from_slice::<Value>(&spy)?["operations"][0].clone();
+        assert_eq!(op["state"], "confirmed", "fault {fault}");
+        assert_eq!(op["tempoWorklogId"], "tempo-1", "fault {fault}");
+    }
     Ok(())
 }
 
@@ -2812,7 +2919,8 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
         .env("DRAG_FAULT", "stdin")
         .assert()
-        .failure();
+        .success()
+        .stdout(predicate::str::contains(r#""status":"uncertain""#));
     let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
     assert_eq!(commands.matches(" log ").count(), 1);
     let blocked = companion()?
@@ -2863,7 +2971,8 @@ fn execute_faults_before_spawn_stdin_after_response_and_between_entries_do_not_d
         .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
         .env("DRAG_FAULT", "after-response")
         .assert()
-        .failure();
+        .success()
+        .stdout(predicate::str::contains(r#""status":"uncertain""#));
     companion()?
         .args([
             "--data-dir",
@@ -3789,5 +3898,171 @@ fn replay_failures_identify_fixture_evidence_rule_and_operation(
         }),
         "missing precise unsafe retry failure: {failures:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn purge_requires_companion_sentinel_and_preserves_unrelated_files(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    std::fs::create_dir_all(&data_dir)?;
+    std::fs::write(data_dir.join("unrelated.txt"), "keep me")?;
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "purge"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("refusing to purge non-companion"));
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("unrelated.txt"))?,
+        "keep me"
+    );
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "status"])
+        .assert()
+        .success();
+    std::fs::write(data_dir.join("journal.jsonl"), "owned\n")?;
+    std::fs::create_dir_all(data_dir.join("runs"))?;
+    std::fs::write(data_dir.join("runs/2026-07-24.json"), "{}")?;
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "purge"])
+        .assert()
+        .success();
+    assert!(data_dir.join("companion.sqlite3").exists());
+    assert!(!data_dir.join("journal.jsonl").exists());
+    assert!(!data_dir.join("runs").exists());
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("unrelated.txt"))?,
+        "keep me"
+    );
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "purge",
+            "--acknowledge-lost-recovery",
+        ])
+        .assert()
+        .success();
+    assert!(!data_dir.join("companion.sqlite3").exists());
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("unrelated.txt"))?,
+        "keep me"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_data_dir_lock_blocks_symlink_alias_before_creation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+    use std::time::{Duration, Instant};
+
+    let dir = tempdir()?;
+    let real_parent = dir.path().join("real-parent");
+    std::fs::create_dir_all(&real_parent)?;
+    let alias_parent = dir.path().join("alias-parent");
+    symlink(&real_parent, &alias_parent)?;
+    let real_data = real_parent.join("state");
+    let alias_data = alias_parent.join("state");
+
+    let mut first = companion()?;
+    let mut child = first
+        .args([
+            "--data-dir",
+            real_data.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            "2026-07-24",
+        ])
+        .env("DRAG_COMPANION_TEST_HOLD_MS", "200")
+        .spawn()?;
+
+    let start = Instant::now();
+    let mut blocked = false;
+    while start.elapsed() < Duration::from_secs(5) {
+        let assertion = companion()?
+            .args([
+                "--data-dir",
+                alias_data.to_string_lossy().as_ref(),
+                "status",
+            ])
+            .assert();
+        if !assertion.get_output().status.success() {
+            blocked = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.wait()?;
+    assert!(blocked, "aliased path bypassed the canonical state lock");
+    Ok(())
+}
+
+#[test]
+fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    companion()?
+        .args(["--data-dir", &data, "status"])
+        .assert()
+        .success();
+    let old = serde_json::json!({"schemaVersion":1,"eventId":"journal.old","eventType":"evidence.captured","observedAt":"2026-03-08T00:00:00Z","source":{"kind":"fixture","adapter":"fixture","reference":"old"},"collector":{"name":"fixture","version":"test"},"timestampSemantics":{"observedAtSource":"fixture","timezone":"UTC","explicitDate":"2026-03-08"},"privacy":{"classification":"local-fixture","redacted":false},"retention":{"policy":"age-based","retainUntil":null},"supersedes":null,"payload":{"summary":"old"},"integrityHash":"sha256:old"});
+    std::fs::write(data_dir.join("journal.jsonl"), format!("{}\n", old))?;
+
+    let mut enforce = companion()?;
+    let mut child = enforce
+        .args(["--data-dir", &data, "retention", "enforce"])
+        .env("DRAG_COMPANION_RETENTION_NOW", "2026-03-10T00:00:00Z")
+        .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
+        .spawn()?;
+    companion()?
+        .args(["--data-dir", &data, "capture", "--date", "2026-03-10"])
+        .assert()
+        .success();
+    child.wait()?;
+
+    let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
+    assert!(
+        journal.contains("capture.fixture.2026-03-10"),
+        "concurrent append was lost: {journal}"
+    );
+    Ok(())
+}
+
+#[test]
+fn report_heals_missing_and_corrupt_terminal_run_file_from_sqlite(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    companion()?
+        .args(["--data-dir", &data, "reconcile", "--date", "2026-07-24"])
+        .assert()
+        .success();
+    let run_file = data_dir.join("runs/2026-07-24.json");
+    std::fs::remove_file(&run_file)?;
+    companion()?
+        .args(["--data-dir", &data, "report", "--date", "2026-07-24"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Status: completed"));
+    assert!(run_file.exists());
+
+    std::fs::write(&run_file, "not json")?;
+    companion()?
+        .args(["--data-dir", &data, "log", "--date", "2026-07-24"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\":\"completed\""));
+    let healed = std::fs::read_to_string(&run_file)?;
+    assert!(healed.contains("terminal"));
     Ok(())
 }
