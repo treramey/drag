@@ -171,16 +171,22 @@ pub(crate) fn acquire_companion_state_lock(
     data_dir: &Path,
     exclusive: bool,
 ) -> Result<CompanionStateLock, CompanionError> {
-    let identity = if data_dir.is_absolute() {
-        data_dir.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|source| CompanionError::Read {
-                path: PathBuf::from("."),
-                source,
-            })?
-            .join(data_dir)
-    };
+    acquire_companion_state_lock_inner(data_dir, exclusive, false)
+}
+
+pub(crate) fn acquire_companion_state_lock_wait(
+    data_dir: &Path,
+    exclusive: bool,
+) -> Result<CompanionStateLock, CompanionError> {
+    acquire_companion_state_lock_inner(data_dir, exclusive, true)
+}
+
+fn acquire_companion_state_lock_inner(
+    data_dir: &Path,
+    exclusive: bool,
+    wait: bool,
+) -> Result<CompanionStateLock, CompanionError> {
+    let identity = canonical_lock_identity(data_dir)?;
     let lock_dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
@@ -198,8 +204,12 @@ pub(crate) fn acquire_companion_state_lock(
         .write(true)
         .open(&path)
         .map_err(|source| CompanionError::Open { path, source })?;
-    let lock_result = if exclusive {
+    let lock_result = if exclusive && wait {
+        FileExt::lock_exclusive(&file)
+    } else if exclusive {
         FileExt::try_lock_exclusive(&file)
+    } else if wait {
+        FileExt::lock_shared(&file)
     } else {
         FileExt::try_lock_shared(&file)
     };
@@ -209,6 +219,40 @@ pub(crate) fn acquire_companion_state_lock(
         )
     })?;
     Ok(CompanionStateLock { _file: file })
+}
+
+pub(crate) fn canonical_lock_identity(path: &Path) -> Result<PathBuf, CompanionError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| CompanionError::Read {
+                path: PathBuf::from("."),
+                source,
+            })?
+            .join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let Some(parent) = existing.parent() else {
+            break;
+        };
+        if let Some(name) = existing.file_name() {
+            missing.push(name.to_os_string());
+        }
+        existing = parent;
+    }
+    let mut canonical = existing
+        .canonicalize()
+        .map_err(|source| CompanionError::Read {
+            path: existing.to_path_buf(),
+            source,
+        })?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Ok(canonical)
 }
 
 pub(crate) fn coordinated_run(
@@ -221,6 +265,7 @@ pub(crate) fn coordinated_run(
         path: data_dir.to_path_buf(),
         source,
     })?;
+    ensure_companion_sentinel(data_dir)?;
     let _lock = acquire_advisory_lock(data_dir, date)?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;

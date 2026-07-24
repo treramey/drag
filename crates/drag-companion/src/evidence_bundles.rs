@@ -126,6 +126,8 @@ pub(crate) fn append_journal_event(
         path: data_dir.to_path_buf(),
         source,
     })?;
+    ensure_companion_sentinel(data_dir)?;
+    let _journal_lock = acquire_journal_lock(data_dir)?;
     let path = journal_path(data_dir);
     let mut file = OpenOptions::new()
         .create(true)
@@ -156,11 +158,38 @@ pub(crate) fn append_journal_event(
         .map_err(|source| CompanionError::Write { path, source })
 }
 
+pub(crate) struct JournalLock {
+    _file: File,
+}
+
+pub(crate) fn acquire_journal_lock(data_dir: &Path) -> Result<JournalLock, CompanionError> {
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
+    ensure_companion_sentinel(data_dir)?;
+    let path = data_dir.join(".journal.lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| CompanionError::Open {
+            path: path.clone(),
+            source,
+        })?;
+    file.lock_exclusive()
+        .map_err(|source| CompanionError::Open { path, source })?;
+    Ok(JournalLock { _file: file })
+}
+
 pub(crate) fn import_journal(data_dir: &Path) -> Result<usize, CompanionError> {
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
     })?;
+    let _journal_lock = acquire_journal_lock(data_dir)?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     let path = journal_path(data_dir);

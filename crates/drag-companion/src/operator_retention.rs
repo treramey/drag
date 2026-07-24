@@ -1,5 +1,7 @@
 use crate::*;
 
+pub(crate) const COMPANION_SENTINEL: &str = ".drag-companion-owned";
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OperatorLog<'a> {
@@ -101,6 +103,7 @@ pub(crate) fn compact_journal(
     data_dir: &Path,
     raw_cutoff: NaiveDate,
 ) -> Result<JournalCompaction, CompanionError> {
+    let _journal_lock = acquire_journal_lock(data_dir)?;
     let recovered_temp_files = cleanup_stale_journal_temps(data_dir)?;
     let path = journal_path(data_dir);
     if !path.exists() {
@@ -460,6 +463,7 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
         path: data_dir.to_path_buf(),
         source,
     })?;
+    ensure_companion_sentinel(data_dir)?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
@@ -507,8 +511,10 @@ pub(crate) fn daily_report(data_dir: &Path, date: NaiveDate) -> Result<String, C
 
 pub(crate) fn terminal_report_status(data_dir: &Path, date: NaiveDate) -> Option<&'static str> {
     let path = run_path(data_dir, date);
-    let body = fs::read_to_string(path).ok()?;
-    let json: Value = serde_json::from_str(&body).ok()?;
+    let json = fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .or_else(|| heal_terminal_run_file(data_dir, date).ok().flatten())?;
     match json.get("status").and_then(Value::as_str) {
         Some("completed") | Some("terminal") => Some("completed"),
         Some("partial") => Some("partial"),
@@ -554,21 +560,25 @@ pub(crate) fn purge_state(
     data_dir: &Path,
     acknowledge_lost_recovery: bool,
 ) -> Result<Value, CompanionError> {
+    validate_purge_target(data_dir)?;
     if acknowledge_lost_recovery {
         if data_dir.exists() {
-            fs::remove_dir_all(data_dir).map_err(|source| CompanionError::Write {
-                path: data_dir.to_path_buf(),
-                source,
-            })?;
+            require_companion_sentinel(data_dir)?;
+            purge_allowlisted_paths(data_dir, true)?;
         }
         return Ok(
             serde_json::json!({ "status": "purged", "idempotencyRecordsProtected": false, "lostAutomatedRecoveryAcknowledged": true, "nextSafeAction": "run collect and reconcile from fresh explicit-date evidence before any mutation" }),
         );
     }
-    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
-        path: data_dir.to_path_buf(),
-        source,
-    })?;
+    if data_dir.exists() {
+        require_companion_sentinel(data_dir)?;
+    } else {
+        fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+            path: data_dir.to_path_buf(),
+            source,
+        })?;
+    }
+    ensure_companion_sentinel(data_dir)?;
     let database = store_path(data_dir);
     if database.exists() {
         let mut conn = Connection::open(&database)?;
@@ -596,36 +606,114 @@ pub(crate) fn purge_state(
         tx.commit()?;
         conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     }
-    for entry in fs::read_dir(data_dir).map_err(|source| CompanionError::Read {
-        path: data_dir.to_path_buf(),
-        source,
-    })? {
-        let entry = entry.map_err(|source| CompanionError::Read {
-            path: data_dir.to_path_buf(),
-            source,
-        })?;
-        let path = entry.path();
-        if path == database
-            || entry.file_name() == "companion.sqlite3-wal"
-            || entry.file_name() == "companion.sqlite3-shm"
-        {
-            continue;
-        }
-        if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|source| CompanionError::Write {
-                path: path.clone(),
-                source,
-            })?;
-        } else {
-            fs::remove_file(&path).map_err(|source| CompanionError::Write {
-                path: path.clone(),
-                source,
-            })?;
-        }
-    }
+    purge_allowlisted_paths(data_dir, false)?;
     Ok(
         serde_json::json!({ "status": "purged", "idempotencyRecordsProtected": true, "lostAutomatedRecoveryAcknowledged": false, "nextSafeAction": "keep protected idempotency records; run status before any resume" }),
     )
+}
+
+pub(crate) fn ensure_companion_sentinel(data_dir: &Path) -> Result<(), CompanionError> {
+    let sentinel = data_dir.join(COMPANION_SENTINEL);
+    if !sentinel.exists() {
+        atomic_write(&sentinel, b"drag-companion-owned-data-dir\n")?;
+    }
+    Ok(())
+}
+
+fn require_companion_sentinel(data_dir: &Path) -> Result<(), CompanionError> {
+    if data_dir.join(COMPANION_SENTINEL).is_file() {
+        Ok(())
+    } else {
+        Err(CompanionError::Proposal(format!(
+            "refusing to purge non-companion data directory {}; missing {COMPANION_SENTINEL}",
+            data_dir.display()
+        )))
+    }
+}
+
+fn validate_purge_target(data_dir: &Path) -> Result<(), CompanionError> {
+    let identity = canonical_lock_identity(data_dir)?;
+    if identity.parent().is_none()
+        || identity == Path::new("/")
+        || identity == std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    {
+        return Err(CompanionError::Proposal(format!(
+            "refusing dangerous purge target {}",
+            data_dir.display()
+        )));
+    }
+    Ok(())
+}
+
+fn purge_allowlisted_paths(data_dir: &Path, include_database: bool) -> Result<(), CompanionError> {
+    for name in [
+        "journal.jsonl",
+        ".journal.lock",
+        "runs",
+        "locks",
+        "scheduler.json",
+        "rollout.json",
+        "journal.jsonl.tmp-crash-secret",
+    ] {
+        remove_child_if_exists(data_dir, name)?;
+    }
+    cleanup_stale_journal_temps(data_dir)?;
+    if include_database {
+        for name in [
+            "companion.sqlite3",
+            "companion.sqlite3-wal",
+            "companion.sqlite3-shm",
+        ] {
+            remove_child_if_exists(data_dir, name)?;
+        }
+        remove_child_if_exists(data_dir, COMPANION_SENTINEL)?;
+    }
+    Ok(())
+}
+
+fn remove_child_if_exists(data_dir: &Path, name: &str) -> Result<(), CompanionError> {
+    let path = data_dir.join(name);
+    if !path.exists() {
+        return Ok(());
+    }
+    if path.is_dir() {
+        fs::remove_dir_all(&path).map_err(|source| CompanionError::Write { path, source })
+    } else {
+        fs::remove_file(&path).map_err(|source| CompanionError::Write { path, source })
+    }
+}
+
+fn heal_terminal_run_file(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<Option<Value>, CompanionError> {
+    let database = store_path(data_dir);
+    if !database.exists() {
+        return Ok(None);
+    }
+    let conn = Connection::open(database)?;
+    let status = terminal_run_status(&conn, date)?;
+    if let Some(status) = status {
+        let json = serde_json::json!({
+            "date": date,
+            "status": status,
+            "mode": DEFAULT_MODE,
+            "adapters": adapters(),
+            "networkAccess": false,
+            "liveMutationAllowed": false,
+            "dragBoundary": drag_boundary(),
+            "observations": [{"source": COLLECTOR_ADAPTER, "summary": "terminal run file healed from durable SQLite state"}]
+        });
+        let body = serde_json::to_vec_pretty(&json).map_err(CompanionError::Serialize)?;
+        let runs_dir = data_dir.join("runs");
+        fs::create_dir_all(&runs_dir).map_err(|source| CompanionError::CreateDir {
+            path: runs_dir,
+            source,
+        })?;
+        atomic_write(&run_path(data_dir, date), &body)?;
+        return Ok(Some(json));
+    }
+    Ok(None)
 }
 
 pub(crate) fn epoch_ms() -> i64 {

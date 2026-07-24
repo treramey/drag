@@ -425,8 +425,8 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     assert_eq!(installed["hostSchedulerMutated"], false);
     let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
     let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
-    assert!(service.contains("scheduler run --date"));
-    assert!(service.contains("date +%%F"));
+    assert!(service.contains("scheduler catch-up"));
+    assert!(!service.contains("scheduler run --date"));
     assert!(service.contains("data & state'"));
     assert!(timer.contains("18:45:00"));
     assert!(timer.contains("Persistent=true"));
@@ -448,8 +448,8 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
             .arg(&launchd),
     )?;
     let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
-    assert!(plist.contains("scheduler run --date"));
-    assert!(plist.contains("date +%F"));
+    assert!(plist.contains("scheduler catch-up"));
+    assert!(!plist.contains("scheduler run --date"));
     assert!(plist.contains("data &amp; state"));
     assert!(plist.contains("<integer>18</integer>"));
     assert!(plist.contains("<integer>45</integer>"));
@@ -576,6 +576,16 @@ fn scheduler_catch_up_fixtures_cover_dst_timezone_sleep_duplicate_disabled_and_o
         let payload: Value = serde_json::from_slice(&output)?;
         assert_eq!(payload["date"], selected);
     }
+    let state_after_runs: Value =
+        serde_json::from_str(&std::fs::read_to_string(data.join("scheduler.json"))?)?;
+    assert_eq!(state_after_runs["lastSuccessfulDate"], "2026-07-24");
+
+    let from_state = json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args(["scheduler", "catch-up", "--today", "2026-07-27"]),
+    )?;
+    assert_eq!(from_state["status"], "no-op");
 
     let duplicate = json_output(
         companion()?
@@ -932,6 +942,8 @@ fn rollout_resets_unsafe_gate_expands_general_once_and_execute_needs_persisted_s
     assert_eq!(reset["lastResetReason"], "overlap violation");
     assert_eq!(reset["gates"]["replay"]["eligibleDays"], 0);
     assert_eq!(reset["gates"]["replay"]["passed"], false);
+    assert_eq!(reset["gates"]["shadow"]["passed"], false);
+    assert_eq!(reset["gates"]["restricted"]["passed"], false);
 
     let one = json_output(companion()?.args([
         "--data-dir",
@@ -958,6 +970,21 @@ fn rollout_resets_unsafe_gate_expands_general_once_and_execute_needs_persisted_s
     ]))?;
     assert_eq!(
         dedupe["gates"]["generalExpansions"]
+            .as_array()
+            .ok_or("expansions")?
+            .len(),
+        1
+    );
+    let empty = json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "rollout",
+        "record",
+        "--expansion",
+        "",
+    ]))?;
+    assert_eq!(
+        empty["gates"]["generalExpansions"]
             .as_array()
             .ok_or("expansions")?
             .len(),
@@ -1004,19 +1031,46 @@ fn contract_is_machine_readable_and_capture_only_by_default(
     for required in [
         "status",
         "collect",
+        "capture",
+        "import",
         "reconcile",
         "resume",
         "report",
         "log",
+        "bundle",
+        "propose",
+        "read",
+        "audit",
+        "preview",
+        "execute",
+        "rollout",
+        "replay",
+        "process-spy",
         "purge",
+        "retention",
         "scheduler",
         "claude-hook",
+        "contract",
     ] {
         assert!(
             commands.iter().any(|command| command["name"] == required),
             "missing {required}"
         );
     }
+
+    let execute = commands
+        .iter()
+        .find(|command| command["name"] == "execute")
+        .ok_or("execute command")?;
+    assert_eq!(execute["defaultNetworkAccess"], false);
+    assert_eq!(execute["possibleNetworkAccess"], true);
+    assert_eq!(execute["defaultLiveMutationAllowed"], false);
+    assert_eq!(execute["possibleLiveMutationAllowed"], true);
+    assert!(execute["conditionalLiveMutationAllowed"]
+        .as_array()
+        .ok_or("live conditions")?
+        .iter()
+        .any(|item| item == "--authorize-live"));
 
     let scheduler = commands
         .iter()
@@ -3971,8 +4025,7 @@ fn canonical_data_dir_lock_blocks_symlink_alias_before_creation(
     let real_data = real_parent.join("state");
     let alias_data = alias_parent.join("state");
 
-    let mut first = companion()?;
-    let mut child = first
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
         .args([
             "--data-dir",
             real_data.to_string_lossy().as_ref(),
@@ -3980,8 +4033,17 @@ fn canonical_data_dir_lock_blocks_symlink_alias_before_creation(
             "--date",
             "2026-07-24",
         ])
-        .env("DRAG_COMPANION_TEST_HOLD_MS", "200")
+        .env("DRAG_COMPANION_TEST_HOLD_MS", "1000")
+        .stdout(std::process::Stdio::null())
         .spawn()?;
+
+    for _ in 0..100 {
+        if real_data.join(".drag-companion-owned").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(real_data.join(".drag-companion-owned").exists());
 
     let start = Instant::now();
     let mut blocked = false;
@@ -3990,10 +4052,14 @@ fn canonical_data_dir_lock_blocks_symlink_alias_before_creation(
             .args([
                 "--data-dir",
                 alias_data.to_string_lossy().as_ref(),
-                "status",
+                "purge",
+                "--acknowledge-lost-recovery",
             ])
             .assert();
-        if !assertion.get_output().status.success() {
+        if !assertion.get_output().status.success()
+            && String::from_utf8_lossy(&assertion.get_output().stderr)
+                .contains("companion state is busy")
+        {
             blocked = true;
             break;
         }
@@ -4017,11 +4083,11 @@ fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
     let old = serde_json::json!({"schemaVersion":1,"eventId":"journal.old","eventType":"evidence.captured","observedAt":"2026-03-08T00:00:00Z","source":{"kind":"fixture","adapter":"fixture","reference":"old"},"collector":{"name":"fixture","version":"test"},"timestampSemantics":{"observedAtSource":"fixture","timezone":"UTC","explicitDate":"2026-03-08"},"privacy":{"classification":"local-fixture","redacted":false},"retention":{"policy":"age-based","retainUntil":null},"supersedes":null,"payload":{"summary":"old"},"integrityHash":"sha256:old"});
     std::fs::write(data_dir.join("journal.jsonl"), format!("{}\n", old))?;
 
-    let mut enforce = companion()?;
-    let mut child = enforce
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
         .args(["--data-dir", &data, "retention", "enforce"])
         .env("DRAG_COMPANION_RETENTION_NOW", "2026-03-10T00:00:00Z")
         .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
+        .stdout(std::process::Stdio::null())
         .spawn()?;
     companion()?
         .args(["--data-dir", &data, "capture", "--date", "2026-03-10"])
@@ -4031,7 +4097,7 @@ fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
 
     let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
     assert!(
-        journal.contains("capture.fixture.2026-03-10"),
+        journal.contains("evidence.fake.2026-03-10"),
         "concurrent append was lost: {journal}"
     );
     Ok(())
@@ -4061,8 +4127,8 @@ fn report_heals_missing_and_corrupt_terminal_run_file_from_sqlite(
         .args(["--data-dir", &data, "log", "--date", "2026-07-24"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"status\":\"completed\""));
+        .stdout(predicate::str::contains("\"status\": \"completed\""));
     let healed = std::fs::read_to_string(&run_file)?;
-    assert!(healed.contains("terminal"));
+    assert!(healed.contains("terminal run file healed"));
     Ok(())
 }
