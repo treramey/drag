@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/drag", "crates/drag-cli"]
+members = ["crates/drag", "crates/drag-cli", "crates/drag-companion"]
 default-members = ["crates/drag-cli"]
 resolver = "2"
 

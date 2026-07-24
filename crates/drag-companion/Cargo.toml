@@ -1,0 +1,31 @@
+[package]
+name = "drag-companion"
+description = "Safe end-of-day companion for Drag reconciliation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "drag-companion"
+path = "src/main.rs"
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
+fs2 = "0.4"
+tempfile = "3.20"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
+[lints]
+workspace = true

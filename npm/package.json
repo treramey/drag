@@ -10,10 +10,12 @@
   "homepage": "https://github.com/treramey/drag",
   "bugs": "https://github.com/treramey/drag/issues",
   "bin": {
-    "drag": "run.js"
+    "drag": "run.js",
+    "drag-companion": "run-companion.js"
   },
   "scripts": {
-    "postinstall": "node install.js"
+    "postinstall": "node install.js",
+    "test": "node package-content.test.js"
   },
   "engines": {
     "node": ">=18"
@@ -22,7 +24,8 @@
   "files": [
     "install.js",
     "platform.js",
-    "run.js"
+    "run.js",
+    "run-companion.js"
   ],
   "publishConfig": {
     "access": "public"
@@ -30,19 +33,23 @@
   "supportedPlatforms": {
     "x86_64-unknown-linux-gnu": {
       "artifact": "drag-x86_64-unknown-linux-gnu.tar.gz",
-      "binary": "drag"
+      "binary": "drag",
+      "companionBinary": "drag-companion"
     },
     "x86_64-apple-darwin": {
       "artifact": "drag-x86_64-apple-darwin.tar.gz",
-      "binary": "drag"
+      "binary": "drag",
+      "companionBinary": "drag-companion"
     },
     "aarch64-apple-darwin": {
       "artifact": "drag-aarch64-apple-darwin.tar.gz",
-      "binary": "drag"
+      "binary": "drag",
+      "companionBinary": "drag-companion"
     },
     "x86_64-pc-windows-msvc": {
       "artifact": "drag-x86_64-pc-windows-msvc.zip",
-      "binary": "drag.exe"
+      "binary": "drag.exe",
+      "companionBinary": "drag-companion.exe"
     }
   }
 }

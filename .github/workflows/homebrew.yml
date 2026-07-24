@@ -54,9 +54,11 @@ jobs:
             end
             def install
               bin.install Dir["drag-*/drag"].first => "drag"
+              bin.install Dir["drag-*/drag-companion"].first => "drag-companion"
             end
             test do
               assert_match version.to_s, shell_output("#{bin}/drag --version")
+              assert_match version.to_s, shell_output("#{bin}/drag-companion --version")
             end
           end
           RUBY
