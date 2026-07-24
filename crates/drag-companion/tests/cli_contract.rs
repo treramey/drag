@@ -1715,8 +1715,12 @@ fn contract_exposes_capture_and_import_without_live_mutation(
             .iter()
             .find(|command| command["name"] == required)
             .ok_or(required)?;
-        assert_eq!(command["networkAccess"], false);
-        assert_eq!(command["liveMutationAllowed"], false);
+        assert_eq!(command["defaultNetworkAccess"], false);
+        assert_eq!(command["possibleNetworkAccess"], false);
+        assert_eq!(command["conditionalNetworkAccess"].as_array().ok_or("network conditions")?.len(), 0);
+        assert_eq!(command["defaultLiveMutationAllowed"], false);
+        assert_eq!(command["possibleLiveMutationAllowed"], false);
+        assert_eq!(command["conditionalLiveMutationAllowed"].as_array().ok_or("live conditions")?.len(), 0);
     }
     Ok(())
 }
