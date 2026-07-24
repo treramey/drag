@@ -673,7 +673,9 @@ pub(crate) fn scan_git_repo(repo: &Path) -> Result<Vec<GitCommitEvidence>, Strin
 }
 
 pub(crate) fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
+    let mut command = ProcessCommand::new("git");
+    clear_git_repository_environment(&mut command);
+    let output = command
         .arg("-C")
         .arg(repo)
         .args(args)
@@ -683,6 +685,28 @@ pub(crate) fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> Result
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn clear_git_repository_environment(command: &mut ProcessCommand) {
+    // Git hooks export repository-local variables. Without clearing them, `git -C`
+    // can still target the hook's repository instead of the configured evidence source.
+    for name in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ] {
+        command.env_remove(name);
+    }
 }
 
 pub(crate) fn minimize_subject(subject: &str) -> String {

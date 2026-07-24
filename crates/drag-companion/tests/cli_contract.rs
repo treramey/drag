@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::path::Path;
 use tempfile::tempdir;
 
 fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::error::Error>> {
@@ -10,6 +11,52 @@ fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::erro
 
 fn companion() -> Result<Command, Box<dyn std::error::Error>> {
     Ok(Command::cargo_bin("drag-companion")?)
+}
+
+fn isolated_git(current_dir: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command.current_dir(current_dir);
+    for name in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG",
+        "GIT_CONFIG_COUNT",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_INTERNAL_SUPER_PREFIX",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_PREFIX",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
+#[test]
+fn git_fixtures_clear_inherited_repository_environment() {
+    let command = isolated_git(Path::new("."));
+    let cleared = command
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(name, _)| name.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+
+    for required in [
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+    ] {
+        assert!(cleared.iter().any(|name| name == required));
+    }
 }
 
 #[test]
@@ -961,37 +1008,24 @@ fn collect_git_activity_emits_point_evidence_candidates_and_isolates_failures(
     let dir = tempdir()?;
     let repo = dir.path().join("repo");
     std::fs::create_dir(&repo)?;
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&repo)
-        .status()?;
-    std::process::Command::new("git")
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    isolated_git(&repo)
         .args(["config", "user.name", "Ada Lovelace"])
-        .current_dir(&repo)
         .status()?;
-    std::process::Command::new("git")
+    isolated_git(&repo)
         .args(["config", "user.email", "ada@example.test"])
-        .current_dir(&repo)
         .status()?;
     std::fs::write(repo.join("note.txt"), "hello")?;
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&repo)
-        .status()?;
-    std::process::Command::new("git")
+    isolated_git(&repo).args(["add", "."]).status()?;
+    isolated_git(&repo)
         .args(["commit", "-q", "-m", "DRAG-148 collect git activity evidence with a very long subject that should be minimized"])
         .env("GIT_AUTHOR_DATE", "2026-07-24T01:02:03+00:00")
         .env("GIT_COMMITTER_DATE", "2026-07-24T01:03:04+00:00")
-        .current_dir(&repo)
         .status()?;
-    let detached = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .current_dir(&repo)
-        .output()?;
+    let detached = isolated_git(&repo).args(["rev-parse", "HEAD"]).output()?;
     let head = String::from_utf8(detached.stdout)?.trim().to_owned();
-    std::process::Command::new("git")
+    isolated_git(&repo)
         .args(["checkout", "-q", "--detach", &head])
-        .current_dir(&repo)
         .status()?;
 
     let missing = dir.path().join("missing");
@@ -1247,35 +1281,23 @@ fn collect_git_activity_covers_shallow_rewritten_and_unusual_subject_fixtures(
     let dir = tempdir()?;
     let source = dir.path().join("source");
     std::fs::create_dir(&source)?;
-    std::process::Command::new("git")
-        .args(["init", "-q"])
-        .current_dir(&source)
-        .status()?;
-    std::process::Command::new("git")
+    isolated_git(&source).args(["init", "-q"]).status()?;
+    isolated_git(&source)
         .args(["config", "user.name", "Renée Tester"])
-        .current_dir(&source)
         .status()?;
-    std::process::Command::new("git")
+    isolated_git(&source)
         .args(["config", "user.email", "renee@example.test"])
-        .current_dir(&source)
         .status()?;
     std::fs::write(source.join("note.txt"), "one")?;
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&source)
-        .status()?;
-    std::process::Command::new("git")
+    isolated_git(&source).args(["add", "."]).status()?;
+    isolated_git(&source)
         .args(["commit", "-q", "-m", "DRAG-149 café first"])
         .env("GIT_AUTHOR_DATE", "2026-07-23T01:00:00+00:00")
         .env("GIT_COMMITTER_DATE", "2026-07-23T01:00:01+00:00")
-        .current_dir(&source)
         .status()?;
     std::fs::write(source.join("note.txt"), "two")?;
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(&source)
-        .status()?;
-    std::process::Command::new("git")
+    isolated_git(&source).args(["add", "."]).status()?;
+    isolated_git(&source)
         .args([
             "commit",
             "-q",
@@ -1285,12 +1307,11 @@ fn collect_git_activity_covers_shallow_rewritten_and_unusual_subject_fixtures(
         ])
         .env("GIT_AUTHOR_DATE", "2026-07-23T02:00:00+00:00")
         .env("GIT_COMMITTER_DATE", "2026-07-23T02:00:01+00:00")
-        .current_dir(&source)
         .status()?;
 
     let shallow = dir.path().join("shallow");
     let source_url = format!("file://{}", source.display());
-    std::process::Command::new("git")
+    isolated_git(dir.path())
         .args([
             "clone",
             "-q",
