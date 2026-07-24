@@ -2745,3 +2745,132 @@ fn retries_only_read_only_phases_and_blocked_pre_mutation_never_submits(
         .stderr(predicate::str::contains("not retryable"));
     Ok(())
 }
+
+#[test]
+fn replay_representative_days_is_deterministic_auditable_and_secret_safe(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/replay/representative");
+    let artifacts = dir.path().join("artifacts");
+
+    let first = json_output(companion()?.args([
+        "replay",
+        "--fixtures",
+        fixtures.to_string_lossy().as_ref(),
+        "--artifacts",
+        artifacts.to_string_lossy().as_ref(),
+    ]))?;
+    let second = json_output(companion()?.args([
+        "replay",
+        "--fixtures",
+        fixtures.to_string_lossy().as_ref(),
+        "--artifacts",
+        artifacts.to_string_lossy().as_ref(),
+    ]))?;
+    assert_eq!(first, second);
+    assert_eq!(first["status"], "passed");
+    assert_eq!(first["offline"], true);
+    assert_eq!(first["fixtureDays"], 30);
+    for tag in [
+        "sparse",
+        "multi_issue",
+        "meetings",
+        "abandoned_session",
+        "dst",
+        "manual_edit",
+        "network_failure",
+    ] {
+        assert!(
+            first["days"]
+                .as_array()
+                .ok_or("days")?
+                .iter()
+                .any(|day| day["tags"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|candidate| candidate == tag))),
+            "missing representative tag {tag}"
+        );
+    }
+    for metric in [
+        "schemaValidity",
+        "provenance",
+        "redaction",
+        "issueAttributionPrecision",
+        "supportedDurationPrecision",
+        "overlaps",
+        "duplicates",
+        "unsafeRetries",
+        "incorrectCreates",
+        "privacyIncidents",
+    ] {
+        assert!(
+            first["metrics"].get(metric).is_some(),
+            "missing metric {metric}"
+        );
+    }
+    assert_eq!(first["zeroInvariants"]["fabricatedMaterialFields"], 0);
+    assert_eq!(first["zeroInvariants"]["duplicateProposals"], 0);
+    assert_eq!(first["zeroInvariants"]["acceptedOverlaps"], 0);
+    assert_eq!(first["zeroInvariants"]["unsafeRetries"], 0);
+    let artifact = std::fs::read_to_string(artifacts.join("replay-report.json"))?;
+    assert!(!artifact.to_ascii_lowercase().contains("token="));
+    assert!(!artifact.to_ascii_lowercase().contains("authorization:"));
+    Ok(())
+}
+
+#[test]
+fn replay_failures_identify_fixture_evidence_rule_and_operation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let fixtures = dir.path().join("fixtures");
+    std::fs::create_dir_all(&fixtures)?;
+    let fixture = serde_json::json!({
+        "fixtureId": "bad-day",
+        "date": "2026-11-01",
+        "tags": ["dst"],
+        "collector": {"events": []},
+        "model": {"proposals": []},
+        "dragRead": {"worklogs": []},
+        "preview": {"dryRun": true},
+        "mutation": {"attempted": false},
+        "crash": {"resumeState": "clean"},
+        "network": {"allowed": false},
+        "expectations": {
+            "schemaValid": true,
+            "provenanceValid": true,
+            "redactionValid": true,
+            "attributionPrecision": 1.0,
+            "durationPrecision": 1.0,
+            "overlaps": 0,
+            "duplicates": 0,
+            "unsafeRetries": 1,
+            "incorrectCreates": 0,
+            "privacyIncidents": 0,
+            "fabricatedMaterialFields": 0,
+            "duplicateProposals": 0,
+            "acceptedOverlaps": 0
+        }
+    });
+    std::fs::write(
+        fixtures.join("bad-day.json"),
+        serde_json::to_string_pretty(&fixture)?,
+    )?;
+    let report = json_output(companion()?.args([
+        "replay",
+        "--fixtures",
+        fixtures.to_string_lossy().as_ref(),
+    ]))?;
+    assert_eq!(report["status"], "failed");
+    let failures = report["failures"].as_array().ok_or("failures")?;
+    assert!(
+        failures.iter().any(|failure| {
+            failure["fixture"] == "bad-day"
+                && failure["evidence"] == "zero-unsafe-retries"
+                && failure["rule"] == "expectations.unsafeRetries"
+                && failure["operation"] == "validate"
+        }),
+        "missing precise unsafe retry failure: {failures:?}"
+    );
+    Ok(())
+}

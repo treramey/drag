@@ -1,0 +1,70 @@
+{
+  "collector": {
+    "events": [
+      {
+        "id": "collector-27",
+        "kind": "redacted-activity",
+        "source": "local"
+      }
+    ],
+    "recording": "collector-fixture-v1"
+  },
+  "crash": {
+    "recording": "crash-fixture-v1",
+    "resumeState": "clean"
+  },
+  "date": "2026-07-28",
+  "dragRead": {
+    "recording": "drag-read-fixture-v1",
+    "worklogs": []
+  },
+  "expectations": {
+    "acceptedOverlaps": 0,
+    "attributionPrecision": 1.0,
+    "duplicateProposals": 0,
+    "duplicates": 0,
+    "durationPrecision": 1.0,
+    "fabricatedMaterialFields": 0,
+    "incorrectCreates": 0,
+    "overlaps": 0,
+    "privacyIncidents": 0,
+    "provenanceValid": true,
+    "redactionValid": true,
+    "schemaValid": true,
+    "unsafeRetries": 0
+  },
+  "fixtureId": "recorded-day-27",
+  "model": {
+    "proposals": [
+      {
+        "id": "proposal-27",
+        "issue": "DRAG-157",
+        "materialFields": [
+          "issue",
+          "startedAt",
+          "durationMinutes"
+        ]
+      }
+    ],
+    "recording": "model-fixture-v1"
+  },
+  "mutation": {
+    "attempted": false,
+    "ledger": [],
+    "recording": "mutation-fixture-v1"
+  },
+  "network": {
+    "allowed": false,
+    "failures": [],
+    "recording": "network-fixture-v1"
+  },
+  "preview": {
+    "dryRun": true,
+    "payloads": [],
+    "recording": "preview-fixture-v1"
+  },
+  "tags": [
+    "representative",
+    "release"
+  ]
+}
