@@ -72,7 +72,7 @@ enum Command {
     /// Read the complete selected Tempo day through Drag without mutation.
     Read(DateArgs),
     /// Audit proposals against existing Tempo worklogs through Drag without mutation.
-    Audit(DateArgs),
+    Audit(AuditArgs),
     /// Preview exact structured Drag worklog payloads through dry-run only.
     Preview(PreviewArgs),
     /// Remove persisted capture-only companion state.
@@ -100,6 +100,16 @@ struct ProposeArgs {
     /// Offline recorded provider fixture JSON. No network or tools are available.
     #[arg(long, value_name = "FILE")]
     fixture: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct AuditArgs {
+    /// Explicit reconciliation date in YYYY-MM-DD format.
+    #[arg(long, value_parser = parse_date)]
+    date: NaiveDate,
+    /// Explicitly authorize unattended approval decisions. Still never permits mutation.
+    #[arg(long)]
+    authorize_unattended: bool,
 }
 
 #[derive(Debug, Args)]
@@ -536,7 +546,12 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             print_json(&result)
         }
         Command::Read(args) => print_json(&read_drag_day(&drag_bin, args.date)?),
-        Command::Audit(args) => print_json(&audit_drag_day(&data_dir, &drag_bin, args.date)?),
+        Command::Audit(args) => print_json(&audit_drag_day(
+            &data_dir,
+            &drag_bin,
+            args.date,
+            args.authorize_unattended,
+        )?),
         Command::Preview(args) => print_json(&preview_drag_payload(
             &data_dir,
             &drag_bin,
@@ -1486,7 +1501,8 @@ fn migrate(conn: &mut Connection) -> Result<(), CompanionError> {
          CREATE TABLE IF NOT EXISTS mutation_attempts (id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES mutation_operations(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','submitting','confirmed','rejected','skipped','failed','uncertain')), attempted_at TEXT NOT NULL);\
 	         CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, run_id TEXT REFERENCES runs(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','confirmed','rejected','skipped','failed','uncertain')), body_json TEXT NOT NULL);
 	         CREATE TABLE IF NOT EXISTS provider_requests (id TEXT PRIMARY KEY, explicit_date TEXT NOT NULL, adapter TEXT NOT NULL, model TEXT NOT NULL, schema_version INTEGER NOT NULL, request_hash TEXT NOT NULL, response_hash TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL, timeout_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL, error_kind TEXT);
-	         CREATE TABLE IF NOT EXISTS proposal_drag_resolutions (proposal_id TEXT NOT NULL REFERENCES proposals(id), name TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (proposal_id, name));"
+	         CREATE TABLE IF NOT EXISTS proposal_drag_resolutions (proposal_id TEXT NOT NULL REFERENCES proposals(id), name TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (proposal_id, name));
+	         CREATE TABLE IF NOT EXISTS proposal_policy_fields (proposal_id TEXT PRIMARY KEY REFERENCES proposals(id), evidence_refs_json TEXT NOT NULL, issue_key TEXT NOT NULL, supported_start TEXT NOT NULL, supported_end TEXT NOT NULL, description_facts_json TEXT NOT NULL, confidence REAL NOT NULL, limitations_json TEXT NOT NULL);"
 	    )?;
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
@@ -1998,6 +2014,19 @@ fn persist_proposals(
             "INSERT OR REPLACE INTO proposals (id, bundle_id, state) VALUES (?1, ?2, 'proposed')",
             params![proposal.id, bundle_id],
         )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                proposal.id,
+                serde_json::to_string(&proposal.evidence_refs).map_err(CompanionError::Serialize)?,
+                proposal.issue_candidate.key,
+                proposal.supported_time.start,
+                proposal.supported_time.end,
+                serde_json::to_string(&proposal.description_facts).map_err(CompanionError::Serialize)?,
+                proposal.confidence,
+                serde_json::to_string(&proposal.limitations).map_err(CompanionError::Serialize)?,
+            ],
+        )?;
     }
     for unsupported in &response.unsupported_periods {
         conn.execute("INSERT OR REPLACE INTO unsupported_periods (id, explicit_date, reason, state) VALUES (?1, ?2, ?3, 'proposed')", params![unsupported.id, date.to_string(), unsupported.reason])?;
@@ -2035,8 +2064,48 @@ struct AuditResult {
     existing_worklogs: Vec<NormalizedWorklog>,
     duplicate_proposal_ids: Vec<String>,
     overlapping_proposal_ids: Vec<String>,
+    decisions: Vec<PolicyDecision>,
+    unsupported_periods: Vec<UnsupportedPeriodDecision>,
+    unattended_authorization: UnattendedAuthorization,
     network_access: bool,
     live_mutation_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PolicyDecision {
+    proposal_id: String,
+    decision: &'static str,
+    reason_codes: Vec<&'static str>,
+    evidence_trace: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnsupportedPeriodDecision {
+    id: String,
+    decision: &'static str,
+    reason_codes: Vec<&'static str>,
+    evidence_trace: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnattendedAuthorization {
+    required_for_approval: bool,
+    provided: bool,
+    mutation_allowed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ProposalPolicyInput {
+    id: String,
+    evidence_refs: Vec<String>,
+    issue_key: String,
+    start: String,
+    end: String,
+    description_facts: Vec<String>,
+    limitations: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2116,13 +2185,15 @@ fn audit_drag_day(
     data_dir: &Path,
     drag_bin: &Path,
     date: NaiveDate,
+    authorize_unattended: bool,
 ) -> Result<AuditResult, CompanionError> {
     let read = read_drag_day(drag_bin, date)?;
     let proposals = proposal_payloads(data_dir, date, None)?;
+    let policy_inputs = proposal_policy_inputs(data_dir, date)?;
     let mut duplicate_proposal_ids = Vec::new();
     let mut overlapping_proposal_ids = Vec::new();
-    for (id, payload) in proposals {
-        let candidate = normalize_payload_worklog(&payload, &id)?;
+    for (id, payload) in &proposals {
+        let candidate = normalize_payload_worklog(payload, id)?;
         if read
             .worklogs
             .iter()
@@ -2139,18 +2210,169 @@ fn audit_drag_day(
             )
             .unwrap_or(false)
         }) {
-            overlapping_proposal_ids.push(id);
+            overlapping_proposal_ids.push(id.clone());
         }
     }
+    duplicate_proposal_ids.sort();
+    overlapping_proposal_ids.sort();
+    let decisions = evaluate_policy_decisions(
+        &policy_inputs,
+        &read.worklogs,
+        &duplicate_proposal_ids,
+        &overlapping_proposal_ids,
+        authorize_unattended,
+    );
+    let unsupported_periods = unsupported_period_decisions(data_dir, date)?;
     Ok(AuditResult {
         status: "audited",
         selected_date: date,
         existing_worklogs: read.worklogs,
         duplicate_proposal_ids,
         overlapping_proposal_ids,
+        decisions,
+        unsupported_periods,
+        unattended_authorization: UnattendedAuthorization {
+            required_for_approval: true,
+            provided: authorize_unattended,
+            mutation_allowed: false,
+        },
         network_access: true,
         live_mutation_allowed: false,
     })
+}
+
+fn evaluate_policy_decisions(
+    proposals: &[ProposalPolicyInput],
+    existing_worklogs: &[NormalizedWorklog],
+    duplicate_ids: &[String],
+    overlap_ids: &[String],
+    authorize_unattended: bool,
+) -> Vec<PolicyDecision> {
+    let proposal_ids = proposals
+        .iter()
+        .map(|proposal| proposal.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    proposals
+        .iter()
+        .map(|proposal| {
+            let mut reason_codes = Vec::new();
+            let mut trace = proposal.evidence_refs.clone();
+            trace.sort();
+            trace.dedup();
+            if proposal.evidence_refs.is_empty() {
+                reason_codes.push("evidence.missing");
+            }
+            if proposal
+                .evidence_refs
+                .iter()
+                .any(|reference| !reference.starts_with("evidence."))
+            {
+                reason_codes.push("evidence.provenance.unsupported");
+            }
+            if proposal.evidence_refs.len() != 1 {
+                reason_codes.push("evidence.direct.single_issue_required");
+            }
+            if proposal.issue_key.trim().is_empty() || !proposal.issue_key.contains('-') {
+                reason_codes.push("issue.verification.failed");
+            }
+            if proposal.description_facts.is_empty()
+                || proposal.limitations.is_empty()
+                || proposal.start.trim().is_empty()
+                || proposal.end.trim().is_empty()
+            {
+                reason_codes.push("material_fields.missing");
+            }
+            if normalize_timestamp(&proposal.start).is_none()
+                || normalize_timestamp(&proposal.end).is_none()
+                || elapsed(&proposal.start, &proposal.end).is_none_or(|seconds| seconds <= 0)
+            {
+                reason_codes.push("supported_time.invalid");
+            }
+            if duplicate_ids.iter().any(|id| id == &proposal.id) {
+                reason_codes.push("tempo.duplicate");
+            }
+            if overlap_ids.iter().any(|id| id == &proposal.id) {
+                reason_codes.push("tempo.overlap");
+            }
+            if proposals.iter().any(|other| {
+                other.id != proposal.id
+                    && periods_overlap(&proposal.start, &proposal.end, &other.start, &other.end)
+                        .unwrap_or(false)
+            }) {
+                reason_codes.push("proposal.overlap");
+            }
+            if proposals
+                .iter()
+                .filter(|other| other.issue_key == proposal.issue_key)
+                .count()
+                > 1
+            {
+                reason_codes.push("allocation.multiple_candidates");
+            }
+            if existing_worklogs
+                .iter()
+                .any(|worklog| worklog.issue_key == proposal.issue_key)
+            {
+                reason_codes.push("tempo.current_state.has_issue_worklog");
+            }
+            if proposal
+                .limitations
+                .iter()
+                .chain(proposal.description_facts.iter())
+                .any(|value| {
+                    value.to_ascii_lowercase().contains("conflict")
+                        || value.to_ascii_lowercase().contains("contradict")
+                })
+            {
+                reason_codes.push("evidence.contradiction");
+            }
+            if !authorize_unattended {
+                reason_codes.push("authorization.unattended.required");
+            }
+            reason_codes.sort();
+            reason_codes.dedup();
+            let decision =
+                if !proposal_ids.contains(proposal.id.as_str()) || reason_codes.is_empty() {
+                    "approved"
+                } else if reason_codes
+                    .iter()
+                    .any(|code| code.starts_with("authorization."))
+                {
+                    "skipped"
+                } else {
+                    "rejected"
+                };
+            PolicyDecision {
+                proposal_id: proposal.id.clone(),
+                decision,
+                reason_codes,
+                evidence_trace: trace,
+            }
+        })
+        .collect()
+}
+
+fn unsupported_period_decisions(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<Vec<UnsupportedPeriodDecision>, CompanionError> {
+    let conn = Connection::open(store_path(data_dir))?;
+    let mut stmt =
+        conn.prepare("SELECT id FROM unsupported_periods WHERE explicit_date = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([date.to_string()], |row| row.get::<_, String>(0))?;
+    let mut periods = Vec::new();
+    for id in rows {
+        periods.push(UnsupportedPeriodDecision {
+            id: id?,
+            decision: "skipped",
+            reason_codes: vec![
+                "unsupported_period.preserved",
+                "required_time.informational",
+            ],
+            evidence_trace: Vec::new(),
+        });
+    }
+    Ok(periods)
 }
 
 fn preview_drag_payload(
@@ -2397,6 +2619,55 @@ fn proposal_payloads(
     Ok(out)
 }
 
+fn proposal_policy_inputs(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<Vec<ProposalPolicyInput>, CompanionError> {
+    let conn = Connection::open(store_path(data_dir))?;
+    let mut stmt = conn.prepare(
+        "SELECT p.id, f.evidence_refs_json, f.issue_key, f.supported_start, f.supported_end, f.description_facts_json, f.limitations_json FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id JOIN proposal_policy_fields f ON f.proposal_id = p.id WHERE b.explicit_date = ?1 ORDER BY p.id",
+    )?;
+    let rows = stmt.query_map([date.to_string()], |row| {
+        let evidence_refs_json: String = row.get(1)?;
+        let description_facts_json: String = row.get(5)?;
+        let limitations_json: String = row.get(6)?;
+        Ok((
+            row.get::<_, String>(0)?,
+            evidence_refs_json,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            description_facts_json,
+            limitations_json,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (
+            id,
+            evidence_refs_json,
+            issue_key,
+            start,
+            end,
+            description_facts_json,
+            limitations_json,
+        ) = row?;
+        out.push(ProposalPolicyInput {
+            id,
+            evidence_refs: serde_json::from_str(&evidence_refs_json)
+                .map_err(CompanionError::Serialize)?,
+            issue_key,
+            start,
+            end,
+            description_facts: serde_json::from_str(&description_facts_json)
+                .map_err(CompanionError::Serialize)?,
+            limitations: serde_json::from_str(&limitations_json)
+                .map_err(CompanionError::Serialize)?,
+        });
+    }
+    Ok(out)
+}
+
 fn resolve_drag_required_text(
     conn: &Connection,
     proposal: &str,
@@ -2566,7 +2837,16 @@ fn contract() -> Contract {
                 vec![],
             ),
             command("read", true, vec![], vec!["drag list through public CLI"]),
-            command("audit", true, vec![], vec!["drag list through public CLI", "local duplicate and overlap comparison"]),
+            command(
+                "audit",
+                true,
+                vec![],
+                vec![
+                    "drag list through public CLI",
+                    "local duplicate and overlap comparison",
+                    "deterministic unattended policy decisions require --authorize-unattended before approval",
+                ],
+            ),
             command("preview", true, vec![], vec!["drag log --json - --dry-run through public CLI"]),
             command(
                 "purge",

@@ -1529,3 +1529,150 @@ fn drag_audit_normalizes_existing_worklogs_and_never_live_mutates(
     assert!(!commands.contains(" log "));
     Ok(())
 }
+
+#[test]
+fn audit_policy_decisions_are_deterministic_exhaustive_and_preserve_unsupported_time(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&dir, "valid.json", valid_provider_response())?;
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "propose",
+            "--date",
+            "2026-03-08",
+            "--fixture",
+            fixture.to_str().ok_or("fixture path")?,
+        ])
+        .assert()
+        .success();
+
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    for (name, value) in [
+        ("issueKey", "DRAG-151".to_owned()),
+        ("start", "2026-03-08T16:00:00Z".to_owned()),
+        ("end", "2026-03-08T17:00:00Z".to_owned()),
+        ("description", "Implemented proposal adapter".to_owned()),
+        ("attributes", serde_json::json!({}).to_string()),
+    ] {
+        conn.execute("INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES ('proposal-1', ?1, ?2)", rusqlite::params![name, value])?;
+    }
+    for (id, refs, issue, start, end, facts, limits, attrs) in [
+        (
+            "proposal-missing-fields",
+            serde_json::json!([]),
+            "BAD",
+            "2026-03-08T15:00:00Z",
+            "2026-03-08T15:30:00Z",
+            serde_json::json!([]),
+            serde_json::json!(["missing attributes"]),
+            serde_json::json!({}),
+        ),
+        (
+            "proposal-multi-conflict",
+            serde_json::json!(["evidence.git.abc123", "external.raw"]),
+            "DRAG-150",
+            "2026-03-08T13:30:00Z",
+            "2026-03-08T14:30:00Z",
+            serde_json::json!(["conflicting evidence"]),
+            serde_json::json!(["contradiction"]),
+            serde_json::json!({"_Account_":"RD"}),
+        ),
+        (
+            "proposal-duplicate",
+            serde_json::json!(["evidence.git.abc123"]),
+            "DRAG-150",
+            "2026-03-08T13:00:00Z",
+            "2026-03-08T14:00:00Z",
+            serde_json::json!(["Implemented proposal adapter"]),
+            serde_json::json!(["direct evidence"]),
+            serde_json::json!({}),
+        ),
+        (
+            "proposal-approved",
+            serde_json::json!(["evidence.git.abc123"]),
+            "DRAG-152",
+            "2026-03-08T17:00:00Z",
+            "2026-03-08T18:00:00Z",
+            serde_json::json!(["Implemented deterministic policy"]),
+            serde_json::json!(["direct evidence"]),
+            serde_json::json!({}),
+        ),
+    ] {
+        conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES (?1, (SELECT id FROM daily_bundles LIMIT 1), 'proposed')", rusqlite::params![id])?;
+        conn.execute("INSERT INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1.0, ?7)", rusqlite::params![id, refs.to_string(), issue, start, end, facts.to_string(), limits.to_string()])?;
+        for (name, value) in [
+            ("issueKey", issue.to_owned()),
+            ("start", start.to_owned()),
+            ("end", end.to_owned()),
+            ("description", "Implemented proposal adapter".to_owned()),
+            ("attributes", attrs.to_string()),
+        ] {
+            conn.execute("INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)", rusqlite::params![id, name, value])?;
+        }
+    }
+    let drag = fake_drag(
+        &dir,
+        vec![
+            serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","total":1,"worklogs":[{"id":"tempo-1","issueKey":"DRAG-150","start":"2026-03-08T13:00:00Z","end":"2026-03-08T14:00:00Z","description":"Implemented proposal adapter","attributes":{}}]}),
+        ],
+    )?;
+
+    let run_audit = || -> Result<Value, Box<dyn std::error::Error>> {
+        let output = companion()?
+            .args([
+                "--data-dir",
+                data_dir.to_string_lossy().as_ref(),
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "audit",
+                "--date",
+                "2026-03-08",
+                "--authorize-unattended",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        Ok(serde_json::from_slice(&output)?)
+    };
+    let first = run_audit()?;
+    let second = run_audit()?;
+    assert_eq!(first["decisions"], second["decisions"]);
+    assert_eq!(first["unattendedAuthorization"]["provided"], true);
+    assert_eq!(first["liveMutationAllowed"], false);
+    assert_eq!(first["unsupportedPeriods"][0]["decision"], "skipped");
+    assert!(first["unsupportedPeriods"][0]["reasonCodes"]
+        .as_array()
+        .ok_or("reason codes")?
+        .contains(&serde_json::json!("required_time.informational")));
+    let decisions = first["decisions"].as_array().ok_or("decisions")?;
+    assert!(decisions
+        .iter()
+        .any(|decision| decision["decision"] == "approved"));
+    for code in [
+        "evidence.missing",
+        "evidence.provenance.unsupported",
+        "evidence.direct.single_issue_required",
+        "issue.verification.failed",
+        "material_fields.missing",
+        "tempo.duplicate",
+        "tempo.overlap",
+        "proposal.overlap",
+        "allocation.multiple_candidates",
+        "tempo.current_state.has_issue_worklog",
+        "evidence.contradiction",
+    ] {
+        assert!(
+            decisions.iter().any(|decision| decision["reasonCodes"]
+                .as_array()
+                .is_some_and(|codes| codes.contains(&serde_json::json!(code)))),
+            "missing {code}"
+        );
+    }
+    Ok(())
+}
