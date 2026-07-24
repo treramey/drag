@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.8.1
+
+### Patch Changes
+
+- 963cb0a: Include existing Tempo work attributes directly in structured list results.
+
 ## 0.8.0
 
 ### Minor Changes
