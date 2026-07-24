@@ -1,5 +1,5 @@
 ---
-"@treramey/drag": patch
+"@treramey/drag": minor
 ---
 
-Add the safe capture-only `drag-companion` workspace binary and contract, including append-only evidence journaling, idempotent SQLite import, versioned persistence schemas, safe failure handling, deterministic minimized daily evidence bundles, local Git activity collection as point evidence with provenance-bearing issue candidates, and local RFC 5545 `.ics` calendar evidence import with bounded selected-day recurrence expansion.
+Add the end-of-day `drag-companion` and `drag resolve` workflows with safe capture, evidence journaling, deterministic bundles, local Git/ICS/Claude collection, schema-constrained proposal fixtures, Drag CLI reconciliation, guarded policy/audit/preview flows, staged rollout-gated execution, durable run coordination, replay reports, scheduler lifecycle management, retention, purge, and operator recovery reporting.
