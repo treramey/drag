@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
@@ -15,6 +15,9 @@ const COLLECTOR_ADAPTER: &str = "fake";
 const MUTATOR_ADAPTER: &str = "disabled";
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const STORE_SCHEMA_VERSION: i64 = 1;
+const CLAUDE_HOOK_SCHEMA_VERSION: u32 = 1;
+const CLAUDE_COLLECTOR: &str = "claude-code-session-hook";
+const CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -54,6 +57,8 @@ enum Command {
     Purge,
     /// Inspect scheduler lifecycle operations. These do not install anything yet.
     Scheduler(SchedulerArgs),
+    /// Install, remove, or capture Claude Code SessionStart/SessionEnd hooks.
+    ClaudeHook(ClaudeHookArgs),
     /// Print the machine-readable command and side-effect contract.
     Contract,
 }
@@ -69,6 +74,29 @@ struct DateArgs {
 struct SchedulerArgs {
     #[command(subcommand)]
     operation: SchedulerOperation,
+}
+
+#[derive(Debug, Args)]
+struct ClaudeHookArgs {
+    #[command(subcommand)]
+    operation: ClaudeHookOperation,
+}
+
+#[derive(Debug, Subcommand)]
+enum ClaudeHookOperation {
+    /// Install SessionStart and SessionEnd capture hooks in a Claude settings JSON file.
+    Install(ClaudeHookSettingsArgs),
+    /// Remove only drag-companion Claude hook commands from a Claude settings JSON file.
+    Remove(ClaudeHookSettingsArgs),
+    /// Capture one Claude hook payload from stdin into the local journal.
+    Capture,
+}
+
+#[derive(Debug, Args)]
+struct ClaudeHookSettingsArgs {
+    /// Claude settings JSON path to update.
+    #[arg(long, value_name = "FILE")]
+    settings: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -113,6 +141,8 @@ enum CompanionError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("invalid Claude hook payload: {0}")]
+    InvalidClaudeHook(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -342,8 +372,241 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             "status": "described", "operation": format!("{:?}", args.operation).to_lowercase(),
             "mode": DEFAULT_MODE, "hostSchedulerMutated": false,
         })),
+        Command::ClaudeHook(args) => match args.operation {
+            ClaudeHookOperation::Install(args) => {
+                install_claude_hooks(&args.settings)?;
+                print_json(
+                    &serde_json::json!({ "status": "installed", "settings": args.settings, "events": ["SessionStart", "SessionEnd"] }),
+                )
+            }
+            ClaudeHookOperation::Remove(args) => {
+                remove_claude_hooks(&args.settings)?;
+                print_json(&serde_json::json!({ "status": "removed", "settings": args.settings }))
+            }
+            ClaudeHookOperation::Capture => {
+                let event = read_claude_hook_event(&data_dir)?;
+                append_journal_event(&data_dir, &event)?;
+                print_json(
+                    &serde_json::json!({ "status": "captured", "eventId": event.event_id, "journal": journal_path(&data_dir), "networkAccess": false }),
+                )
+            }
+        },
         Command::Contract => print_json(&contract()),
     }
+}
+
+fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
+    let mut settings = read_settings(settings_path)?;
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+    let Some(settings_object) = settings.as_object_mut() else {
+        return Err(CompanionError::InvalidClaudeHook(
+            "settings must be a JSON object".to_owned(),
+        ));
+    };
+    let hooks = settings_object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    if !hooks.is_object() {
+        *hooks = serde_json::json!({});
+    }
+    let Some(hooks_object) = hooks.as_object_mut() else {
+        return Err(CompanionError::InvalidClaudeHook(
+            "hooks must be a JSON object".to_owned(),
+        ));
+    };
+    for event in ["SessionStart", "SessionEnd"] {
+        let list = hooks_object
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]));
+        if !list.is_array() {
+            *list = serde_json::json!([]);
+        }
+        let Some(arr) = list.as_array_mut() else {
+            return Err(CompanionError::InvalidClaudeHook(format!(
+                "{event} hooks must be an array"
+            )));
+        };
+        if !arr.iter().any(is_our_hook_entry) {
+            arr.push(serde_json::json!({
+                "matcher": "*",
+                "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+            }));
+        }
+    }
+    write_settings(settings_path, &settings)
+}
+
+fn remove_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
+    let mut settings = read_settings(settings_path)?;
+    if let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
+        for event in ["SessionStart", "SessionEnd"] {
+            if let Some(entries) = hooks.get_mut(event).and_then(Value::as_array_mut) {
+                for entry in entries.iter_mut() {
+                    if let Some(commands) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
+                        commands.retain(|command| !is_our_command(command));
+                    }
+                }
+                entries.retain(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(Value::as_array)
+                        .is_none_or(|commands| !commands.is_empty())
+                        || !is_our_hook_entry(entry)
+                });
+            }
+        }
+    }
+    write_settings(settings_path, &settings)
+}
+
+fn read_settings(path: &Path) -> Result<Value, CompanionError> {
+    if !path.exists() {
+        return Ok(serde_json::json!({}));
+    }
+    let body = fs::read_to_string(path).map_err(|source| CompanionError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_str(&body)
+        .map_err(|error| CompanionError::InvalidClaudeHook(error.to_string()))
+}
+
+fn write_settings(path: &Path, settings: &Value) -> Result<(), CompanionError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| CompanionError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let body = serde_json::to_vec_pretty(settings).map_err(CompanionError::Serialize)?;
+    fs::write(path, body).map_err(|source| CompanionError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+fn is_our_hook_entry(entry: &Value) -> bool {
+    entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|commands| commands.iter().any(is_our_command))
+}
+
+fn is_our_command(command: &Value) -> bool {
+    command
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|command| command.contains(CLAUDE_HOOK_COMMAND))
+}
+
+fn read_claude_hook_event(data_dir: &Path) -> Result<JournalEvent, CompanionError> {
+    let mut stdin = String::new();
+    io::stdin()
+        .read_to_string(&mut stdin)
+        .map_err(|source| CompanionError::Read {
+            path: PathBuf::from("<stdin>"),
+            source,
+        })?;
+    let payload: Value = serde_json::from_str(&stdin)
+        .map_err(|error| CompanionError::InvalidClaudeHook(error.to_string()))?;
+    claude_hook_event_from_payload(data_dir, &payload)
+}
+
+fn claude_hook_event_from_payload(
+    _data_dir: &Path,
+    payload: &Value,
+) -> Result<JournalEvent, CompanionError> {
+    let kind = payload
+        .get("hook_event_name")
+        .or_else(|| payload.get("event"))
+        .or_else(|| payload.get("hookEventName"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| CompanionError::InvalidClaudeHook("missing lifecycle event".to_owned()))?;
+    if !matches!(kind, "SessionStart" | "SessionEnd") {
+        return Err(CompanionError::InvalidClaudeHook(format!(
+            "unsupported lifecycle event {kind}"
+        )));
+    }
+    let session_id = payload
+        .get("session_id")
+        .or_else(|| payload.get("sessionId"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| CompanionError::InvalidClaudeHook("missing session id".to_owned()))?;
+    let observed_at = payload
+        .get("timestamp")
+        .or_else(|| payload.get("observed_at"))
+        .or_else(|| payload.get("observedAt"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(now_string);
+    let explicit_date = normalize_timestamp(&observed_at)
+        .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
+        .map(|timestamp| timestamp.date_naive())
+        .unwrap_or_else(|| Utc::now().date_naive());
+    let cwd = payload
+        .get("cwd")
+        .or_else(|| payload.get("workspace"))
+        .and_then(Value::as_str);
+    let repo = find_repo_link(cwd).unwrap_or_else(|| "unknown".to_owned());
+    let mut lifecycle_payload = serde_json::json!({
+        "schemaVersion": CLAUDE_HOOK_SCHEMA_VERSION,
+        "lifecycleKind": kind,
+        "sessionId": session_id,
+        "observedAt": observed_at,
+        "repository": repo,
+        "summary": format!("Claude Code {kind} captured locally for repository {repo}"),
+        "networkAccess": false,
+        "transcriptCaptured": false,
+    });
+    if kind == "SessionStart" {
+        lifecycle_payload["intervalStart"] = serde_json::json!(observed_at);
+    } else {
+        lifecycle_payload["intervalEnd"] = serde_json::json!(observed_at);
+    }
+    let mut event = JournalEvent {
+        schema_version: JOURNAL_SCHEMA_VERSION,
+        event_id: format!("evidence.claude.{session_id}.{kind}"),
+        event_type: "evidence.claude.lifecycle".to_owned(),
+        observed_at: observed_at.clone(),
+        source: SourceProvenance {
+            kind: "claude-code".to_owned(),
+            adapter: CLAUDE_COLLECTOR.to_owned(),
+            reference: format!("{repo}#{session_id}"),
+        },
+        collector: CollectorProvenance {
+            name: CLAUDE_COLLECTOR.to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+        timestamp_semantics: TimestampSemantics {
+            observed_at_source: observed_at,
+            timezone: "UTC".to_owned(),
+            explicit_date,
+        },
+        privacy: PrivacyState {
+            classification: "local-metadata".to_owned(),
+            redacted: true,
+        },
+        retention: RetentionMetadata {
+            policy: "retain-until-user-purge".to_owned(),
+            retain_until: None,
+        },
+        supersedes: None,
+        payload: lifecycle_payload,
+        integrity_hash: String::new(),
+    };
+    event.integrity_hash = event_hash(&event).unwrap_or_default();
+    Ok(event)
+}
+
+fn find_repo_link(cwd: Option<&str>) -> Option<String> {
+    let cwd = Path::new(cwd?);
+    cwd.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn parse_date(raw: &str) -> Result<NaiveDate, String> {
@@ -794,6 +1057,16 @@ fn contract() -> Contract {
                 false,
                 vec![],
                 vec!["install", "enable", "disable", "uninstall", "status"],
+            ),
+            command(
+                "claude-hook",
+                false,
+                vec![
+                    "install SessionStart and SessionEnd capture hooks while preserving unrelated Claude settings",
+                    "remove only drag-companion Claude hook commands",
+                    "append local Claude lifecycle metadata from stdin without transcript capture",
+                ],
+                vec!["install", "remove", "capture"],
             ),
         ],
     }

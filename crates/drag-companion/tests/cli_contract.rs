@@ -19,7 +19,8 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
         .stdout(predicate::str::contains("resume"))
         .stdout(predicate::str::contains("report"))
         .stdout(predicate::str::contains("purge"))
-        .stdout(predicate::str::contains("scheduler"));
+        .stdout(predicate::str::contains("scheduler"))
+        .stdout(predicate::str::contains("claude-hook"));
 
     companion()?
         .args(["reconcile", "--help"])
@@ -67,6 +68,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         "report",
         "purge",
         "scheduler",
+        "claude-hook",
     ] {
         assert!(
             commands.iter().any(|command| command["name"] == required),
@@ -481,5 +483,183 @@ fn bundle_redacts_secrets_private_paths_and_instruction_framing(
         assert!(!text.contains(leaked), "leaked {leaked}");
     }
     assert!(text.contains("worked"));
+    Ok(())
+}
+
+#[test]
+fn claude_hook_install_and_remove_preserve_unrelated_user_config(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let settings = dir.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "SessionStart": [{
+                    "matcher": "project",
+                    "hooks": [{"type":"command", "command":"echo keep-start"}]
+                }],
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{"type":"command", "command":"echo keep-tool"}]
+                }]
+            }
+        }))?,
+    )?;
+
+    let settings_arg = settings.to_string_lossy().into_owned();
+    companion()?
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings_arg.as_str(),
+        ])
+        .assert()
+        .success();
+    companion()?
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings_arg.as_str(),
+        ])
+        .assert()
+        .success();
+
+    let installed: Value = serde_json::from_str(&std::fs::read_to_string(&settings)?)?;
+    assert_eq!(installed["theme"], "dark");
+    assert_eq!(
+        installed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "echo keep-tool"
+    );
+    assert_eq!(
+        installed["hooks"]["SessionStart"]
+            .as_array()
+            .ok_or("SessionStart")?
+            .len(),
+        2
+    );
+    assert_eq!(
+        installed["hooks"]["SessionEnd"]
+            .as_array()
+            .ok_or("SessionEnd")?
+            .len(),
+        1
+    );
+    let rendered = serde_json::to_string(&installed)?;
+    assert_eq!(
+        rendered
+            .matches("drag-companion claude-hook capture")
+            .count(),
+        2
+    );
+
+    companion()?
+        .args(["claude-hook", "remove", "--settings", settings_arg.as_str()])
+        .assert()
+        .success();
+    let removed: Value = serde_json::from_str(&std::fs::read_to_string(&settings)?)?;
+    assert_eq!(removed["theme"], "dark");
+    assert_eq!(
+        removed["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        "echo keep-start"
+    );
+    assert_eq!(
+        removed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+        "echo keep-tool"
+    );
+    assert!(!serde_json::to_string(&removed)?.contains("drag-companion claude-hook capture"));
+    Ok(())
+}
+
+#[test]
+fn claude_hook_capture_records_safe_lifecycle_metadata_without_private_paths(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "stable-session-1",
+        "timestamp": "2026-03-08T12:00:00Z",
+        "cwd": "/home/tmr/private/drag",
+        "transcript_path": "/home/tmr/.claude/projects/private/transcript.jsonl"
+    });
+
+    companion()?
+        .args(["--data-dir", data_dir.as_str(), "claude-hook", "capture"])
+        .write_stdin(serde_json::to_vec(&payload)?)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "evidence.claude.stable-session-1.SessionStart",
+        ));
+
+    let journal = std::fs::read_to_string(dir.path().join("journal.jsonl"))?;
+    let event: Value = serde_json::from_str(journal.lines().next().ok_or("journal event")?)?;
+    assert_eq!(event["schemaVersion"], 1);
+    assert_eq!(event["eventType"], "evidence.claude.lifecycle");
+    assert_eq!(event["source"]["adapter"], "claude-code-session-hook");
+    assert_eq!(event["source"]["reference"], "drag#stable-session-1");
+    assert_eq!(event["timestampSemantics"]["explicitDate"], "2026-03-08");
+    assert_eq!(event["payload"]["schemaVersion"], 1);
+    assert_eq!(event["payload"]["lifecycleKind"], "SessionStart");
+    assert_eq!(event["payload"]["sessionId"], "stable-session-1");
+    assert_eq!(event["payload"]["repository"], "drag");
+    assert_eq!(event["payload"]["networkAccess"], false);
+    assert_eq!(event["payload"]["transcriptCaptured"], false);
+    let text = serde_json::to_string(&event)?;
+    assert!(!text.contains("/home/tmr"));
+    assert!(!text.contains("transcript.jsonl"));
+
+    companion()?
+        .args(["--data-dir", data_dir.as_str(), "import"])
+        .assert()
+        .success();
+    let bundle = companion()?
+        .args([
+            "--data-dir",
+            data_dir.as_str(),
+            "bundle",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bundle_text = String::from_utf8(bundle)?;
+    assert!(bundle_text.contains("abandonedSession"));
+    assert!(bundle_text.contains("\"abandonedSession\": true"));
+    assert!(!bundle_text.contains("/home/tmr"));
+    assert!(!bundle_text.contains("transcript"));
+    Ok(())
+}
+
+#[test]
+fn claude_hook_capture_rejects_malformed_and_unsupported_payloads(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    companion()?
+        .args(["--data-dir", data_dir.as_str(), "claude-hook", "capture"])
+        .write_stdin("{not-json")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid Claude hook payload"));
+
+    companion()?
+        .args(["--data-dir", data_dir.as_str(), "claude-hook", "capture"])
+        .write_stdin(serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "stable-session-2"
+        }))?)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unsupported lifecycle event"));
+
+    assert!(!dir.path().join("journal.jsonl").exists());
     Ok(())
 }
