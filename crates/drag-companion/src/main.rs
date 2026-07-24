@@ -41,6 +41,10 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     data_dir: Option<PathBuf>,
 
+    /// Drag executable used for public gateway/process-boundary operations.
+    #[arg(long, global = true, default_value = "drag", value_name = "EXE")]
+    drag_bin: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -65,6 +69,12 @@ enum Command {
     Bundle(DateArgs),
     /// Generate schema-constrained worklog proposals from a minimized bundle and offline provider fixture.
     Propose(ProposeArgs),
+    /// Read the complete selected Tempo day through Drag without mutation.
+    Read(DateArgs),
+    /// Audit proposals against existing Tempo worklogs through Drag without mutation.
+    Audit(DateArgs),
+    /// Preview exact structured Drag worklog payloads through dry-run only.
+    Preview(PreviewArgs),
     /// Remove persisted capture-only companion state.
     Purge,
     /// Inspect scheduler lifecycle operations. These do not install anything yet.
@@ -90,6 +100,16 @@ struct ProposeArgs {
     /// Offline recorded provider fixture JSON. No network or tools are available.
     #[arg(long, value_name = "FILE")]
     fixture: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct PreviewArgs {
+    /// Explicit reconciliation date in YYYY-MM-DD format.
+    #[arg(long, value_parser = parse_date)]
+    date: NaiveDate,
+    /// Proposal id to preview. Defaults to the first persisted proposal for the date.
+    #[arg(long)]
+    proposal: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -180,6 +200,31 @@ enum CompanionError {
     InvalidClaudeHook(String),
     #[error("proposal adapter rejected response: {0}")]
     Proposal(String),
+    #[error("drag reconciliation {kind}: {message}")]
+    DragReconcile {
+        kind: ReconcileErrorKind,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum ReconcileErrorKind {
+    IncompleteRead,
+    SchemaIncompatibility,
+    DefiniteFailure,
+    TransportAmbiguity,
+}
+
+impl std::fmt::Display for ReconcileErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::IncompleteRead => "incomplete_read",
+            Self::SchemaIncompatibility => "schema_incompatibility",
+            Self::DefiniteFailure => "definite_failure",
+            Self::TransportAmbiguity => "transport_ambiguity",
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -436,6 +481,7 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), CompanionError> {
+    let drag_bin = cli.drag_bin.clone();
     let data_dir = cli
         .data_dir
         .unwrap_or_else(|| PathBuf::from(".drag-companion"));
@@ -489,6 +535,14 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             let result = propose_from_fixture(&data_dir, args.date, &args.fixture)?;
             print_json(&result)
         }
+        Command::Read(args) => print_json(&read_drag_day(&drag_bin, args.date)?),
+        Command::Audit(args) => print_json(&audit_drag_day(&data_dir, &drag_bin, args.date)?),
+        Command::Preview(args) => print_json(&preview_drag_payload(
+            &data_dir,
+            &drag_bin,
+            args.date,
+            args.proposal.as_deref(),
+        )?),
         Command::Purge => {
             let _ = fs::remove_dir_all(&data_dir);
             print_json(&serde_json::json!({ "status": "purged", "dataDir": data_dir }))
@@ -1430,9 +1484,10 @@ fn migrate(conn: &mut Connection) -> Result<(), CompanionError> {
          CREATE TABLE IF NOT EXISTS leases (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES runs(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','confirmed','rejected','skipped','failed','uncertain')), expires_at TEXT NOT NULL);\
          CREATE TABLE IF NOT EXISTS mutation_operations (id TEXT PRIMARY KEY, proposal_id TEXT REFERENCES proposals(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','submitting','confirmed','rejected','skipped','failed','uncertain')), idempotency_key TEXT NOT NULL UNIQUE);\
          CREATE TABLE IF NOT EXISTS mutation_attempts (id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES mutation_operations(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','submitting','confirmed','rejected','skipped','failed','uncertain')), attempted_at TEXT NOT NULL);\
-         CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, run_id TEXT REFERENCES runs(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','confirmed','rejected','skipped','failed','uncertain')), body_json TEXT NOT NULL);
-         CREATE TABLE IF NOT EXISTS provider_requests (id TEXT PRIMARY KEY, explicit_date TEXT NOT NULL, adapter TEXT NOT NULL, model TEXT NOT NULL, schema_version INTEGER NOT NULL, request_hash TEXT NOT NULL, response_hash TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL, timeout_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL, error_kind TEXT);"
-    )?;
+	         CREATE TABLE IF NOT EXISTS reports (id TEXT PRIMARY KEY, run_id TEXT REFERENCES runs(id), state TEXT NOT NULL CHECK (state IN ('proposed','approved','confirmed','rejected','skipped','failed','uncertain')), body_json TEXT NOT NULL);
+	         CREATE TABLE IF NOT EXISTS provider_requests (id TEXT PRIMARY KEY, explicit_date TEXT NOT NULL, adapter TEXT NOT NULL, model TEXT NOT NULL, schema_version INTEGER NOT NULL, request_hash TEXT NOT NULL, response_hash TEXT, state TEXT NOT NULL, attempts INTEGER NOT NULL, timeout_ms INTEGER NOT NULL, duration_ms INTEGER NOT NULL, error_kind TEXT);
+	         CREATE TABLE IF NOT EXISTS proposal_drag_resolutions (proposal_id TEXT NOT NULL REFERENCES proposals(id), name TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (proposal_id, name));"
+	    )?;
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
         params![STORE_SCHEMA_VERSION, now_string()],
@@ -1950,6 +2005,449 @@ fn persist_proposals(
     Ok(())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DragReadResult {
+    status: &'static str,
+    selected_date: NaiveDate,
+    pages: usize,
+    worklogs: Vec<NormalizedWorklog>,
+    network_access: bool,
+    live_mutation_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NormalizedWorklog {
+    tempo_worklog_id: String,
+    issue_key: String,
+    start: String,
+    end: String,
+    description: String,
+    attributes: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuditResult {
+    status: &'static str,
+    selected_date: NaiveDate,
+    existing_worklogs: Vec<NormalizedWorklog>,
+    duplicate_proposal_ids: Vec<String>,
+    overlapping_proposal_ids: Vec<String>,
+    network_access: bool,
+    live_mutation_allowed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewResult {
+    status: &'static str,
+    classification: &'static str,
+    selected_date: NaiveDate,
+    payload: Value,
+    drag_preview: Value,
+    network_access: bool,
+    live_mutation_allowed: bool,
+}
+
+fn read_drag_day(drag_bin: &Path, date: NaiveDate) -> Result<DragReadResult, CompanionError> {
+    let mut continuation: Option<String> = None;
+    let mut worklogs = Vec::new();
+    let mut pages = 0;
+    loop {
+        let mut args = vec![
+            "--output".to_owned(),
+            "json".to_owned(),
+            "list".to_owned(),
+            "--date".to_owned(),
+            date.to_string(),
+        ];
+        if let Some(next) = &continuation {
+            args.push("--continue".to_owned());
+            args.push(next.clone());
+        }
+        let page = drag_json(drag_bin, &args, None, false)?;
+        pages += 1;
+        assert_compatible_drag_page(&page, date)?;
+        let items = page
+            .get("worklogs")
+            .or_else(|| page.get("results"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    "missing worklogs/results array",
+                )
+            })?;
+        for item in items {
+            worklogs.push(normalize_worklog(item)?);
+        }
+        let total = page.get("total").and_then(Value::as_u64);
+        continuation = page
+            .get("continuation")
+            .or_else(|| page.get("next"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        if continuation.is_none() {
+            break;
+        }
+        if pages > 128 {
+            return Err(reconcile_error(
+                ReconcileErrorKind::IncompleteRead,
+                "page-bound exhaustion",
+            ));
+        }
+        if total.is_some_and(|total| worklogs.len() as u64 >= total) {
+            break;
+        }
+    }
+    Ok(DragReadResult {
+        status: "read",
+        selected_date: date,
+        pages,
+        worklogs,
+        network_access: true,
+        live_mutation_allowed: false,
+    })
+}
+
+fn audit_drag_day(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+) -> Result<AuditResult, CompanionError> {
+    let read = read_drag_day(drag_bin, date)?;
+    let proposals = proposal_payloads(data_dir, date, None)?;
+    let mut duplicate_proposal_ids = Vec::new();
+    let mut overlapping_proposal_ids = Vec::new();
+    for (id, payload) in proposals {
+        let candidate = normalize_payload_worklog(&payload, &id)?;
+        if read
+            .worklogs
+            .iter()
+            .any(|existing| same_worklog(existing, &candidate))
+        {
+            duplicate_proposal_ids.push(id.clone());
+        }
+        if read.worklogs.iter().any(|existing| {
+            overlaps(
+                &existing.start,
+                &existing.end,
+                &candidate.start,
+                &candidate.end,
+            )
+            .unwrap_or(false)
+        }) {
+            overlapping_proposal_ids.push(id);
+        }
+    }
+    Ok(AuditResult {
+        status: "audited",
+        selected_date: date,
+        existing_worklogs: read.worklogs,
+        duplicate_proposal_ids,
+        overlapping_proposal_ids,
+        network_access: true,
+        live_mutation_allowed: false,
+    })
+}
+
+fn preview_drag_payload(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+    proposal_id: Option<&str>,
+) -> Result<PreviewResult, CompanionError> {
+    let mut payloads = proposal_payloads(data_dir, date, proposal_id)?;
+    let (_, payload) = payloads.pop().ok_or_else(|| {
+        reconcile_error(
+            ReconcileErrorKind::IncompleteRead,
+            "no proposal payload available",
+        )
+    })?;
+    let preview = drag_json(
+        drag_bin,
+        &[
+            "--output".into(),
+            "json".into(),
+            "log".into(),
+            "--json".into(),
+            "-".into(),
+            "--dry-run".into(),
+        ],
+        Some(&payload),
+        true,
+    )?;
+    Ok(PreviewResult {
+        status: "previewed",
+        classification: "local-normalization",
+        selected_date: date,
+        payload,
+        drag_preview: preview,
+        network_access: true,
+        live_mutation_allowed: false,
+    })
+}
+
+fn drag_json(
+    drag_bin: &Path,
+    args: &[String],
+    stdin_json: Option<&Value>,
+    dry_run: bool,
+) -> Result<Value, CompanionError> {
+    let mut command = ProcessCommand::new(drag_bin);
+    command.args(args);
+    if stdin_json.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(|e| {
+        reconcile_error(
+            ReconcileErrorKind::TransportAmbiguity,
+            format!("failed to start Drag: {e}"),
+        )
+    })?;
+    if let Some(payload) = stdin_json {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            reconcile_error(ReconcileErrorKind::TransportAmbiguity, "missing Drag stdin")
+        })?;
+        stdin
+            .write_all(
+                serde_json::to_string(payload)
+                    .map_err(CompanionError::Serialize)?
+                    .as_bytes(),
+            )
+            .map_err(|e| {
+                reconcile_error(
+                    ReconcileErrorKind::TransportAmbiguity,
+                    format!("failed to write Drag stdin: {e}"),
+                )
+            })?;
+    }
+    let output = child.wait_with_output().map_err(|e| {
+        reconcile_error(
+            ReconcileErrorKind::TransportAmbiguity,
+            format!("Drag transport failed: {e}"),
+        )
+    })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let kind = if dry_run || output.status.code() == Some(2) {
+            ReconcileErrorKind::DefiniteFailure
+        } else {
+            ReconcileErrorKind::TransportAmbiguity
+        };
+        return Err(reconcile_error(kind, stderr.trim().to_owned()));
+    }
+    serde_json::from_slice(&output.stdout).map_err(|e| {
+        reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!("invalid Drag JSON: {e}"),
+        )
+    })
+}
+
+fn assert_compatible_drag_page(page: &Value, date: NaiveDate) -> Result<(), CompanionError> {
+    let schema = page
+        .get("schemaVersion")
+        .or_else(|| page.get("schema_version"))
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    if schema != 1 {
+        return Err(reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!("unsupported schemaVersion {schema}"),
+        ));
+    }
+    let selected = page
+        .get("selectedDate")
+        .or_else(|| page.get("date"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "missing selected date",
+            )
+        })?;
+    if selected != date.to_string() {
+        return Err(reconcile_error(
+            ReconcileErrorKind::IncompleteRead,
+            "continuation/date mismatch",
+        ));
+    }
+    if page.get("partial").and_then(Value::as_bool) == Some(true) {
+        return Err(reconcile_error(
+            ReconcileErrorKind::IncompleteRead,
+            "partial output",
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_worklog(item: &Value) -> Result<NormalizedWorklog, CompanionError> {
+    let id = str_field(item, &["tempoWorklogId", "id"])?;
+    let issue_key = str_field(item, &["issueKey", "issue"])?;
+    let start = normalize_timestamp(&str_field(item, &["start", "started", "intervalStart"])?)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "invalid worklog start",
+            )
+        })?;
+    let end = normalize_timestamp(&str_field(item, &["end", "intervalEnd"])?).ok_or_else(|| {
+        reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            "invalid worklog end",
+        )
+    })?;
+    let description = item
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+    let attributes = item
+        .get("attributes")
+        .and_then(Value::as_object)
+        .map(|attrs| {
+            attrs
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.trim().to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(NormalizedWorklog {
+        tempo_worklog_id: id,
+        issue_key,
+        start,
+        end,
+        description,
+        attributes,
+    })
+}
+
+fn normalize_payload_worklog(
+    payload: &Value,
+    id: &str,
+) -> Result<NormalizedWorklog, CompanionError> {
+    Ok(NormalizedWorklog {
+        tempo_worklog_id: id.to_owned(),
+        issue_key: str_field(payload, &["issueKey"])?,
+        start: normalize_timestamp(&str_field(payload, &["start", "intervalStart"])?).ok_or_else(
+            || {
+                reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    "invalid payload start",
+                )
+            },
+        )?,
+        end: normalize_timestamp(&str_field(payload, &["end", "intervalEnd"])?).ok_or_else(
+            || {
+                reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    "invalid payload end",
+                )
+            },
+        )?,
+        description: payload
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_owned(),
+        attributes: payload
+            .get("attributes")
+            .and_then(Value::as_object)
+            .map(|attrs| {
+                attrs
+                    .iter()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.trim().to_owned())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn proposal_payloads(
+    data_dir: &Path,
+    date: NaiveDate,
+    only: Option<&str>,
+) -> Result<Vec<(String, Value)>, CompanionError> {
+    let conn = Connection::open(store_path(data_dir))?;
+    let mut stmt = conn.prepare("SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1 ORDER BY p.id")?;
+    let ids = stmt.query_map([date.to_string()], |row| row.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for id in ids {
+        let id = id?;
+        if only.is_some_and(|wanted| wanted != id) {
+            continue;
+        }
+        let issue = resolve_drag_required_text(&conn, &id, "issueKey")?;
+        let start = resolve_drag_required_text(&conn, &id, "start")?;
+        let end = resolve_drag_required_text(&conn, &id, "end")?;
+        let description = resolve_drag_required_text(&conn, &id, "description")?;
+        let attributes: Value =
+            serde_json::from_str(&resolve_drag_required_text(&conn, &id, "attributes")?)
+                .unwrap_or_else(|_| serde_json::json!({}));
+        out.push((id, serde_json::json!({"issueKey": issue, "start": start, "end": end, "description": description, "attributes": attributes})));
+    }
+    Ok(out)
+}
+
+fn resolve_drag_required_text(
+    conn: &Connection,
+    proposal: &str,
+    name: &str,
+) -> Result<String, CompanionError> {
+    let mut stmt = conn.prepare(
+        "SELECT value FROM proposal_drag_resolutions WHERE proposal_id = ?1 AND name = ?2",
+    )?;
+    stmt.query_row(params![proposal, name], |row| row.get::<_, String>(0))
+        .optional()?
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::IncompleteRead,
+                format!("missing Drag-resolved {name} for {proposal}"),
+            )
+        })
+}
+
+fn str_field(item: &Value, names: &[&str]) -> Result<String, CompanionError> {
+    names
+        .iter()
+        .find_map(|name| item.get(*name).and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                format!("missing {}", names[0]),
+            )
+        })
+}
+
+fn same_worklog(a: &NormalizedWorklog, b: &NormalizedWorklog) -> bool {
+    a.issue_key == b.issue_key
+        && a.start == b.start
+        && a.end == b.end
+        && a.description == b.description
+        && a.attributes == b.attributes
+}
+
+fn overlaps(a_start: &str, a_end: &str, b_start: &str, b_end: &str) -> Result<bool, String> {
+    periods_overlap(a_start, a_end, b_start, b_end)
+}
+
+fn reconcile_error(kind: ReconcileErrorKind, message: impl Into<String>) -> CompanionError {
+    CompanionError::DragReconcile {
+        kind,
+        message: message.into(),
+    }
+}
+
 fn sha256_json(bytes: &[u8]) -> Result<String, CompanionError> {
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }
@@ -2067,6 +2565,9 @@ fn contract() -> Contract {
                 vec!["read minimized bundle", "persist schema-valid proposals and safe provider metadata"],
                 vec![],
             ),
+            command("read", true, vec![], vec!["drag list through public CLI"]),
+            command("audit", true, vec![], vec!["drag list through public CLI", "local duplicate and overlap comparison"]),
+            command("preview", true, vec![], vec!["drag log --json - --dry-run through public CLI"]),
             command(
                 "purge",
                 false,

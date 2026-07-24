@@ -1294,3 +1294,238 @@ fn propose_bounds_retries_timeouts_and_truncated_responses(
         .stderr(predicate::str::contains("truncated_or_oversized_response"));
     Ok(())
 }
+
+fn fake_drag(
+    dir: &tempfile::TempDir,
+    pages: Vec<Value>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let bin = dir.path().join("fake-drag");
+    let page0 = serde_json::to_string(pages.first().unwrap_or(&serde_json::json!({})))?;
+    let page1 = serde_json::to_string(pages.get(1).unwrap_or(&serde_json::json!({})))?;
+    std::fs::write(
+        &bin,
+        format!(
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+log="{}/commands.log"
+echo "$*" >> "$log"
+if [[ "$*" == *" log "* ]]; then
+  cat > "{}/stdin.json"
+  if [[ "$*" != *"--dry-run"* ]]; then echo live mutation >&2; exit 9; fi
+  printf '{{"status":"validated","dryRun":true}}'
+  exit 0
+fi
+if [[ "$*" == *"--continue token-2"* ]]; then
+  cat <<'JSON'
+{}
+JSON
+else
+  cat <<'JSON'
+{}
+JSON
+fi
+"#,
+            dir.path().display(),
+            dir.path().display(),
+            page1,
+            page0
+        ),
+    )?;
+    std::process::Command::new("chmod")
+        .args(["+x", bin.to_str().ok_or("bin")?])
+        .status()?;
+    Ok(bin)
+}
+
+#[test]
+fn drag_read_follows_continuations_preserving_date_and_never_mutates(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let drag = fake_drag(
+        &dir,
+        vec![
+            serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","total":2,"continuation":"token-2","worklogs":[{"id":"1","issueKey":"DRAG-1","start":"2026-03-08T10:00:00-05:00","end":"2026-03-08T11:00:00-05:00","description":" one ","attributes":{"_Account_":" RD "}}]}),
+            serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","total":2,"worklogs":[{"id":"2","issueKey":"DRAG-2","start":"2026-03-08T12:00:00Z","end":"2026-03-08T13:00:00Z","description":"two","attributes":{}}]}),
+        ],
+    )?;
+    let output = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "read",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output)?;
+    assert_eq!(json["worklogs"].as_array().ok_or("worklogs")?.len(), 2);
+    assert_eq!(json["worklogs"][0]["start"], "2026-03-08T15:00:00Z");
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert!(commands.contains("list --date 2026-03-08"));
+    assert!(commands.contains("--continue token-2"));
+    assert!(!commands.contains(" log "));
+    Ok(())
+}
+
+#[test]
+fn drag_preview_sends_exact_structured_dry_run_payload_without_live_mutation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    companion()?
+        .args(["--data-dir", &data_dir, "import"])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
+    conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-1','2026-03-08','proposed')", [])?;
+    conn.execute(
+        "INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-1','bundle-1','proposed')",
+        [],
+    )?;
+    for (name, value) in [
+        ("issueKey", "DRAG-151"),
+        ("start", "2026-03-08T10:00:00Z"),
+        ("end", "2026-03-08T11:00:00Z"),
+        ("description", "Implement issue 151"),
+        ("attributes", r#"{"_Account_":"RD"}"#),
+    ] {
+        conn.execute("INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES ('proposal-1', ?1, ?2)", rusqlite::params![name, value])?;
+    }
+    let drag = fake_drag(
+        &dir,
+        vec![serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":[]})],
+    )?;
+    let output = companion()?
+        .args([
+            "--data-dir",
+            &data_dir,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "preview",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output)?;
+    assert_eq!(json["classification"], "local-normalization");
+    assert_eq!(json["payload"]["issueKey"], "DRAG-151");
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert!(commands.contains("log --json - --dry-run"));
+    let stdin: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("stdin.json"))?)?;
+    assert_eq!(stdin, json["payload"]);
+    Ok(())
+}
+
+#[test]
+fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (page, error) in [
+        (
+            serde_json::json!({"schemaVersion":2,"selectedDate":"2026-03-08","worklogs":[]}),
+            "schema_incompatibility",
+        ),
+        (
+            serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-09","worklogs":[]}),
+            "incomplete_read",
+        ),
+        (
+            serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","partial":true,"worklogs":[]}),
+            "incomplete_read",
+        ),
+    ] {
+        let dir = tempdir()?;
+        let drag = fake_drag(&dir, vec![page])?;
+        companion()?
+            .args([
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "read",
+                "--date",
+                "2026-03-08",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(error));
+    }
+    let dir = tempdir()?;
+    let drag = dir.path().join("bad-drag");
+    std::fs::write(&drag, "#!/usr/bin/env bash\necho timeout >&2\nexit 1\n")?;
+    std::process::Command::new("chmod")
+        .args(["+x", drag.to_str().ok_or("drag")?])
+        .status()?;
+    companion()?
+        .args([
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "read",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("transport_ambiguity"));
+    Ok(())
+}
+
+#[test]
+fn drag_audit_normalizes_existing_worklogs_and_never_live_mutates(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    companion()?
+        .args(["--data-dir", &data_dir, "import"])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
+    conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-audit','2026-03-08','proposed')", [])?;
+    conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-audit','bundle-audit','proposed')", [])?;
+    for (name, value) in [
+        ("issueKey", "DRAG-151"),
+        ("start", "2026-03-08T15:00:00Z"),
+        ("end", "2026-03-08T16:00:00Z"),
+        ("description", "Audit duplicate"),
+        ("attributes", r#"{"_Account_":"RD"}"#),
+    ] {
+        conn.execute("INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES ('proposal-audit', ?1, ?2)", rusqlite::params![name, value])?;
+    }
+    let drag = fake_drag(
+        &dir,
+        vec![
+            serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":[{"id":"existing-1","issueKey":"DRAG-151","start":"2026-03-08T10:00:00-05:00","end":"2026-03-08T11:00:00-05:00","description":"Audit duplicate","attributes":{"_Account_":" RD "}}]}),
+        ],
+    )?;
+    let output = companion()?
+        .args([
+            "--data-dir",
+            &data_dir,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "audit",
+            "--date",
+            "2026-03-08",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output)?;
+    assert_eq!(json["duplicateProposalIds"][0], "proposal-audit");
+    assert_eq!(json["overlappingProposalIds"][0], "proposal-audit");
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert!(commands.contains("list --date 2026-03-08"));
+    assert!(!commands.contains(" log "));
+    Ok(())
+}
