@@ -1,6 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use clap::{Args, Parser, Subcommand};
@@ -40,7 +41,7 @@ enum Command {
     /// Show companion state and safety posture.
     Status,
     /// Collect fake adapter observations without network access.
-    Collect,
+    Collect(CollectArgs),
     /// Capture one explicit-date fake evidence event in the append-only journal.
     Capture(DateArgs),
     /// Import append-only journal events into the canonical SQLite store.
@@ -68,6 +69,13 @@ struct DateArgs {
     /// Explicit reconciliation date in YYYY-MM-DD format.
     #[arg(long, value_parser = parse_date)]
     date: NaiveDate,
+}
+
+#[derive(Debug, Args)]
+struct CollectArgs {
+    /// Local Git repository to scan. Repeat for each configured repository.
+    #[arg(long = "repo", value_name = "DIR")]
+    repos: Vec<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -199,6 +207,64 @@ struct RunResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CollectResult {
+    status: &'static str,
+    mode: &'static str,
+    adapter: &'static str,
+    network_access: bool,
+    git: GitCollectOutput,
+    failures: Vec<CollectFailure>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCollectOutput {
+    commits: Vec<GitCommitEvidence>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCommitEvidence {
+    commit: String,
+    author: GitIdentity,
+    committer: GitIdentity,
+    author_timestamp: String,
+    committer_timestamp: String,
+    repository: GitRepositoryIdentity,
+    branch: String,
+    ref_name: String,
+    subject: String,
+    issue_candidates: Vec<IssueCandidate>,
+}
+
+#[derive(Debug, Serialize)]
+struct GitIdentity {
+    name: String,
+    email: String,
+}
+
+#[derive(Debug, Serialize)]
+struct GitRepositoryIdentity {
+    path: String,
+    worktree: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IssueCandidate {
+    key: String,
+    origin: &'static str,
+    confidence: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct CollectFailure {
+    repository: String,
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct FakeObservation {
     source: &'static str,
     summary: &'static str,
@@ -325,9 +391,10 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             "status": "ready", "mode": DEFAULT_MODE, "networkAccess": false,
             "liveMutationAllowed": false, "journal": journal_path(&data_dir), "store": store_path(&data_dir),
         })),
-        Command::Collect => print_json(&serde_json::json!({
-            "status": "collected", "mode": DEFAULT_MODE, "adapter": COLLECTOR_ADAPTER, "networkAccess": false,
-        })),
+        Command::Collect(args) => {
+            let result = collect_git_activity(&data_dir, &args.repos)?;
+            print_json(&result)
+        }
         Command::Capture(args) => {
             let event = evidence_event(args.date);
             append_journal_event(&data_dir, &event)?;
@@ -459,6 +526,190 @@ fn remove_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
         }
     }
     write_settings(settings_path, &settings)
+}
+
+fn collect_git_activity(
+    data_dir: &Path,
+    repos: &[PathBuf],
+) -> Result<CollectResult, CompanionError> {
+    let mut commits = Vec::new();
+    let mut failures = Vec::new();
+
+    for repo in repos {
+        match scan_git_repo(repo) {
+            Ok(repo_commits) => {
+                for commit in repo_commits {
+                    append_journal_event(data_dir, &git_commit_event(&commit)?)?;
+                    commits.push(commit);
+                }
+            }
+            Err(error) => failures.push(CollectFailure {
+                repository: repo.display().to_string(),
+                error,
+            }),
+        }
+    }
+
+    Ok(CollectResult {
+        status: "collected",
+        mode: DEFAULT_MODE,
+        adapter: "git-local",
+        network_access: false,
+        git: GitCollectOutput { commits },
+        failures,
+    })
+}
+
+fn scan_git_repo(repo: &Path) -> Result<Vec<GitCommitEvidence>, String> {
+    if !repo.exists() {
+        return Err("repository path does not exist".to_owned());
+    }
+    let worktree = git_stdout(repo, ["rev-parse", "--show-toplevel"])?;
+    let branch = git_stdout(repo, ["branch", "--show-current"])
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "DETACHED".to_owned());
+    let ref_name = git_stdout(
+        repo,
+        ["rev-parse", "--symbolic-full-name", "--quiet", "HEAD"],
+    )
+    .ok()
+    .filter(|value| !value.is_empty())
+    .unwrap_or_else(|| "HEAD".to_owned());
+    let output = git_stdout(
+        repo,
+        [
+            "log",
+            "--all",
+            "--max-count=200",
+            "--date=iso-strict",
+            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%aI%x1f%cI%x1f%s%x1e",
+        ],
+    )?;
+    let mut commits = Vec::new();
+    for record in output
+        .split('\u{1e}')
+        .filter(|record| !record.trim().is_empty())
+    {
+        let fields: Vec<&str> = record.trim_matches('\n').split('\u{1f}').collect();
+        if fields.len() != 8 {
+            return Err("unexpected git log format".to_owned());
+        }
+        let subject = minimize_subject(fields[7]);
+        commits.push(GitCommitEvidence {
+            commit: fields[0].to_owned(),
+            author: GitIdentity {
+                name: fields[1].to_owned(),
+                email: fields[2].to_owned(),
+            },
+            committer: GitIdentity {
+                name: fields[3].to_owned(),
+                email: fields[4].to_owned(),
+            },
+            author_timestamp: fields[5].to_owned(),
+            committer_timestamp: fields[6].to_owned(),
+            repository: GitRepositoryIdentity {
+                path: repo.display().to_string(),
+                worktree: worktree.clone(),
+            },
+            branch: branch.clone(),
+            ref_name: ref_name.clone(),
+            issue_candidates: issue_candidates(&subject),
+            subject,
+        });
+    }
+    Ok(commits)
+}
+
+fn git_stdout<const N: usize>(repo: &Path, args: [&str; N]) -> Result<String, String> {
+    let output = ProcessCommand::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn minimize_subject(subject: &str) -> String {
+    const MAX: usize = 72;
+    let clean = subject.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.len() <= MAX {
+        clean
+    } else {
+        let mut minimized = String::new();
+        for ch in clean.chars() {
+            if minimized.len() + ch.len_utf8() + 3 > MAX {
+                break;
+            }
+            minimized.push(ch);
+        }
+        minimized.push('…');
+        minimized
+    }
+}
+
+fn issue_candidates(subject: &str) -> Vec<IssueCandidate> {
+    subject
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-')
+        .filter(|part| {
+            let Some((project, number)) = part.split_once('-') else {
+                return false;
+            };
+            project.len() >= 2
+                && project.chars().all(|ch| ch.is_ascii_uppercase())
+                && number.chars().all(|ch| ch.is_ascii_digit())
+        })
+        .map(|key| IssueCandidate {
+            key: key.to_owned(),
+            origin: "commit-subject",
+            confidence: "candidate",
+        })
+        .collect()
+}
+
+fn git_commit_event(commit: &GitCommitEvidence) -> Result<JournalEvent, CompanionError> {
+    let explicit_date = commit
+        .author_timestamp
+        .get(..10)
+        .and_then(|date| NaiveDate::parse_from_str(date, "%Y-%m-%d").ok())
+        .unwrap_or_else(|| Utc::now().date_naive());
+    let mut event = JournalEvent {
+        schema_version: JOURNAL_SCHEMA_VERSION,
+        event_id: format!("evidence.git.{}", commit.commit),
+        event_type: "git.commit".to_owned(),
+        observed_at: commit.author_timestamp.clone(),
+        source: SourceProvenance {
+            kind: "git".to_owned(),
+            adapter: "git-local".to_owned(),
+            reference: format!("{}@{}", commit.repository.worktree, commit.commit),
+        },
+        collector: CollectorProvenance {
+            name: "git-local".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+        timestamp_semantics: TimestampSemantics {
+            observed_at_source: "git-author-timestamp".to_owned(),
+            timezone: "from-git-offset".to_owned(),
+            explicit_date,
+        },
+        privacy: PrivacyState {
+            classification: "local-git-metadata".to_owned(),
+            redacted: false,
+        },
+        retention: RetentionMetadata {
+            policy: "retain-until-user-purge".to_owned(),
+            retain_until: None,
+        },
+        supersedes: None,
+        payload: serde_json::to_value(commit).map_err(CompanionError::Serialize)?,
+        integrity_hash: String::new(),
+    };
+    event.integrity_hash = event_hash(&event).map_err(CompanionError::Serialize)?;
+    Ok(event)
 }
 
 fn read_settings(path: &Path) -> Result<Value, CompanionError> {

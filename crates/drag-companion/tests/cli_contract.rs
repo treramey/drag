@@ -91,6 +91,198 @@ fn contract_is_machine_readable_and_capture_only_by_default(
 }
 
 #[test]
+fn collect_git_activity_emits_point_evidence_candidates_and_isolates_failures(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()?;
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Ada Lovelace"])
+        .current_dir(&repo)
+        .status()?;
+    std::process::Command::new("git")
+        .args(["config", "user.email", "ada@example.test"])
+        .current_dir(&repo)
+        .status()?;
+    std::fs::write(repo.join("note.txt"), "hello")?;
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&repo)
+        .status()?;
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "DRAG-148 collect git activity evidence with a very long subject that should be minimized"])
+        .env("GIT_AUTHOR_DATE", "2026-07-24T01:02:03+00:00")
+        .env("GIT_COMMITTER_DATE", "2026-07-24T01:03:04+00:00")
+        .current_dir(&repo)
+        .status()?;
+    let detached = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(&repo)
+        .output()?;
+    let head = String::from_utf8(detached.stdout)?.trim().to_owned();
+    std::process::Command::new("git")
+        .args(["checkout", "-q", "--detach", &head])
+        .current_dir(&repo)
+        .status()?;
+
+    let missing = dir.path().join("missing");
+    let data_dir = dir.path().join("state");
+    let output = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "collect",
+            "--repo",
+            repo.to_string_lossy().as_ref(),
+            "--repo",
+            missing.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let collected: Value = serde_json::from_slice(&output)?;
+    assert_eq!(collected["status"], "collected");
+    assert_eq!(collected["failures"].as_array().ok_or("failures")?.len(), 1);
+    let commit = &collected["git"]["commits"][0];
+    assert_eq!(
+        commit["repository"]["path"],
+        repo.to_string_lossy().as_ref()
+    );
+    assert_eq!(commit["branch"], "DETACHED");
+    assert_eq!(commit["author"]["name"], "Ada Lovelace");
+    assert_eq!(commit["author"]["email"], "ada@example.test");
+    assert_eq!(commit["authorTimestamp"], "2026-07-24T01:02:03Z");
+    assert_eq!(commit["committerTimestamp"], "2026-07-24T01:03:04Z");
+    assert!(commit["subject"].as_str().ok_or("subject")?.len() <= 72);
+    assert_eq!(commit["issueCandidates"][0]["key"], "DRAG-148");
+    assert_eq!(commit["issueCandidates"][0]["origin"], "commit-subject");
+    assert_eq!(commit["issueCandidates"][0]["confidence"], "candidate");
+    assert!(commit.get("verified").is_none());
+    assert!(commit.get("elapsedSeconds").is_none());
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "import"])
+        .assert()
+        .success();
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "collect",
+            "--repo",
+            repo.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "import"])
+        .assert()
+        .success();
+    let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
+    assert!(journal.contains("git.commit"));
+    assert!(journal.contains("DRAG-148"));
+    Ok(())
+}
+
+#[test]
+fn collect_git_activity_covers_shallow_rewritten_and_unusual_subject_fixtures(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let source = dir.path().join("source");
+    std::fs::create_dir(&source)?;
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&source)
+        .status()?;
+    std::process::Command::new("git")
+        .args(["config", "user.name", "Renée Tester"])
+        .current_dir(&source)
+        .status()?;
+    std::process::Command::new("git")
+        .args(["config", "user.email", "renee@example.test"])
+        .current_dir(&source)
+        .status()?;
+    std::fs::write(source.join("note.txt"), "one")?;
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&source)
+        .status()?;
+    std::process::Command::new("git")
+        .args(["commit", "-q", "-m", "DRAG-149 café first"])
+        .env("GIT_AUTHOR_DATE", "2026-07-23T01:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2026-07-23T01:00:01+00:00")
+        .current_dir(&source)
+        .status()?;
+    std::fs::write(source.join("note.txt"), "two")?;
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&source)
+        .status()?;
+    std::process::Command::new("git")
+        .args([
+            "commit",
+            "-q",
+            "--amend",
+            "-m",
+            "DRAG-150 rewritten café commit",
+        ])
+        .env("GIT_AUTHOR_DATE", "2026-07-23T02:00:00+00:00")
+        .env("GIT_COMMITTER_DATE", "2026-07-23T02:00:01+00:00")
+        .current_dir(&source)
+        .status()?;
+
+    let shallow = dir.path().join("shallow");
+    let source_url = format!("file://{}", source.display());
+    std::process::Command::new("git")
+        .args([
+            "clone",
+            "-q",
+            "--depth",
+            "1",
+            &source_url,
+            shallow.to_string_lossy().as_ref(),
+        ])
+        .status()?;
+
+    let data_dir = dir.path().join("state");
+    let output = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "collect",
+            "--repo",
+            shallow.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let collected: Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        collected["git"]["commits"]
+            .as_array()
+            .ok_or("commits")?
+            .len(),
+        1
+    );
+    let commit = &collected["git"]["commits"][0];
+    assert_eq!(commit["issueCandidates"][0]["key"], "DRAG-150");
+    assert!(commit["subject"]
+        .as_str()
+        .ok_or("subject")?
+        .contains("café"));
+    assert!(!commit["branch"].as_str().ok_or("branch")?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn fake_adapter_reconcile_explicit_date_persists_terminal_result_without_live_effects(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
