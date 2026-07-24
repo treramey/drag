@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.9.0
+
+### Minor Changes
+
+- 7aa0e70: Add the end-of-day `drag-companion` and `drag resolve` workflows with safe capture, evidence journaling, deterministic bundles, local Git/ICS/Claude collection, schema-constrained proposal fixtures, Drag CLI reconciliation, guarded policy/audit/preview flows, staged rollout-gated execution, durable run coordination, replay reports, scheduler lifecycle management, retention, purge, operator recovery reporting, and distribution of `drag-companion` alongside `drag` in release archives, npm, and Homebrew.
+
 ## 0.8.1
 
 ### Patch Changes
