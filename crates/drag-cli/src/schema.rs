@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 9;
+const SCHEMA_VERSION: u64 = 10;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -141,6 +141,7 @@ enum CommandIdentity {
     Setup,
     Doctor,
     Tempo,
+    Resolve,
     Schema,
     GenerateSkills,
     Help,
@@ -154,6 +155,7 @@ impl CommandIdentity {
             "delete" => Some(Self::Delete),
             "setup" => Some(Self::Setup),
             "doctor" => Some(Self::Doctor),
+            "resolve" => Some(Self::Resolve),
             "tempo" => Some(Self::Tempo),
             "schema" => Some(Self::Schema),
             "generate-skills" => Some(Self::GenerateSkills),
@@ -453,6 +455,10 @@ fn command_skill_policy(identity: CommandIdentity) -> Option<CommandSkillPolicy>
             heading: "Destructive-operation policy",
             guidance: "`delete` permanently removes Tempo worklogs and a multi-ID deletion is not atomic. First run the exact IDs with `--dry-run`. Execute without `--dry-run` only when the user explicitly authorizes deleting those IDs. Never infer IDs from position or stale output.",
         }),
+        CommandIdentity::Resolve => Some(CommandSkillPolicy {
+            heading: "Read-only resolution policy",
+            guidance: "`resolve` verifies a proposed Jira issue key and discovers required Tempo work attributes through Drag's authenticated adapters. It is read-only, returns stable JSON, and must be used by automation before constructing companion payloads that would otherwise rely on seeded resolution rows.",
+        }),
         CommandIdentity::Setup
         | CommandIdentity::Doctor
         | CommandIdentity::Tempo
@@ -571,6 +577,32 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             error_codes: [remote_errors, vec!["remote_check_failed"]].concat(),
             side_effects: json!({"default": []}),
             network_access: json!({"default": {}, "remote": {"jira": "read", "tempo": "read"}}),
+            dry_run: unsupported_dry_run(),
+        },
+        CommandIdentity::Resolve => CommandSemantics {
+            success: object_schema(
+                &[
+                    "schemaVersion",
+                    "readOnly",
+                    "liveMutationAllowed",
+                    "issue",
+                    "tempo",
+                ],
+                json!({
+                    "schemaVersion": {"const": 1},
+                    "readOnly": {"const": true},
+                    "liveMutationAllowed": {"const": false},
+                    "issue": object_schema(&["key", "id"], json!({"key": {"type": "string"}, "id": {"type": "string"}})),
+                    "tempo": object_schema(&["requiredWorkAttributes", "requiredWorkAttributeKeys", "requiredWorkAttributesByKey"], json!({
+                        "requiredWorkAttributes": {"type": "array", "items": object_schema(&["key", "name", "required"], json!({"key": {"type": "string"}, "name": {"type": "string"}, "required": {"type": "boolean"}}))},
+                        "requiredWorkAttributeKeys": {"type": "array", "items": {"type": "string"}},
+                        "requiredWorkAttributesByKey": {"type": "object"}
+                    }))
+                }),
+            ),
+            error_codes: remote_errors,
+            side_effects: json!({"default": []}),
+            network_access: json!({"default": {"jira": "read", "tempo": "read"}}),
             dry_run: unsupported_dry_run(),
         },
         CommandIdentity::Tempo => CommandSemantics {
@@ -787,6 +819,13 @@ fn command_behavior_contract(identity: CommandIdentity) -> Value {
         CommandIdentity::Doctor => json!({
             "remote": "opt-in read-only Jira and Tempo checks",
             "remoteStatuses": ["connected", "notConfigured", "failed"]
+        }),
+        CommandIdentity::Resolve => json!({
+            "boundary": "readOnlyJiraTempoResolution",
+            "inputs": ["issueKey"],
+            "outputs": ["jiraIssueId", "requiredTempoWorkAttributes"],
+            "mutation": false,
+            "automaticMutationRetries": false
         }),
         CommandIdentity::Schema => json!({
             "withoutPath": "returns the complete local Drag contract",
@@ -1163,6 +1202,7 @@ fn command_failure_details(identity: CommandIdentity) -> Value {
         | CommandIdentity::List
         | CommandIdentity::Delete
         | CommandIdentity::Setup
+        | CommandIdentity::Resolve
         | CommandIdentity::Tempo
         | CommandIdentity::Schema
         | CommandIdentity::GenerateSkills

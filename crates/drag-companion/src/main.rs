@@ -35,7 +35,8 @@ const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
 const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
 const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
 const SCHEDULER_SCHEMA_VERSION: u32 = 2;
-const DRAG_MACHINE_CONTRACT_VERSION: u32 = 9;
+const DRAG_MACHINE_CONTRACT_VERSION: u32 = 10;
+const TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES";
 const DEFAULT_SCHEDULE_TIME: &str = "18:45";
 const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
 
@@ -97,6 +98,8 @@ enum Command {
     ProcessSpy(DateArgs),
     /// Remove persisted capture-only companion state while protecting recovery records by default.
     Purge(PurgeArgs),
+    /// Enforce age-based privacy retention safely and report compacted classes.
+    Retention(RetentionArgs),
     /// Install, inspect, remove, catch up, or run scheduler-safe explicit-date reconciliation.
     Scheduler(SchedulerArgs),
     /// Install, remove, or capture Claude Code SessionStart/SessionEnd hooks.
@@ -242,6 +245,18 @@ struct PurgeArgs {
     /// Also delete idempotency records, acknowledging automated recovery guarantees are lost.
     #[arg(long)]
     acknowledge_lost_recovery: bool,
+}
+
+#[derive(Debug, Args)]
+struct RetentionArgs {
+    #[command(subcommand)]
+    operation: RetentionOperation,
+}
+
+#[derive(Debug, Subcommand)]
+enum RetentionOperation {
+    /// Apply configured raw, normalized, and report/ledger retention windows now.
+    Enforce,
 }
 
 #[derive(Debug, Args)]
@@ -755,6 +770,11 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
         Command::Purge(args) => {
             print_json(&purge_state(&data_dir, args.acknowledge_lost_recovery)?)
         }
+        Command::Retention(args) => match args.operation {
+            RetentionOperation::Enforce => {
+                print_json(&enforce_retention(&data_dir, RetentionTrigger::Operator)?)
+            }
+        },
         Command::Scheduler(args) => handle_scheduler(&data_dir, &drag_bin, args),
         Command::ClaudeHook(args) => match args.operation {
             ClaudeHookOperation::Install(args) => {
@@ -3312,6 +3332,7 @@ fn audit_drag_day(
     date: NaiveDate,
     authorize_unattended: bool,
 ) -> Result<AuditResult, CompanionError> {
+    ensure_proposal_drag_resolutions(data_dir, drag_bin, date)?;
     let read = read_drag_day(drag_bin, date)?;
     let proposals = proposal_payloads(data_dir, date, None)?;
     let policy_inputs = proposal_policy_inputs(data_dir, date)?;
@@ -3397,6 +3418,192 @@ fn persist_policy_decisions(
     }
     tx.commit()?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ProposalResolutionSource {
+    id: String,
+    issue_key: String,
+    start: String,
+    end: String,
+    description_facts: Vec<String>,
+}
+
+fn ensure_proposal_drag_resolutions(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+) -> Result<(), CompanionError> {
+    verify_drag_contract(drag_bin)?;
+    let mut conn = Connection::open(store_path(data_dir))?;
+    let proposals = proposal_resolution_sources(&conn, date)?;
+    if proposals.is_empty() {
+        return Ok(());
+    }
+    let configured_attributes = configured_tempo_work_attributes()?;
+    let tx = conn.transaction()?;
+    for proposal in proposals {
+        if proposal_drag_resolution_complete(&tx, &proposal.id)? {
+            continue;
+        }
+        let resolution = drag_json(
+            drag_bin,
+            &[
+                "--output".to_owned(),
+                "json".to_owned(),
+                "resolve".to_owned(),
+                "--issue-key".to_owned(),
+                proposal.issue_key.clone(),
+            ],
+            None,
+            true,
+        )?;
+        let resolved_issue = str_field(
+            resolution.get("issue").ok_or_else(|| {
+                reconcile_error(
+                    ReconcileErrorKind::SchemaIncompatibility,
+                    "Drag resolve omitted issue",
+                )
+            })?,
+            &["key"],
+        )?;
+        let attributes = resolved_required_attribute_values(&resolution, &configured_attributes)?;
+        let description = if proposal.description_facts.is_empty() {
+            "Companion proposed worklog".to_owned()
+        } else {
+            proposal.description_facts.join("; ")
+        };
+        for (name, value) in [
+            ("issueKey", resolved_issue),
+            ("start", proposal.start),
+            ("end", proposal.end),
+            ("description", description),
+            (
+                "attributes",
+                serde_json::to_string(&attributes).map_err(CompanionError::Serialize)?,
+            ),
+        ] {
+            tx.execute(
+                "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3) ON CONFLICT(proposal_id, name) DO UPDATE SET value = excluded.value",
+                params![proposal.id, name, value],
+            )?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn proposal_resolution_sources(
+    conn: &Connection,
+    date: NaiveDate,
+) -> Result<Vec<ProposalResolutionSource>, CompanionError> {
+    let mut stmt = conn.prepare(
+        "SELECT p.id, f.issue_key, f.supported_start, f.supported_end, f.description_facts_json FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id JOIN proposal_policy_fields f ON f.proposal_id = p.id WHERE b.explicit_date = ?1 ORDER BY p.id",
+    )?;
+    let rows = stmt.query_map([date.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut proposals = Vec::new();
+    for row in rows {
+        let (id, issue_key, start, end, description_facts_json) = row?;
+        proposals.push(ProposalResolutionSource {
+            id,
+            issue_key,
+            start,
+            end,
+            description_facts: serde_json::from_str(&description_facts_json)
+                .map_err(CompanionError::Serialize)?,
+        });
+    }
+    Ok(proposals)
+}
+
+fn proposal_drag_resolution_complete(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<bool, CompanionError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM proposal_drag_resolutions WHERE proposal_id = ?1 AND name IN ('issueKey','start','end','description','attributes') AND TRIM(value) != ''",
+        [proposal_id],
+        |row| row.get(0),
+    )?;
+    Ok(count == 5)
+}
+
+fn configured_tempo_work_attributes(
+) -> Result<std::collections::BTreeMap<String, String>, CompanionError> {
+    let Some(raw) = std::env::var_os(TEMPO_WORK_ATTRIBUTES_ENV) else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let raw = raw.into_string().map_err(|_| {
+        reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!("{TEMPO_WORK_ATTRIBUTES_ENV} must be valid UTF-8 JSON"),
+        )
+    })?;
+    let value: Value = serde_json::from_str(&raw).map_err(|error| {
+        reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!("{TEMPO_WORK_ATTRIBUTES_ENV} must be a JSON object: {error}"),
+        )
+    })?;
+    let object = value.as_object().ok_or_else(|| {
+        reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!("{TEMPO_WORK_ATTRIBUTES_ENV} must be a JSON object"),
+        )
+    })?;
+    object
+        .iter()
+        .map(|(key, value)| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (key.clone(), value.trim().to_owned()))
+                .ok_or_else(|| {
+                    reconcile_error(
+                        ReconcileErrorKind::SchemaIncompatibility,
+                        format!("{TEMPO_WORK_ATTRIBUTES_ENV}.{key} must be a non-empty string"),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn resolved_required_attribute_values(
+    resolution: &Value,
+    configured_attributes: &std::collections::BTreeMap<String, String>,
+) -> Result<std::collections::BTreeMap<String, String>, CompanionError> {
+    let required = resolution
+        .get("tempo")
+        .and_then(|tempo| tempo.get("requiredWorkAttributes"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            reconcile_error(
+                ReconcileErrorKind::SchemaIncompatibility,
+                "Drag resolve omitted required Tempo work attributes",
+            )
+        })?;
+    let mut attributes = std::collections::BTreeMap::new();
+    for attribute in required {
+        let key = str_field(attribute, &["key"])?;
+        let Some(value) = configured_attributes.get(&key) else {
+            return Err(reconcile_error(
+                ReconcileErrorKind::IncompleteRead,
+                format!(
+                    "missing required Tempo work attribute {key}; set {TEMPO_WORK_ATTRIBUTES_ENV}"
+                ),
+            ));
+        };
+        attributes.insert(key, value.clone());
+    }
+    Ok(attributes)
 }
 
 fn evaluate_policy_decisions(
@@ -3539,7 +3746,7 @@ fn preview_drag_payload(
     date: NaiveDate,
     proposal_id: Option<&str>,
 ) -> Result<PreviewResult, CompanionError> {
-    verify_drag_contract(drag_bin)?;
+    ensure_proposal_drag_resolutions(data_dir, drag_bin, date)?;
     let payloads = proposal_payloads(data_dir, date, proposal_id)?;
     let (_, payload) = payloads.into_iter().next().ok_or_else(|| {
         reconcile_error(
@@ -4316,6 +4523,9 @@ fn coordinated_run(
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
+    drop(conn);
+    let _retention = enforce_retention(data_dir, RetentionTrigger::Lifecycle)?;
+    let conn = Connection::open(store_path(data_dir))?;
     if resume && date_has_mutation_operations(&conn, date)? {
         reconcile_complete_day_and_ledger(&conn, drag_bin, date)?;
     }
@@ -5280,6 +5490,442 @@ fn load_phase_records(
         .map_err(CompanionError::Store)
 }
 
+#[derive(Clone, Copy)]
+enum RetentionTrigger {
+    Lifecycle,
+    Operator,
+}
+
+impl RetentionTrigger {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Lifecycle => "lifecycle",
+            Self::Operator => "operator",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RetentionConfig {
+    raw_days: u32,
+    normalized_days: u32,
+    report_ledger_days: u32,
+}
+
+fn retention_config_values() -> RetentionConfig {
+    RetentionConfig {
+        raw_days: retention_days(
+            "DRAG_COMPANION_RETENTION_RAW_DAYS",
+            RAW_EVIDENCE_RETENTION_DAYS,
+        ),
+        normalized_days: retention_days(
+            "DRAG_COMPANION_RETENTION_NORMALIZED_DAYS",
+            NORMALIZED_EVIDENCE_RETENTION_DAYS,
+        ),
+        report_ledger_days: retention_days(
+            "DRAG_COMPANION_RETENTION_REPORT_LEDGER_DAYS",
+            REPORT_LEDGER_RETENTION_DAYS,
+        ),
+    }
+}
+
+fn enforce_retention(data_dir: &Path, trigger: RetentionTrigger) -> Result<Value, CompanionError> {
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
+    let config = retention_config_values();
+    let now = retention_now()?;
+    let raw_cutoff = (now - Duration::days(i64::from(config.raw_days))).date_naive();
+    let normalized_cutoff = (now - Duration::days(i64::from(config.normalized_days))).date_naive();
+    let report_cutoff = (now - Duration::days(i64::from(config.report_ledger_days))).date_naive();
+    let journal = compact_journal(data_dir, raw_cutoff)?;
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    let store = compact_store(&mut conn, raw_cutoff, normalized_cutoff, report_cutoff)?;
+    let runs = compact_run_files(data_dir, report_cutoff)?;
+    Ok(serde_json::json!({
+        "status": "retention-enforced",
+        "trigger": trigger.as_str(),
+        "now": now.to_rfc3339_opts(SecondsFormat::Secs, true),
+        "retention": {
+            "rawEvidenceDays": config.raw_days,
+            "normalizedEvidenceDays": config.normalized_days,
+            "reportsAndLedgerDays": config.report_ledger_days
+        },
+        "classes": {
+            "raw": {"expired": journal.expired + store.raw_redacted, "journalRemoved": journal.expired, "storeRedacted": store.raw_redacted, "protected": journal.protected},
+            "normalized": {"expired": store.normalized_deleted, "protected": store.normalized_protected},
+            "reportsAndLedger": {"expired": store.report_ledger_deleted + runs.deleted, "protected": store.report_ledger_protected, "runFilesDeleted": runs.deleted}
+        },
+        "journal": {"path": journal_path(data_dir), "retained": journal.retained, "removed": journal.expired, "recoveredTempFiles": journal.recovered_temp_files, "crashSafe": "atomic-tempfile-rename"},
+        "store": {"path": store_path(data_dir), "crashSafe": "sqlite-transaction"},
+        "privacy": {"rawPayloadsRedacted": store.raw_redacted, "operatorOutputContainsRawPayloads": false},
+        "liveMutationAllowed": false,
+        "nextSafeAction": "review protected counts; uncertain or submitting records remain available for recovery"
+    }))
+}
+
+struct JournalCompaction {
+    retained: u64,
+    expired: u64,
+    protected: u64,
+    recovered_temp_files: u64,
+}
+
+fn compact_journal(
+    data_dir: &Path,
+    raw_cutoff: NaiveDate,
+) -> Result<JournalCompaction, CompanionError> {
+    let recovered_temp_files = cleanup_stale_journal_temps(data_dir)?;
+    let path = journal_path(data_dir);
+    if !path.exists() {
+        return Ok(JournalCompaction {
+            retained: 0,
+            expired: 0,
+            protected: 0,
+            recovered_temp_files,
+        });
+    }
+    let file = File::open(&path).map_err(|source| CompanionError::Open {
+        path: path.clone(),
+        source,
+    })?;
+    let mut retained_lines = Vec::new();
+    let mut retained = 0;
+    let mut expired = 0;
+    let protected = 0;
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|source| CompanionError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event_date = serde_json::from_str::<JournalEvent>(&line)
+            .ok()
+            .map(|event| event.timestamp_semantics.explicit_date);
+        if event_date.is_some_and(|date| date < raw_cutoff) {
+            expired += 1;
+        } else {
+            retained += 1;
+            retained_lines.push(line);
+        }
+    }
+    if expired > 0 {
+        let mut body = retained_lines.join("\n").into_bytes();
+        if !body.is_empty() {
+            body.push(b'\n');
+        }
+        atomic_write(&path, &body)?;
+    }
+    Ok(JournalCompaction {
+        retained,
+        expired,
+        protected,
+        recovered_temp_files,
+    })
+}
+
+fn cleanup_stale_journal_temps(data_dir: &Path) -> Result<u64, CompanionError> {
+    if !data_dir.exists() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for entry in fs::read_dir(data_dir).map_err(|source| CompanionError::Read {
+        path: data_dir.to_path_buf(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CompanionError::Read {
+            path: data_dir.to_path_buf(),
+            source,
+        })?;
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("journal.jsonl.tmp-") && path.is_file() {
+            fs::remove_file(&path).map_err(|source| CompanionError::Write {
+                path: path.clone(),
+                source,
+            })?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
+}
+
+struct StoreCompaction {
+    raw_redacted: u64,
+    normalized_deleted: u64,
+    normalized_protected: u64,
+    report_ledger_deleted: u64,
+    report_ledger_protected: u64,
+}
+
+fn compact_store(
+    conn: &mut Connection,
+    raw_cutoff: NaiveDate,
+    normalized_cutoff: NaiveDate,
+    report_cutoff: NaiveDate,
+) -> Result<StoreCompaction, CompanionError> {
+    let protected_dates = protected_retention_dates(conn)?;
+    let tx = conn.transaction()?;
+    let raw_redacted = tx.execute(
+        "UPDATE evidence_events SET payload_json = ?1, privacy_redacted = 1 WHERE explicit_date < ?2 AND privacy_redacted = 0",
+        params![serde_json::json!({"retention":"redacted","class":"rawEvidence"}).to_string(), raw_cutoff.to_string()],
+    )? as u64;
+
+    let mut normalized_deleted = 0;
+    let mut normalized_protected = 0;
+    for date in dates_before(&tx, "daily_bundles", "explicit_date", normalized_cutoff)? {
+        if protected_dates.contains(&date) {
+            normalized_protected += count_date_rows(&tx, "daily_bundles", "explicit_date", date)?;
+            continue;
+        }
+        normalized_deleted += delete_normalized_date(&tx, date)?;
+    }
+    for date in dates_before(&tx, "evidence_events", "explicit_date", normalized_cutoff)? {
+        if protected_dates.contains(&date) {
+            normalized_protected += count_date_rows(&tx, "evidence_events", "explicit_date", date)?;
+            continue;
+        }
+        normalized_deleted += tx.execute(
+            "DELETE FROM issue_candidates WHERE evidence_event_id IN (SELECT event_id FROM evidence_events WHERE explicit_date = ?1)",
+            [date.to_string()],
+        )? as u64;
+        normalized_deleted += tx.execute(
+            "UPDATE evidence_events SET supersedes = NULL WHERE supersedes IN (SELECT event_id FROM evidence_events WHERE explicit_date = ?1)",
+            [date.to_string()],
+        )? as u64;
+        normalized_deleted += tx.execute(
+            "DELETE FROM evidence_events WHERE explicit_date = ?1",
+            [date.to_string()],
+        )? as u64;
+    }
+
+    let mut report_ledger_deleted = 0;
+    let report_ledger_protected = protected_ledger_count(&tx, report_cutoff)?;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM mutation_attempts WHERE operation_id IN (SELECT id FROM mutation_operations WHERE local_date < ?1 AND state IN ('confirmed','rejected','skipped','failed'))",
+        [report_cutoff.to_string()],
+    )? as u64;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM mutation_operations WHERE local_date < ?1 AND state IN ('confirmed','rejected','skipped','failed')",
+        [report_cutoff.to_string()],
+    )? as u64;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM reports WHERE run_id IN (SELECT id FROM runs WHERE explicit_date < ?1 AND state IN ('confirmed','rejected','skipped','failed'))",
+        [report_cutoff.to_string()],
+    )? as u64;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM leases WHERE run_id IN (SELECT id FROM runs WHERE explicit_date < ?1 AND state IN ('confirmed','rejected','skipped','failed'))",
+        [report_cutoff.to_string()],
+    )? as u64;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM runs WHERE explicit_date < ?1 AND state IN ('confirmed','rejected','skipped','failed')",
+        [report_cutoff.to_string()],
+    )? as u64;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM run_phases WHERE local_date < ?1 AND state IN ('completed','failed')",
+        [report_cutoff.to_string()],
+    )? as u64;
+    report_ledger_deleted += tx.execute(
+        "DELETE FROM coordinated_runs WHERE local_date < ?1 AND state IN ('completed','partial','blocked','failed')",
+        [report_cutoff.to_string()],
+    )? as u64;
+    tx.commit()?;
+    Ok(StoreCompaction {
+        raw_redacted,
+        normalized_deleted,
+        normalized_protected,
+        report_ledger_deleted,
+        report_ledger_protected,
+    })
+}
+
+fn protected_retention_dates(
+    conn: &Connection,
+) -> Result<std::collections::BTreeSet<NaiveDate>, CompanionError> {
+    let mut dates = std::collections::BTreeSet::new();
+    collect_protected_dates(
+        conn,
+        &mut dates,
+        "SELECT explicit_date FROM daily_bundles WHERE state IN ('proposed','approved','submitting','uncertain')",
+    )?;
+    collect_protected_dates(
+        conn,
+        &mut dates,
+        "SELECT b.explicit_date FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE p.state IN ('proposed','approved','submitting','uncertain')",
+    )?;
+    collect_protected_dates(
+        conn,
+        &mut dates,
+        "SELECT local_date FROM mutation_operations WHERE state IN ('proposed','approved','submitting','uncertain') AND local_date IS NOT NULL",
+    )?;
+    collect_protected_dates(
+        conn,
+        &mut dates,
+        "SELECT local_date FROM coordinated_runs WHERE state NOT IN ('completed','partial','blocked','failed')",
+    )?;
+    collect_protected_dates(
+        conn,
+        &mut dates,
+        "SELECT local_date FROM run_phases WHERE state NOT IN ('completed','failed')",
+    )?;
+    Ok(dates)
+}
+
+fn collect_protected_dates(
+    conn: &Connection,
+    dates: &mut std::collections::BTreeSet<NaiveDate>,
+    sql: &str,
+) -> Result<(), CompanionError> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        if let Ok(date) = NaiveDate::parse_from_str(&row?, "%Y-%m-%d") {
+            dates.insert(date);
+        }
+    }
+    Ok(())
+}
+
+fn dates_before(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    cutoff: NaiveDate,
+) -> Result<Vec<NaiveDate>, CompanionError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT DISTINCT {column} FROM {table} WHERE {column} < ?1 ORDER BY {column}"
+    ))?;
+    let rows = stmt.query_map([cutoff.to_string()], |row| row.get::<_, String>(0))?;
+    let mut dates = Vec::new();
+    for row in rows {
+        if let Ok(date) = NaiveDate::parse_from_str(&row?, "%Y-%m-%d") {
+            dates.push(date);
+        }
+    }
+    Ok(dates)
+}
+
+fn count_date_rows(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    date: NaiveDate,
+) -> Result<u64, CompanionError> {
+    let count: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE {column} = ?1"),
+        [date.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as u64)
+}
+
+fn delete_normalized_date(conn: &Connection, date: NaiveDate) -> Result<u64, CompanionError> {
+    let date = date.to_string();
+    let mut deleted = 0;
+    deleted += conn.execute(
+        "DELETE FROM policy_decisions WHERE proposal_id IN (SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1)",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "DELETE FROM proposal_drag_resolutions WHERE proposal_id IN (SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1)",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "DELETE FROM proposal_policy_fields WHERE proposal_id IN (SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1)",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "UPDATE mutation_operations SET proposal_id = NULL WHERE proposal_id IN (SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1)",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "DELETE FROM proposals WHERE bundle_id IN (SELECT id FROM daily_bundles WHERE explicit_date = ?1)",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "DELETE FROM daily_bundles WHERE explicit_date = ?1",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "DELETE FROM unsupported_periods WHERE explicit_date = ?1",
+        [&date],
+    )? as u64;
+    deleted += conn.execute(
+        "DELETE FROM provider_requests WHERE explicit_date = ?1",
+        [&date],
+    )? as u64;
+    Ok(deleted)
+}
+
+fn protected_ledger_count(conn: &Connection, cutoff: NaiveDate) -> Result<u64, CompanionError> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date < ?1 AND state IN ('proposed','approved','submitting','uncertain')",
+        [cutoff.to_string()],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as u64)
+}
+
+struct RunFileCompaction {
+    deleted: u64,
+}
+
+fn compact_run_files(
+    data_dir: &Path,
+    report_cutoff: NaiveDate,
+) -> Result<RunFileCompaction, CompanionError> {
+    let runs_dir = data_dir.join("runs");
+    if !runs_dir.exists() {
+        return Ok(RunFileCompaction { deleted: 0 });
+    }
+    let mut deleted = 0;
+    for entry in fs::read_dir(&runs_dir).map_err(|source| CompanionError::Read {
+        path: runs_dir.clone(),
+        source,
+    })? {
+        let entry = entry.map_err(|source| CompanionError::Read {
+            path: runs_dir.clone(),
+            source,
+        })?;
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Ok(date) = NaiveDate::parse_from_str(stem, "%Y-%m-%d") else {
+            continue;
+        };
+        if date >= report_cutoff || run_file_is_protected(&path) {
+            continue;
+        }
+        fs::remove_file(&path).map_err(|source| CompanionError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        deleted += 1;
+    }
+    Ok(RunFileCompaction { deleted })
+}
+
+fn run_file_is_protected(path: &Path) -> bool {
+    let Ok(body) = fs::read_to_string(path) else {
+        return true;
+    };
+    let Ok(json) = serde_json::from_str::<Value>(&body) else {
+        return true;
+    };
+    matches!(
+        json.get("status").and_then(Value::as_str),
+        Some("uncertain" | "submitting" | "proposed" | "approved")
+    )
+}
+
 fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
@@ -5468,6 +6114,19 @@ fn now_string() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+fn retention_now() -> Result<DateTime<Utc>, CompanionError> {
+    match std::env::var("DRAG_COMPANION_RETENTION_NOW") {
+        Ok(value) => DateTime::parse_from_rfc3339(&value)
+            .map(|value| value.with_timezone(&Utc))
+            .map_err(|error| {
+                CompanionError::Proposal(format!(
+                    "DRAG_COMPANION_RETENTION_NOW must be RFC3339: {error}"
+                ))
+            }),
+        Err(_) => Ok(Utc::now()),
+    }
+}
+
 fn terminal_result(date: NaiveDate) -> RunResult {
     RunResult {
         date,
@@ -5566,6 +6225,12 @@ fn contract() -> Contract {
                 false,
                 vec!["delete companion data directory"],
                 vec![],
+            ),
+            command(
+                "retention",
+                false,
+                vec!["compact journal and canonical store according to configured retention windows"],
+                vec!["enforce"],
             ),
             command(
                 "scheduler",

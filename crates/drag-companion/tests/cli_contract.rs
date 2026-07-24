@@ -110,6 +110,126 @@ fn operator_reports_logs_retention_and_purge_are_safe() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn retention_enforce_expires_overrides_protects_recovery_and_preserves_privacy(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let data = data_dir.to_string_lossy();
+    companion()?
+        .args(["--data-dir", &data, "import"])
+        .assert()
+        .success();
+    companion()?
+        .args(["--data-dir", &data, "status"])
+        .assert()
+        .success();
+    let store = data_dir.join("companion.sqlite3");
+    let conn = rusqlite::Connection::open(&store)?;
+    for (id, date, payload) in [
+        ("raw-old", "2026-03-08", r#"{"summary":"SECRET token=raw"}"#),
+        (
+            "normalized-old",
+            "2026-03-07",
+            r#"{"summary":"delete normalized"}"#,
+        ),
+        ("protected-old", "2026-03-06", r#"{"summary":"protected"}"#),
+    ] {
+        conn.execute(
+            "INSERT INTO evidence_events (event_id, event_type, observed_at, source_kind, source_adapter, source_reference, collector_name, collector_version, timestamp_source, timezone, explicit_date, privacy_classification, privacy_redacted, retention_policy, retain_until, supersedes, payload_json, integrity_hash) VALUES (?1, 'evidence.captured', '2026-03-10T00:00:00Z', 'fixture', 'fixture', ?1, 'fixture', 'test', 'fixture', 'UTC', ?2, 'local-fixture', 0, 'age-based', NULL, NULL, ?3, ?4)",
+            rusqlite::params![id, date, payload, format!("sha256:{id}")],
+        )?;
+    }
+    conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-delete','2026-03-07','rejected')", [])?;
+    conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-delete','bundle-delete','rejected')", [])?;
+    conn.execute("INSERT INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES ('proposal-delete', '[]', 'DRAG-1', '2026-03-07T10:00:00Z', '2026-03-07T11:00:00Z', '[]', 1.0, '[]')", [])?;
+    conn.execute("INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES ('proposal-delete','issueKey','DRAG-1')", [])?;
+    conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-protected','2026-03-06','uncertain')", [])?;
+    conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-protected','bundle-protected','uncertain')", [])?;
+    conn.execute("INSERT INTO mutation_operations (id, proposal_id, state, idempotency_key, local_date, tempo_account, payload_json) VALUES ('op-terminal', NULL, 'confirmed', 'idem-terminal', '2026-03-06', 'default', '{}')", [])?;
+    conn.execute("INSERT INTO mutation_operations (id, proposal_id, state, idempotency_key, local_date, tempo_account, payload_json) VALUES ('op-submitting', NULL, 'submitting', 'idem-submitting', '2026-03-06', 'default', '{}')", [])?;
+    drop(conn);
+
+    let old_journal = serde_json::json!({"schemaVersion":1,"eventId":"journal.old","eventType":"evidence.captured","observedAt":"2026-03-08T00:00:00Z","source":{"kind":"fixture","adapter":"fixture","reference":"old"},"collector":{"name":"fixture","version":"test"},"timestampSemantics":{"observedAtSource":"fixture","timezone":"UTC","explicitDate":"2026-03-08"},"privacy":{"classification":"local-fixture","redacted":false},"retention":{"policy":"age-based","retainUntil":null},"supersedes":null,"payload":{"summary":"SECRET journal"},"integrityHash":"sha256:old"});
+    let recent_journal = serde_json::json!({"schemaVersion":1,"eventId":"journal.recent","eventType":"evidence.captured","observedAt":"2026-03-09T00:00:00Z","source":{"kind":"fixture","adapter":"fixture","reference":"recent"},"collector":{"name":"fixture","version":"test"},"timestampSemantics":{"observedAtSource":"fixture","timezone":"UTC","explicitDate":"2026-03-09"},"privacy":{"classification":"local-fixture","redacted":false},"retention":{"policy":"age-based","retainUntil":null},"supersedes":null,"payload":{"summary":"recent"},"integrityHash":"sha256:recent"});
+    std::fs::write(
+        data_dir.join("journal.jsonl"),
+        format!("{}\n{}\n", old_journal, recent_journal),
+    )?;
+    let stale_tmp = data_dir.join("journal.jsonl.tmp-crash-secret");
+    std::fs::write(&stale_tmp, "SECRET stale temp")?;
+    std::fs::create_dir_all(data_dir.join("runs"))?;
+    std::fs::write(
+        data_dir.join("runs/2026-03-06.json"),
+        r#"{"date":"2026-03-06","status":"completed","secret":"SECRET report"}"#,
+    )?;
+    std::fs::write(
+        data_dir.join("runs/2026-03-05.json"),
+        r#"{"date":"2026-03-05","status":"uncertain","secret":"SECRET protected"}"#,
+    )?;
+
+    let output = companion()?
+        .args(["--data-dir", &data, "retention", "enforce"])
+        .env("DRAG_COMPANION_RETENTION_NOW", "2026-03-10T00:00:00Z")
+        .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
+        .env("DRAG_COMPANION_RETENTION_NORMALIZED_DAYS", "2")
+        .env("DRAG_COMPANION_RETENTION_REPORT_LEDGER_DAYS", "3")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output_text = String::from_utf8(output.clone())?;
+    assert!(!output_text.contains("SECRET"));
+    let json: Value = serde_json::from_slice(&output)?;
+    assert_eq!(json["retention"]["rawEvidenceDays"], 1);
+    assert_eq!(json["classes"]["raw"]["storeRedacted"], 3);
+    assert_eq!(json["classes"]["normalized"]["protected"], 2);
+    assert_eq!(json["classes"]["reportsAndLedger"]["protected"], 1);
+    assert_eq!(json["journal"]["crashSafe"], "atomic-tempfile-rename");
+    assert_eq!(json["journal"]["recoveredTempFiles"], 1);
+    assert_eq!(json["store"]["crashSafe"], "sqlite-transaction");
+
+    let conn = rusqlite::Connection::open(&store)?;
+    let raw_payload: String = conn.query_row(
+        "SELECT payload_json FROM evidence_events WHERE event_id = 'raw-old'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(!raw_payload.contains("SECRET"));
+    let deleted_bundle: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM daily_bundles WHERE id = 'bundle-delete'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(deleted_bundle, 0);
+    let protected_bundle: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM daily_bundles WHERE id = 'bundle-protected'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(protected_bundle, 1);
+    let terminal_ops: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE id = 'op-terminal'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(terminal_ops, 0);
+    let submitting_ops: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE id = 'op-submitting'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(submitting_ops, 1);
+    let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
+    assert!(!journal.contains("journal.old"));
+    assert!(journal.contains("journal.recent"));
+    assert!(!stale_tmp.exists());
+    assert!(!data_dir.join("runs/2026-03-06.json").exists());
+    assert!(data_dir.join("runs/2026-03-05.json").exists());
+    Ok(())
+}
+
+#[test]
 fn golden_operator_reports_cover_all_terminal_states() -> Result<(), Box<dyn std::error::Error>> {
     for state in ["completed", "partial", "blocked", "failed", "uncertain"] {
         let dir = tempdir()?;
@@ -518,7 +638,7 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
             .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
             .args(["scheduler", "status"]),
     )?;
-    assert_eq!(status["dragMachineContract"]["requiredVersion"], 9);
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 10);
     assert_eq!(status["dragMachineContract"]["compatible"], true);
     assert_eq!(status["package"]["name"], "drag-companion");
     assert_eq!(status["package"]["independent"], true);
@@ -2141,16 +2261,21 @@ set -euo pipefail
 log="{}/commands.log"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":9,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":10,"name":"drag"}}}}'
   exit 0
 fi
-if [[ "$*" == *" log "* ]]; then
-  cat > "{}/stdin.json"
-  if [[ "$*" != *"--dry-run"* ]]; then echo live mutation >&2; exit 9; fi
-  printf '{{"status":"validated","dryRun":true}}'
-  exit 0
-fi
-if [[ "$*" == *"--continue-from token-2"* ]]; then
+	if [[ "$*" == *" log "* ]]; then
+	  cat > "{}/stdin.json"
+	  if [[ "$*" != *"--dry-run"* ]]; then echo live mutation >&2; exit 9; fi
+	  printf '{{"status":"validated","dryRun":true}}'
+	  exit 0
+	fi
+	if [[ "$*" == *" resolve "* ]]; then
+	  if [[ "${{DRAG_FAULT:-}}" == "resolve" ]]; then echo resolve failed >&2; exit 1; fi
+	  printf '{{"ok":true,"data":{{"schemaVersion":1,"readOnly":true,"liveMutationAllowed":false,"issue":{{"key":"DRAG-151","id":"10001"}},"tempo":{{"requiredWorkAttributes":[{{"key":"_Account_","name":"Account","required":true}}],"requiredWorkAttributeKeys":["_Account_"],"requiredWorkAttributesByKey":{{"_Account_":{{"key":"_Account_","name":"Account","required":true}}}}}}}}}}'
+	  exit 0
+	fi
+	if [[ "$*" == *"--continue-from token-2"* ]]; then
   cat <<'JSON'
 {}
 JSON
@@ -2239,7 +2364,7 @@ log="{0}/commands.log"
 state="{0}/remote.jsonl"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":9,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":10,"name":"drag"}}}}'
   exit 0
 fi
 if [[ "$*" == *" list "* ]]; then
@@ -2891,6 +3016,115 @@ fn drag_preview_sends_exact_structured_dry_run_payload_without_live_mutation(
 }
 
 #[test]
+fn drag_preview_populates_resolutions_through_read_only_drag_boundary(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().to_string_lossy().into_owned();
+    companion()?
+        .args(["--data-dir", &data_dir, "import"])
+        .assert()
+        .success();
+    let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
+    conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-auto','2026-03-08','proposed')", [])?;
+    conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-auto','bundle-auto','proposed')", [])?;
+    conn.execute("INSERT INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES ('proposal-auto', '[\"evidence.git.abc123\"]', 'DRAG-151', '2026-03-08T10:00:00Z', '2026-03-08T11:00:00Z', '[\"Implemented boundary\"]', 1.0, '[\"direct evidence\"]')", [])?;
+    drop(conn);
+    let drag = fake_drag(
+        &dir,
+        vec![serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":[]})],
+    )?;
+
+    let output = companion()?
+        .args([
+            "--data-dir",
+            &data_dir,
+            "--drag-bin",
+            drag.to_string_lossy().as_ref(),
+            "preview",
+            "--date",
+            "2026-03-08",
+        ])
+        .env(
+            "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES",
+            r#"{"_Account_":"RD"}"#,
+        )
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: Value = serde_json::from_slice(&output)?;
+    assert_eq!(json["payload"]["issueKey"], "DRAG-151");
+    assert_eq!(json["payload"]["attributes"]["_Account_"], "RD");
+    let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+    assert!(commands.contains("resolve --issue-key DRAG-151"));
+    assert!(commands.contains("log --json - --dry-run"));
+    assert!(!commands.contains(" delete "));
+    let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM proposal_drag_resolutions WHERE proposal_id = 'proposal-auto'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(count, 5);
+    Ok(())
+}
+
+#[test]
+fn drag_resolution_failure_is_safe_and_does_not_preview_or_mutate(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (env_name, env_value, expected) in [
+        ("DRAG_FAULT", "resolve", "resolve failed"),
+        (
+            "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES",
+            "{}",
+            "missing required Tempo work attribute",
+        ),
+    ] {
+        let dir = tempdir()?;
+        let data_dir = dir.path().to_string_lossy().into_owned();
+        companion()?
+            .args(["--data-dir", &data_dir, "import"])
+            .assert()
+            .success();
+        let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
+        conn.execute("INSERT INTO daily_bundles (id, explicit_date, state) VALUES ('bundle-safe','2026-03-08','proposed')", [])?;
+        conn.execute("INSERT INTO proposals (id, bundle_id, state) VALUES ('proposal-safe','bundle-safe','proposed')", [])?;
+        conn.execute("INSERT INTO proposal_policy_fields (proposal_id, evidence_refs_json, issue_key, supported_start, supported_end, description_facts_json, confidence, limitations_json) VALUES ('proposal-safe', '[\"evidence.git.abc123\"]', 'DRAG-151', '2026-03-08T10:00:00Z', '2026-03-08T11:00:00Z', '[\"Implemented boundary\"]', 1.0, '[\"direct evidence\"]')", [])?;
+        drop(conn);
+        let drag = fake_drag(
+            &dir,
+            vec![serde_json::json!({"schemaVersion":1,"selectedDate":"2026-03-08","worklogs":[]})],
+        )?;
+        companion()?
+            .args([
+                "--data-dir",
+                &data_dir,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "preview",
+                "--date",
+                "2026-03-08",
+            ])
+            .env(env_name, env_value)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(expected));
+        let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
+        assert!(commands.contains(" resolve "));
+        assert!(!commands.contains(" log "));
+        let conn = rusqlite::Connection::open(dir.path().join("companion.sqlite3"))?;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proposal_drag_resolutions WHERE proposal_id = 'proposal-safe'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for (page, error) in [
@@ -2925,7 +3159,7 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
     let drag = dir.path().join("bad-drag");
     std::fs::write(
         &drag,
-        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"schemaVersion\":9}'; exit 0; fi\necho timeout >&2\nexit 1\n",
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":10}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
     )?;
     std::process::Command::new("chmod")
         .args(["+x", drag.to_str().ok_or("drag")?])

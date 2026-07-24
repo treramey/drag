@@ -85,6 +85,8 @@ pub enum Command {
     ///
     /// Add --remote to run opt-in, read-only Jira and Tempo connection checks.
     Doctor(DoctorArgs),
+    /// Resolve Jira and Tempo metadata needed to build a worklog payload without mutation.
+    Resolve(ResolveArgs),
     /// Call Tempo operations generated from the official OpenAPI document.
     Tempo(TempoArgs),
     /// Inspect the CLI contract or a Tempo OpenAPI operation or type.
@@ -131,6 +133,13 @@ pub struct GenerateSkillsArgs {
     /// Replace existing skill directories, their contents, and the generated index.
     #[arg(long)]
     pub force: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct ResolveArgs {
+    /// Proposed Jira issue key to verify and resolve to Jira's issue ID.
+    #[arg(long, value_name = "KEY")]
+    pub issue_key: String,
 }
 
 #[derive(Debug, Args)]

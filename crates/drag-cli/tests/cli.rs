@@ -1031,7 +1031,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 9);
+    assert_eq!(contract["schemaVersion"], 10);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -1050,7 +1050,9 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         "invalid_input"
     );
 
-    for name in ["log", "list", "delete", "setup", "doctor", "schema", "help"] {
+    for name in [
+        "log", "list", "delete", "setup", "doctor", "resolve", "schema", "help",
+    ] {
         let command = &contract["commands"][name];
         assert!(command.is_object(), "missing command {name}");
         assert!(
@@ -1114,6 +1116,26 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         contract["commands"]["delete"]["dryRun"]["networkAccess"],
         "read-only"
+    );
+    assert_eq!(
+        contract["commands"]["resolve"]["sideEffects"]["default"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        contract["commands"]["resolve"]["networkAccess"]["default"]["jira"],
+        "read"
+    );
+    assert_eq!(
+        contract["commands"]["resolve"]["networkAccess"]["default"]["tempo"],
+        "read"
+    );
+    assert_eq!(
+        contract["commands"]["resolve"]["success"]["properties"]["readOnly"]["const"],
+        true
+    );
+    assert_eq!(
+        contract["commands"]["resolve"]["success"]["properties"]["liveMutationAllowed"]["const"],
+        false
     );
     let delete_arguments = contract["commands"]["delete"]["arguments"]
         .as_array()
