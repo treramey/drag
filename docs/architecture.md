@@ -136,3 +136,19 @@ Put deterministic calculations and state transitions in `drag`. Keep
 filesystem, process, prompt, and HTTP behavior in `drag-cli`. Update
 `drag schema`, tests, README examples, and `CHANGELOG.md` when a public
 contract changes.
+
+## Companion process boundary
+
+`drag-companion` is a sibling workspace binary rather than a module inside
+`drag` or `drag-cli`. The companion owns end-of-day capture state and scheduler
+lifecycle descriptions, while Drag remains a separate structured process
+boundary. When the companion needs Drag behavior, it must invoke the public
+`drag` CLI and consume the stable `drag schema` contract instead of linking into
+`drag-cli` internals. This keeps side effects auditable, preserves Drag's CLI and
+schema as the integration seam, and prevents a model or companion workflow from
+receiving shell access or direct Tempo mutation authority.
+
+The v1 companion defaults to capture-only fake adapters. Its machine-readable
+contract reports no network access and no live mutation path. Unsupported
+collectors such as Jira activity, Codex, and proprietary calendars remain
+deferred until separate tickets define their adapters and safety invariants.
