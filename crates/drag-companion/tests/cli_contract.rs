@@ -458,7 +458,7 @@ fn fake_adapter_reconcile_explicit_date_persists_terminal_result_without_live_ef
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("terminal"));
+        .stdout(predicate::str::contains("completed"));
 
     let persisted = std::fs::read_to_string(dir.path().join("runs").join("2026-07-23.json"))?;
     let result: Value = serde_json::from_str(&persisted)?;
@@ -1674,5 +1674,233 @@ fn audit_policy_decisions_are_deterministic_exhaustive_and_preserve_unsupported_
             "missing {code}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn reconcile_resume_status_persist_phases_and_skip_confirmed_work(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let date = "2026-07-24";
+
+    let first = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            date,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let first: Value = serde_json::from_slice(&first)?;
+    assert_eq!(first["status"], "completed");
+    assert_eq!(first["owner"]["tempoAccount"], "default");
+    let phases = first["phases"].as_array().ok_or("phases")?;
+    assert!(phases.iter().any(|phase| phase["phase"] == "collecting"));
+    assert!(phases.iter().any(|phase| phase["phase"] == "completed"));
+    assert!(phases.iter().all(|phase| phase["startedAt"].is_string()));
+
+    let resumed = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "resume",
+            "--date",
+            date,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let resumed: Value = serde_json::from_slice(&resumed)?;
+    assert_eq!(resumed["status"], "completed");
+    assert_eq!(resumed["resumed"], true);
+    assert_eq!(resumed["skippedConfirmedWork"], true);
+
+    let status = companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref(), "status"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let status: Value = serde_json::from_slice(&status)?;
+    assert!(status["activeLeases"]
+        .as_array()
+        .ok_or("activeLeases")?
+        .is_empty());
+    Ok(())
+}
+
+#[test]
+fn concurrent_reconcile_allows_only_one_owner_per_account_and_date(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let date = "2026-07-25";
+    let bin = assert_cmd::cargo::cargo_bin("drag-companion");
+    let first = std::process::Command::new(&bin)
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            date,
+        ])
+        .env("DRAG_COMPANION_TEST_HOLD_MS", "700")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    std::thread::sleep(std::time::Duration::from_millis(150));
+    let second = std::process::Command::new(&bin)
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            date,
+        ])
+        .output()?;
+    let first_out = first.wait_with_output()?;
+    assert!(first_out.status.success());
+    assert!(!second.status.success());
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("already owned") || stderr.contains("locked"),
+        "{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn stale_lease_is_recovered_but_unexpired_lease_blocks_takeover(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let date = "2026-07-26";
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            date,
+        ])
+        .env("DRAG_COMPANION_TEST_CRASH_AFTER_PHASE", "collecting")
+        .env("DRAG_COMPANION_TEST_LEASE_TTL_MS", "250")
+        .assert()
+        .failure();
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            date,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already owned"));
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let recovered = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "resume",
+            "--date",
+            date,
+        ])
+        .env("DRAG_COMPANION_TEST_LEASE_TTL_MS", "0")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let recovered: Value = serde_json::from_slice(&recovered)?;
+    assert_eq!(recovered["recoveredLease"], true);
+    assert_eq!(recovered["status"], "completed");
+    Ok(())
+}
+
+#[test]
+fn retries_only_read_only_phases_and_blocked_pre_mutation_never_submits(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let date = "2026-07-27";
+
+    let retried = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            date,
+        ])
+        .env("DRAG_COMPANION_TEST_TRANSIENT_PHASE", "tempo_read")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let retried: Value = serde_json::from_slice(&retried)?;
+    assert!(retried["phases"]
+        .as_array()
+        .ok_or("phases")?
+        .iter()
+        .any(|p| p["phase"] == "tempo_read" && p["attempt"] == 2));
+
+    let blocked_date = "2026-07-28";
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            blocked_date,
+        ])
+        .env("DRAG_COMPANION_TEST_BLOCK_BEFORE_MUTATION", "1")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("blocked before mutation"));
+    let blocked = companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "resume",
+            "--date",
+            blocked_date,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocked: Value = serde_json::from_slice(&blocked)?;
+    assert_eq!(blocked["status"], "blocked");
+    assert_eq!(blocked["submissionEntered"], false);
+
+    companion()?
+        .args([
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+            "reconcile",
+            "--date",
+            "2026-07-29",
+        ])
+        .env("DRAG_COMPANION_TEST_TRANSIENT_PHASE", "submitting")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not retryable"));
     Ok(())
 }

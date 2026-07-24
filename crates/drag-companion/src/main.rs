@@ -9,6 +9,7 @@ use chrono::{
 };
 use chrono_tz::Tz;
 use clap::{Args, Parser, Subcommand};
+use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -215,6 +216,19 @@ enum CompanionError {
         kind: ReconcileErrorKind,
         message: String,
     },
+    #[error(
+        "run already owned for Tempo account {account} on {date} by {owner} until {expires_at}"
+    )]
+    RunOwned {
+        account: String,
+        date: NaiveDate,
+        owner: String,
+        expires_at: String,
+    },
+    #[error("phase {0} is not retryable")]
+    NotRetryable(&'static str),
+    #[error("blocked before mutation; resume will not enter submission")]
+    BlockedBeforeMutation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -497,10 +511,7 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
         .unwrap_or_else(|| PathBuf::from(".drag-companion"));
 
     match cli.command {
-        Command::Status => print_json(&serde_json::json!({
-            "status": "ready", "mode": DEFAULT_MODE, "networkAccess": false,
-            "liveMutationAllowed": false, "journal": journal_path(&data_dir), "store": store_path(&data_dir),
-        })),
+        Command::Status => print_json(&status_payload(&data_dir)?),
         Command::Collect(args) => {
             let result = collect_activity(&data_dir, &args)?;
             print_json(&result)
@@ -519,13 +530,11 @@ fn run(cli: Cli) -> Result<(), CompanionError> {
             )
         }
         Command::Reconcile(args) => {
-            let result = terminal_result(args.date);
-            persist_result(&data_dir, &result)?;
+            let result = coordinated_run(&data_dir, args.date, false)?;
             print_json(&result)
         }
         Command::Resume(args) => {
-            let result = terminal_result(args.date);
-            persist_result(&data_dir, &result)?;
+            let result = coordinated_run(&data_dir, args.date, true)?;
             print_json(&result)
         }
         Command::Report(args) => {
@@ -2765,6 +2774,383 @@ fn persist_result(data_dir: &Path, result: &RunResult) -> Result<(), CompanionEr
     let path = run_path(data_dir, result.date);
     let body = serde_json::to_vec_pretty(result).map_err(CompanionError::Serialize)?;
     fs::write(&path, body).map_err(|source| CompanionError::Write { path, source })
+}
+
+const TEMPO_ACCOUNT: &str = "default";
+const LEASE_TTL_MS: i64 = 30_000;
+const READ_ONLY_RETRIES: u32 = 2;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CoordinatedRunResult {
+    date: NaiveDate,
+    status: &'static str,
+    mode: &'static str,
+    owner: RunOwner,
+    resumed: bool,
+    recovered_lease: bool,
+    skipped_confirmed_work: bool,
+    submission_entered: bool,
+    network_access: bool,
+    live_mutation_allowed: bool,
+    phases: Vec<RunPhaseRecord>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunOwner {
+    tempo_account: &'static str,
+    local_date: NaiveDate,
+    owner_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunPhaseRecord {
+    phase: String,
+    state: String,
+    attempt: u32,
+    started_at: String,
+    finished_at: Option<String>,
+}
+
+struct AdvisoryRunLock {
+    _file: File,
+}
+
+fn coordinated_run(
+    data_dir: &Path,
+    date: NaiveDate,
+    resume: bool,
+) -> Result<CoordinatedRunResult, CompanionError> {
+    fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
+        path: data_dir.to_path_buf(),
+        source,
+    })?;
+    let _lock = acquire_advisory_lock(data_dir, date)?;
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    let owner_id = format!("{}:{}", std::process::id(), now_string());
+    let (recovered_lease, skipped_confirmed_work) = acquire_sqlite_lease(&conn, date, &owner_id)?;
+
+    if let Some(status) = terminal_run_status(&conn, date)? {
+        release_sqlite_lease(&conn, date, &owner_id)?;
+        return Ok(CoordinatedRunResult {
+            date,
+            status,
+            mode: DEFAULT_MODE,
+            owner: RunOwner {
+                tempo_account: TEMPO_ACCOUNT,
+                local_date: date,
+                owner_id,
+            },
+            resumed: resume,
+            recovered_lease,
+            skipped_confirmed_work: true,
+            submission_entered: status != "blocked",
+            network_access: false,
+            live_mutation_allowed: false,
+            phases: load_phase_records(&conn, date)?,
+        });
+    }
+
+    let mut submission_entered = false;
+    let phases = [
+        "collecting",
+        "model",
+        "tempo_read",
+        "pre_mutation",
+        "submitting",
+        "completed",
+    ];
+    for phase in phases {
+        if phase_completed(&conn, date, phase)? {
+            continue;
+        }
+        if phase == "submitting" {
+            submission_entered = true;
+        }
+        if let Err(error) = run_phase(&conn, date, &owner_id, phase) {
+            let _ = release_sqlite_lease(&conn, date, &owner_id);
+            return Err(error);
+        }
+        if let Ok(ms) = std::env::var("DRAG_COMPANION_TEST_HOLD_MS")
+            .unwrap_or_default()
+            .parse::<u64>()
+        {
+            if ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(ms));
+            }
+        }
+        heartbeat_lease(&conn, date, &owner_id)?;
+    }
+    finish_run(&conn, date, "completed")?;
+    release_sqlite_lease(&conn, date, &owner_id)?;
+    let result = CoordinatedRunResult {
+        date,
+        status: "completed",
+        mode: DEFAULT_MODE,
+        owner: RunOwner {
+            tempo_account: TEMPO_ACCOUNT,
+            local_date: date,
+            owner_id,
+        },
+        resumed: resume,
+        recovered_lease,
+        skipped_confirmed_work,
+        submission_entered,
+        network_access: false,
+        live_mutation_allowed: false,
+        phases: load_phase_records(&conn, date)?,
+    };
+    persist_result(data_dir, &terminal_result(date))?;
+    Ok(result)
+}
+
+fn acquire_advisory_lock(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<AdvisoryRunLock, CompanionError> {
+    let lock_dir = data_dir.join("locks");
+    fs::create_dir_all(&lock_dir).map_err(|source| CompanionError::CreateDir {
+        path: lock_dir.clone(),
+        source,
+    })?;
+    let path = lock_dir.join(format!("{TEMPO_ACCOUNT}-{date}.lock"));
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| CompanionError::Open { path, source })?;
+    file.try_lock_exclusive()
+        .map_err(|_| CompanionError::RunOwned {
+            account: TEMPO_ACCOUNT.to_owned(),
+            date,
+            owner: "os-lock".to_owned(),
+            expires_at: "unknown".to_owned(),
+        })?;
+    Ok(AdvisoryRunLock { _file: file })
+}
+
+fn migrate_run_coordination(conn: &Connection) -> Result<(), CompanionError> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS run_leases (tempo_account TEXT NOT NULL, local_date TEXT NOT NULL, owner_id TEXT NOT NULL, heartbeat_at TEXT NOT NULL, expires_at_ms INTEGER NOT NULL, recovered_from TEXT, PRIMARY KEY (tempo_account, local_date));
+         CREATE TABLE IF NOT EXISTS run_phases (tempo_account TEXT NOT NULL, local_date TEXT NOT NULL, phase TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, error TEXT, PRIMARY KEY (tempo_account, local_date, phase, attempt));
+         CREATE TABLE IF NOT EXISTS coordinated_runs (tempo_account TEXT NOT NULL, local_date TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, PRIMARY KEY (tempo_account, local_date));"
+    )?;
+    Ok(())
+}
+
+fn acquire_sqlite_lease(
+    conn: &Connection,
+    date: NaiveDate,
+    owner_id: &str,
+) -> Result<(bool, bool), CompanionError> {
+    let now = epoch_ms();
+    let ttl = std::env::var("DRAG_COMPANION_TEST_LEASE_TTL_MS")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(LEASE_TTL_MS);
+    let expires = now + ttl;
+    let existing: Option<(String, i64)> = conn.query_row(
+        "SELECT owner_id, expires_at_ms FROM run_leases WHERE tempo_account = ?1 AND local_date = ?2",
+        params![TEMPO_ACCOUNT, date.to_string()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional()?;
+    let mut recovered = false;
+    if let Some((owner, expiry)) = existing {
+        if expiry > now {
+            return Err(CompanionError::RunOwned {
+                account: TEMPO_ACCOUNT.to_owned(),
+                date,
+                owner,
+                expires_at: expiry.to_string(),
+            });
+        }
+        recovered = true;
+        conn.execute(
+            "DELETE FROM run_leases WHERE tempo_account = ?1 AND local_date = ?2",
+            params![TEMPO_ACCOUNT, date.to_string()],
+        )?;
+    }
+    let skipped = terminal_run_status(conn, date)?.is_some();
+    conn.execute("INSERT OR IGNORE INTO coordinated_runs (tempo_account, local_date, state, started_at) VALUES (?1, ?2, 'running', ?3)", params![TEMPO_ACCOUNT, date.to_string(), now_string()])?;
+    conn.execute("INSERT INTO run_leases (tempo_account, local_date, owner_id, heartbeat_at, expires_at_ms, recovered_from) VALUES (?1, ?2, ?3, ?4, ?5, ?6)", params![TEMPO_ACCOUNT, date.to_string(), owner_id, now_string(), expires, if recovered { Some("expired") } else { None }])?;
+    Ok((recovered, skipped))
+}
+
+fn heartbeat_lease(
+    conn: &Connection,
+    date: NaiveDate,
+    owner_id: &str,
+) -> Result<(), CompanionError> {
+    conn.execute("UPDATE run_leases SET heartbeat_at = ?1, expires_at_ms = ?2 WHERE tempo_account = ?3 AND local_date = ?4 AND owner_id = ?5", params![now_string(), epoch_ms() + LEASE_TTL_MS, TEMPO_ACCOUNT, date.to_string(), owner_id])?;
+    Ok(())
+}
+
+fn release_sqlite_lease(
+    conn: &Connection,
+    date: NaiveDate,
+    owner_id: &str,
+) -> Result<(), CompanionError> {
+    conn.execute(
+        "DELETE FROM run_leases WHERE tempo_account = ?1 AND local_date = ?2 AND owner_id = ?3",
+        params![TEMPO_ACCOUNT, date.to_string(), owner_id],
+    )?;
+    Ok(())
+}
+
+fn run_phase(
+    conn: &Connection,
+    date: NaiveDate,
+    owner_id: &str,
+    phase: &'static str,
+) -> Result<(), CompanionError> {
+    let retryable = matches!(phase, "collecting" | "model" | "tempo_read");
+    let transient = std::env::var("DRAG_COMPANION_TEST_TRANSIENT_PHASE")
+        .ok()
+        .as_deref()
+        == Some(phase);
+    let max_attempts = if retryable { READ_ONLY_RETRIES } else { 1 };
+    for attempt in 1..=max_attempts {
+        persist_phase_start(conn, date, phase, attempt)?;
+        if std::env::var("DRAG_COMPANION_TEST_CRASH_AFTER_PHASE")
+            .ok()
+            .as_deref()
+            == Some(phase)
+        {
+            std::process::exit(42);
+        }
+        if phase == "pre_mutation"
+            && std::env::var("DRAG_COMPANION_TEST_BLOCK_BEFORE_MUTATION").is_ok()
+        {
+            finish_phase(
+                conn,
+                date,
+                phase,
+                attempt,
+                "blocked",
+                Some("blocked before mutation"),
+            )?;
+            finish_run(conn, date, "blocked")?;
+            return Err(CompanionError::BlockedBeforeMutation);
+        }
+        if transient && attempt == 1 {
+            finish_phase(
+                conn,
+                date,
+                phase,
+                attempt,
+                "failed",
+                Some("transient fixture"),
+            )?;
+            if !retryable {
+                return Err(CompanionError::NotRetryable(phase));
+            }
+            continue;
+        }
+        if transient && !retryable {
+            return Err(CompanionError::NotRetryable(phase));
+        }
+        finish_phase(conn, date, phase, attempt, "completed", None)?;
+        heartbeat_lease(conn, date, owner_id)?;
+        return Ok(());
+    }
+    Err(CompanionError::DragReconcile {
+        kind: ReconcileErrorKind::DefiniteFailure,
+        message: format!("phase {phase} exhausted retries"),
+    })
+}
+
+fn persist_phase_start(
+    conn: &Connection,
+    date: NaiveDate,
+    phase: &str,
+    attempt: u32,
+) -> Result<(), CompanionError> {
+    conn.execute("INSERT OR IGNORE INTO run_phases (tempo_account, local_date, phase, state, attempt, started_at) VALUES (?1, ?2, ?3, 'running', ?4, ?5)", params![TEMPO_ACCOUNT, date.to_string(), phase, attempt, now_string()])?;
+    Ok(())
+}
+
+fn finish_phase(
+    conn: &Connection,
+    date: NaiveDate,
+    phase: &str,
+    attempt: u32,
+    state: &str,
+    error: Option<&str>,
+) -> Result<(), CompanionError> {
+    conn.execute("UPDATE run_phases SET state = ?1, finished_at = ?2, error = ?3 WHERE tempo_account = ?4 AND local_date = ?5 AND phase = ?6 AND attempt = ?7", params![state, now_string(), error, TEMPO_ACCOUNT, date.to_string(), phase, attempt])?;
+    Ok(())
+}
+
+fn finish_run(conn: &Connection, date: NaiveDate, state: &str) -> Result<(), CompanionError> {
+    conn.execute("INSERT INTO coordinated_runs (tempo_account, local_date, state, started_at, finished_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(tempo_account, local_date) DO UPDATE SET state = excluded.state, finished_at = excluded.finished_at", params![TEMPO_ACCOUNT, date.to_string(), state, now_string(), now_string()])?;
+    Ok(())
+}
+
+fn terminal_run_status(
+    conn: &Connection,
+    date: NaiveDate,
+) -> Result<Option<&'static str>, CompanionError> {
+    let state: Option<String> = conn.query_row("SELECT state FROM coordinated_runs WHERE tempo_account = ?1 AND local_date = ?2 AND state IN ('completed','partial','blocked','failed')", params![TEMPO_ACCOUNT, date.to_string()], |row| row.get(0)).optional()?;
+    Ok(match state.as_deref() {
+        Some("completed") => Some("completed"),
+        Some("partial") => Some("partial"),
+        Some("blocked") => Some("blocked"),
+        Some("failed") => Some("failed"),
+        _ => None,
+    })
+}
+
+fn phase_completed(
+    conn: &Connection,
+    date: NaiveDate,
+    phase: &str,
+) -> Result<bool, CompanionError> {
+    let done: Option<i64> = conn.query_row("SELECT 1 FROM run_phases WHERE tempo_account = ?1 AND local_date = ?2 AND phase = ?3 AND state = 'completed' LIMIT 1", params![TEMPO_ACCOUNT, date.to_string(), phase], |row| row.get(0)).optional()?;
+    Ok(done.is_some())
+}
+
+fn load_phase_records(
+    conn: &Connection,
+    date: NaiveDate,
+) -> Result<Vec<RunPhaseRecord>, CompanionError> {
+    let mut stmt = conn.prepare("SELECT phase, state, attempt, started_at, finished_at FROM run_phases WHERE tempo_account = ?1 AND local_date = ?2 ORDER BY rowid")?;
+    let rows = stmt.query_map(params![TEMPO_ACCOUNT, date.to_string()], |row| {
+        Ok(RunPhaseRecord {
+            phase: row.get(0)?,
+            state: row.get(1)?,
+            attempt: row.get::<_, i64>(2)? as u32,
+            started_at: row.get(3)?,
+            finished_at: row.get(4)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(CompanionError::Store)
+}
+
+fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    let now = epoch_ms();
+    let mut stmt = conn.prepare("SELECT tempo_account, local_date, owner_id, heartbeat_at, expires_at_ms FROM run_leases WHERE expires_at_ms > ?1 ORDER BY local_date")?;
+    let leases = stmt.query_map([now], |row| Ok(serde_json::json!({"tempoAccount": row.get::<_, String>(0)?, "localDate": row.get::<_, String>(1)?, "ownerId": row.get::<_, String>(2)?, "heartbeatAt": row.get::<_, String>(3)?, "expiresAtMs": row.get::<_, i64>(4)?})))?.collect::<Result<Vec<_>, _>>()?;
+    Ok(
+        serde_json::json!({ "status": "ready", "mode": DEFAULT_MODE, "networkAccess": false, "liveMutationAllowed": false, "journal": journal_path(data_dir), "store": store_path(data_dir), "activeLeases": leases }),
+    )
+}
+
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 fn journal_path(data_dir: &Path) -> PathBuf {
