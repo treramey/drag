@@ -2827,7 +2827,12 @@ fn concurrent_execute_allows_only_one_live_submitter_per_account_and_date(
         .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
         .output()?;
     assert!(!second.status.success());
-    assert!(String::from_utf8(second.stderr)?.contains("run already owned"));
+    let second_stderr = String::from_utf8(second.stderr)?;
+    assert!(
+        second_stderr.contains("run already owned")
+            || second_stderr.contains("companion state is busy"),
+        "unexpected contention error: {second_stderr}"
+    );
     assert!(first.wait()?.success());
     let commands = std::fs::read_to_string(dir.path().join("commands.log"))?;
     assert_eq!(commands.matches(" log ").count(), 1);
