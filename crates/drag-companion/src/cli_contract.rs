@@ -256,9 +256,21 @@ pub(crate) enum ClaudeHookOperation {
 
 #[derive(Debug, Args)]
 pub(crate) struct ClaudeHookSettingsArgs {
-    /// Claude settings JSON path to update.
-    #[arg(long, value_name = "FILE")]
+    /// Claude settings JSON path to update. Defaults to ~/.claude/settings.json.
+    #[arg(
+        long,
+        value_name = "FILE",
+        default_value_os_t = default_claude_settings_path()
+    )]
     pub(crate) settings: PathBuf,
+}
+
+pub(crate) fn default_claude_settings_path() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude/settings.json")
 }
 
 #[derive(Debug, Subcommand)]

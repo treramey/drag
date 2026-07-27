@@ -2009,6 +2009,29 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
 }
 
 #[test]
+fn claude_hook_install_defaults_to_the_user_claude_settings_file(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let home = tempdir()?;
+    let settings = home.path().join(".claude/settings.json");
+
+    companion()?
+        .args(["claude-hook", "install"])
+        .env("HOME", home.path())
+        .env_remove("USERPROFILE")
+        .assert()
+        .success();
+
+    let installed: Value = serde_json::from_str(&std::fs::read_to_string(settings)?)?;
+    assert_eq!(
+        serde_json::to_string(&installed)?
+            .matches("drag-companion claude-hook capture")
+            .count(),
+        2
+    );
+    Ok(())
+}
+
+#[test]
 fn claude_hook_install_rejects_unknown_shapes_without_overwriting_them(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
