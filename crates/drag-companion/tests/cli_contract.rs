@@ -2781,7 +2781,9 @@ fn concurrent_execute_allows_only_one_live_submitter_per_account_and_date(
     let mut first = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
         .args(args)
         .env("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT", "1")
-        .env("DRAG_EXEC_HOLD_SECONDS", "0.5")
+        // Leave enough time for the additional Windows processes to start and
+        // contend for the locks before the fake submission completes.
+        .env("DRAG_EXEC_HOLD_SECONDS", "5")
         .stdout(std::process::Stdio::null())
         .spawn()?;
     for _ in 0..100 {
