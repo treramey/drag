@@ -61,17 +61,17 @@ pub(crate) fn install_scheduler_files(
         ));
     }
     let mut state = scheduler_status(data_dir)?["state"].clone();
-    let target_dir = absolute_path(&args.target_dir)?;
     let installed = if args.platform == "launchd" {
         vec![
-            target_dir.join("email.trevors.drag-tracking.plist"),
-            target_dir.join("email.trevors.drag-tracking.catch-up.plist"),
+            args.target_dir.join("email.trevors.drag-tracking.plist"),
+            args.target_dir
+                .join("email.trevors.drag-tracking.catch-up.plist"),
         ]
     } else {
         vec![
-            target_dir.join("drag-tracking.service"),
-            target_dir.join("drag-tracking.timer"),
-            target_dir.join("drag-tracking-catch-up.service"),
+            args.target_dir.join("drag-tracking.service"),
+            args.target_dir.join("drag-tracking.timer"),
+            args.target_dir.join("drag-tracking-catch-up.service"),
         ]
     };
     preflight_scheduler_destinations(&installed)?;
@@ -117,15 +117,15 @@ pub(crate) fn install_scheduler_files(
             render_systemd_catch_up_service(&catch_up_command),
         ]
     };
-    fs::create_dir_all(&target_dir).map_err(|source| CompanionError::CreateDir {
-        path: target_dir.clone(),
+    fs::create_dir_all(&args.target_dir).map_err(|source| CompanionError::CreateDir {
+        path: args.target_dir.clone(),
         source,
     })?;
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
     })?;
-    remove_owned_legacy_scheduler_files(&target_dir)?;
+    remove_owned_legacy_scheduler_files(&args.target_dir)?;
     for (path, content) in installed.iter().zip(rendered) {
         write_owned_file(path, &content)?;
     }
@@ -142,10 +142,14 @@ pub(crate) fn install_scheduler_files(
             ))
         })
         .collect::<Result<serde_json::Map<String, Value>, CompanionError>>()?;
+    let desired_enabled = state
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let host_scheduler_mutated =
+        mutate_host_scheduler(&args.platform, &args.target_dir, desired_enabled)?;
     state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
-    if state.get("enabled").is_none() {
-        state["enabled"] = serde_json::json!(true);
-    }
+    state["enabled"] = serde_json::json!(desired_enabled && host_scheduler_mutated);
     if state.get("operationKeys").is_none() {
         state["operationKeys"] = serde_json::json!([]);
     }
@@ -155,21 +159,13 @@ pub(crate) fn install_scheduler_files(
     state["installedFiles"] = serde_json::json!(installed);
     state["installedFileHashes"] = Value::Object(installed_file_hashes);
     write_scheduler_state(data_dir, state)?;
-    Ok(
-        serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
-    )
-}
-
-pub(crate) fn absolute_path(path: &Path) -> Result<PathBuf, CompanionError> {
-    if path.is_absolute() {
-        return Ok(path.to_path_buf());
-    }
-    std::env::current_dir()
-        .map(|current| current.join(path))
-        .map_err(|source| CompanionError::Read {
-            path: path.to_path_buf(),
-            source,
-        })
+    Ok(serde_json::json!({
+        "status": "installed",
+        "hostSchedulerMutated": host_scheduler_mutated,
+        "active": desired_enabled && host_scheduler_mutated,
+        "installedFiles": installed,
+        "activationRequired": !host_scheduler_mutated
+    }))
 }
 
 fn preflight_scheduler_destinations(paths: &[PathBuf]) -> Result<(), CompanionError> {
@@ -226,6 +222,7 @@ pub(crate) fn uninstall_scheduler_files(
     data_dir: &Path,
     args: &SchedulerInstallArgs,
 ) -> Result<Value, CompanionError> {
+    let host_scheduler_mutated = mutate_host_scheduler(&args.platform, &args.target_dir, false)?;
     let names = [
         "drag-tracking.service",
         "drag-tracking.timer",
@@ -249,15 +246,17 @@ pub(crate) fn uninstall_scheduler_files(
             removed.push(path);
         }
     }
-    let mut state = scheduler_status(data_dir)?["state"].clone();
-    state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
-    state["enabled"] = Value::Bool(false);
-    state["installedFiles"] = serde_json::json!([]);
-    state["installedFileHashes"] = serde_json::json!({});
-    state["removedFiles"] = serde_json::json!(removed);
-    write_scheduler_state(data_dir, state)?;
+    write_scheduler_state(
+        data_dir,
+        serde_json::json!({
+            "schemaVersion": SCHEDULER_SCHEMA_VERSION,
+            "enabled": false,
+            "removedFiles": removed,
+            "operationKeys": scheduler_status(data_dir)?.get("state").and_then(|s| s.get("operationKeys")).cloned().unwrap_or_else(|| serde_json::json!([])),
+        }),
+    )?;
     Ok(
-        serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": false, "removedFiles": removed }),
+        serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": host_scheduler_mutated, "removedFiles": removed }),
     )
 }
 
@@ -270,8 +269,29 @@ pub(crate) fn set_scheduler_enabled_state(
     enabled: bool,
 ) -> Result<Value, CompanionError> {
     let mut state = scheduler_status(data_dir)?["state"].clone();
+    let has_installed_files = state["installedFiles"].as_array().is_some();
+    let host_scheduler_mutated = if let (Some(platform), Some(installed_files)) = (
+        state["platform"].as_str(),
+        state["installedFiles"].as_array(),
+    ) {
+        let first = installed_files
+            .first()
+            .and_then(Value::as_str)
+            .map(PathBuf::from)
+            .ok_or_else(|| {
+                CompanionError::Proposal("scheduler state has invalid installed files".to_owned())
+            })?;
+        let target_dir = first.parent().ok_or_else(|| {
+            CompanionError::Proposal("scheduler target directory is invalid".to_owned())
+        })?;
+        validate_owned_scheduler_files(&state)?;
+        mutate_host_scheduler(platform, target_dir, enabled)?
+    } else {
+        false
+    };
     state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
-    state["enabled"] = serde_json::json!(enabled);
+    state["enabled"] =
+        serde_json::json!(enabled && (!has_installed_files || host_scheduler_mutated));
     if state.get("operationKeys").is_none() {
         state["operationKeys"] = serde_json::json!([]);
     }
@@ -279,9 +299,118 @@ pub(crate) fn set_scheduler_enabled_state(
         state["resumable"] = serde_json::json!(true);
     }
     write_scheduler_state(data_dir, state)?;
-    Ok(
-        serde_json::json!({ "status": if enabled { "enabled" } else { "disabled" }, "hostSchedulerMutated": false }),
-    )
+    Ok(serde_json::json!({
+        "status": if enabled && host_scheduler_mutated { "enabled" } else if enabled { "activation-required" } else { "disabled" },
+        "hostSchedulerMutated": host_scheduler_mutated
+    }))
+}
+
+pub(crate) fn validate_owned_scheduler_files(state: &Value) -> Result<(), CompanionError> {
+    let files = state["installedFiles"].as_array().ok_or_else(|| {
+        CompanionError::Proposal("scheduler state has no installed files".to_owned())
+    })?;
+    for file in files {
+        let path = file.as_str().map(PathBuf::from).ok_or_else(|| {
+            CompanionError::Proposal("scheduler state has an invalid installed file".to_owned())
+        })?;
+        if !path.exists() || !is_owned_scheduler_file(&path)? {
+            return Err(CompanionError::Proposal(format!(
+                "tracking-owned scheduler file is missing or modified: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn scheduler_files_healthy(state: &Value) -> bool {
+    let Some(files) = state.get("installedFiles").and_then(Value::as_array) else {
+        return true;
+    };
+    let hashes = state.get("installedFileHashes").and_then(Value::as_object);
+    files.iter().all(|file| {
+        file.as_str().is_some_and(|path| {
+            let path = Path::new(path);
+            path.exists()
+                && is_owned_scheduler_file(path).unwrap_or(false)
+                && hashes
+                    .and_then(|hashes| hashes.get(path.to_string_lossy().as_ref()))
+                    .and_then(Value::as_str)
+                    .is_some_and(|expected| {
+                        fs::read_to_string(path)
+                            .is_ok_and(|content| sha256_str(&content) == expected)
+                    })
+        })
+    })
+}
+
+pub(crate) fn scheduler_files_installed(state: &Value) -> bool {
+    state
+        .get("installedFiles")
+        .and_then(Value::as_array)
+        .is_some_and(|files| !files.is_empty())
+}
+
+fn mutate_host_scheduler(
+    platform: &str,
+    target_dir: &Path,
+    enabled: bool,
+) -> Result<bool, CompanionError> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(false);
+    };
+    let expected = if platform == "launchd" {
+        home.join("Library/LaunchAgents")
+    } else {
+        home.join(".config/systemd/user")
+    };
+    let target = std::path::absolute(target_dir).map_err(|source| CompanionError::Read {
+        path: target_dir.to_path_buf(),
+        source,
+    })?;
+    if target != expected {
+        return Ok(false);
+    }
+    if platform == "launchd" {
+        for name in [
+            "email.trevors.drag-tracking.plist",
+            "email.trevors.drag-tracking.catch-up.plist",
+        ] {
+            let mut command = ProcessCommand::new("launchctl");
+            command.arg(if enabled { "load" } else { "unload" });
+            if enabled {
+                command.arg("-w");
+            }
+            run_scheduler_command(command.arg(target.join(name)))?;
+        }
+    } else {
+        let mut reload = ProcessCommand::new("systemctl");
+        reload.args(["--user", "daemon-reload"]);
+        run_scheduler_command(&mut reload)?;
+        let mut command = ProcessCommand::new("systemctl");
+        command.args(if enabled {
+            ["--user", "enable", "--now"]
+        } else {
+            ["--user", "disable", "--now"]
+        });
+        command.args(["drag-tracking.timer", "drag-tracking-catch-up.service"]);
+        run_scheduler_command(&mut command)?;
+    }
+    Ok(true)
+}
+
+fn run_scheduler_command(command: &mut ProcessCommand) -> Result<(), CompanionError> {
+    let output = command.output().map_err(|source| {
+        CompanionError::Proposal(format!("could not invoke host scheduler: {source}"))
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(CompanionError::Proposal(format!(
+            "host scheduler rejected activation: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
 pub(crate) fn scheduler_catch_up(
@@ -481,42 +610,8 @@ pub(crate) fn is_owned_scheduler_file(path: &Path) -> Result<bool, CompanionErro
         path: path.to_path_buf(),
         source,
     })?;
-    let marker = content.lines().next().unwrap_or_default();
-    Ok(matches!(
-        marker,
-        "# managed-by=drag-tracking"
-            | "# managed-by=drag-companion"
-            | "<!-- managed-by=drag-tracking timezone=local -->"
-            | "<!-- managed-by=drag-companion timezone=local -->"
-    ))
-}
-
-pub(crate) fn scheduler_files_healthy(state: &Value) -> bool {
-    let Some(files) = state.get("installedFiles").and_then(Value::as_array) else {
-        return true;
-    };
-    let hashes = state.get("installedFileHashes").and_then(Value::as_object);
-    files.iter().all(|file| {
-        file.as_str().is_some_and(|path| {
-            let path = Path::new(path);
-            if !path.exists() || !is_owned_scheduler_file(path).unwrap_or(false) {
-                return false;
-            }
-            hashes
-                .and_then(|hashes| hashes.get(path.to_string_lossy().as_ref()))
-                .and_then(Value::as_str)
-                .is_some_and(|expected| {
-                    fs::read_to_string(path).is_ok_and(|content| sha256_str(&content) == expected)
-                })
-        })
-    })
-}
-
-pub(crate) fn scheduler_files_installed(state: &Value) -> bool {
-    state
-        .get("installedFiles")
-        .and_then(Value::as_array)
-        .is_some_and(|files| !files.is_empty())
+    Ok(content.contains("managed-by=drag-tracking")
+        || content.contains("managed-by=drag-companion"))
 }
 
 pub(crate) fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {

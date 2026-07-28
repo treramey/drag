@@ -2,7 +2,7 @@ use crate::*;
 
 pub(crate) const SOURCE_TEST_SOURCE_LIMIT: usize = 64;
 pub(crate) const SOURCE_TEST_OBSERVATION_LIMIT: usize = 200;
-const MAX_SOURCE_SETTINGS_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_SOURCE_SETTINGS_BYTES: u64 = 1024 * 1024;
 
 pub(crate) fn source_statuses(config: &TrackingConfig) -> Vec<Value> {
     config.sources.iter().map(source_status).collect()
@@ -122,7 +122,7 @@ fn inspect_source(source: &TrackingSource, date: Option<NaiveDate>) -> SourceIns
                 return unhealthy("configured Git source is not a directory");
             }
             if date.is_some() {
-                match scan_git_repo(&source.path) {
+                match scan_git_repo_for_date(&source.path, date) {
                     Ok(observations) => {
                         let count = observations.len();
                         healthy(
@@ -199,13 +199,32 @@ fn inspect_source(source: &TrackingSource, date: Option<NaiveDate>) -> SourceIns
 }
 
 fn source_reference(source: &TrackingSource) -> String {
-    let identity = format!(
-        "{}\0{}",
-        source.kind.as_str(),
-        source.path.to_string_lossy()
-    );
-    format!(
-        "local-source:sha256:{:x}",
-        Sha256::digest(identity.as_bytes())
-    )
+    let canonical = source
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| source.path.clone());
+    let mut digest = Sha256::new();
+    digest.update(source.kind.as_str().as_bytes());
+    digest.update([0]);
+    update_path_digest(&mut digest, &canonical);
+    format!("local-source:sha256:{:x}", digest.finalize())
+}
+
+#[cfg(unix)]
+fn update_path_digest(digest: &mut Sha256, path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    digest.update(path.as_os_str().as_bytes());
+}
+
+#[cfg(windows)]
+fn update_path_digest(digest: &mut Sha256, path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    for unit in path.as_os_str().encode_wide() {
+        digest.update(unit.to_le_bytes());
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn update_path_digest(digest: &mut Sha256, path: &Path) {
+    digest.update(path.to_string_lossy().as_bytes());
 }

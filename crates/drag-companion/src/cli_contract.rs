@@ -126,8 +126,8 @@ pub(crate) enum SubmissionMode {
 
 #[derive(Debug, Args)]
 pub(crate) struct PublicSetupArgs {
-    #[arg(long, value_enum, default_value_t = SubmissionMode::Draft)]
-    pub(crate) mode: SubmissionMode,
+    #[arg(long, value_enum)]
+    pub(crate) mode: Option<SubmissionMode>,
     /// Separately authorize automatic worklog submission.
     #[arg(long)]
     pub(crate) authorize_automatic: bool,
@@ -139,14 +139,17 @@ pub(crate) struct PublicSetupArgs {
     pub(crate) install_hooks: bool,
     #[arg(long, value_name = "DIR", requires = "install_scheduler")]
     pub(crate) scheduler_target: Option<PathBuf>,
-    #[arg(long, default_value = DEFAULT_SCHEDULE_TIME)]
-    pub(crate) at: String,
-    #[arg(long, default_value = DEFAULT_SCHEDULE_TIMEZONE)]
-    pub(crate) schedule_timezone: String,
+    #[arg(long)]
+    pub(crate) at: Option<String>,
+    #[arg(long)]
+    pub(crate) schedule_timezone: Option<String>,
     #[arg(long = "repo", value_name = "DIR")]
     pub(crate) repos: Vec<PathBuf>,
     #[arg(long = "ics", value_name = "FILE")]
     pub(crate) ics_files: Vec<PathBuf>,
+    /// Offline schema-constrained proposal provider used by complete public runs.
+    #[arg(long, value_name = "FILE")]
+    pub(crate) provider_fixture: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]

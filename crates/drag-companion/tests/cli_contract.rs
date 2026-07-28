@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tempfile::tempdir;
 
 fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::error::Error>> {
@@ -272,7 +272,8 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
             .arg("status"),
     )?;
     assert_eq!(status["submission"]["mode"], "review");
-    assert_eq!(status["scheduler"]["active"], true);
+    assert_eq!(status["scheduler"]["active"], false);
+    assert_eq!(setup["scheduler"]["activationRequired"], true);
     assert_eq!(status["sources"][0]["health"], "healthy");
     std::fs::remove_file(&installed_files[0])?;
     let unhealthy = json_output(
@@ -286,16 +287,6 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
         .ok_or("pending action")?
         .contains("repair"));
 
-    let scheduler_state_path = data_dir.join("scheduler.json");
-    let mut scheduler_state: Value =
-        serde_json::from_str(&std::fs::read_to_string(&scheduler_state_path)?)?;
-    scheduler_state["successfulOperationKeys"] = serde_json::json!(["scheduler.run.2026-07-24"]);
-    scheduler_state["lastSuccessfulDate"] = serde_json::json!("2026-07-24");
-    std::fs::write(
-        &scheduler_state_path,
-        serde_json::to_vec_pretty(&scheduler_state)?,
-    )?;
-
     let uninstalled = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -304,280 +295,102 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     assert_eq!(uninstalled["historyPreserved"], true);
     assert!(installed_files.iter().all(|path| !path.exists()));
     assert!(data_dir.join("companion.sqlite3").exists());
-    let preserved: Value = serde_json::from_str(&std::fs::read_to_string(&scheduler_state_path)?)?;
-    assert_eq!(preserved["lastSuccessfulDate"], "2026-07-24");
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn interrupted_setup_records_scheduler_ownership_for_safe_cleanup(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let data = directory.path().join("state");
+    let scheduler = directory.path().join("scheduler");
+    let settings = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings.parent().ok_or("settings parent")?)?;
+    std::fs::write(&settings, "[]")?;
+    tracking()?
+        .env("HOME", &home)
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args([
+            "setup",
+            "--install-scheduler",
+            "--scheduler-target",
+            scheduler.to_string_lossy().as_ref(),
+            "--install-hooks",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("settings must be a JSON object"));
+    let config: Value = serde_json::from_str(&std::fs::read_to_string(data.join("config.json"))?)?;
+    assert_eq!(config["installed"], false);
     assert_eq!(
-        preserved["successfulOperationKeys"][0],
-        "scheduler.run.2026-07-24"
+        config["schedulerTarget"],
+        scheduler.to_string_lossy().as_ref()
     );
-    let repeated_uninstall = json_output(
+    #[cfg(target_os = "macos")]
+    let scheduler_file = scheduler.join("email.trevors.drag-tracking.plist");
+    #[cfg(not(target_os = "macos"))]
+    let scheduler_file = scheduler.join("drag-tracking.timer");
+    assert!(scheduler_file.exists());
+    let removed = json_output(
         tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .env("HOME", &home)
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
             .arg("uninstall"),
     )?;
-    assert_eq!(repeated_uninstall["status"], "uninstalled");
-    tracking()?
-        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-        .args(["run", "2026-07-25"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("not configured"));
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempdir()?;
-    let data_dir = directory.path().join("state");
-    let scheduler_dir = directory.path().canonicalize()?.join("scheduler");
-    let repo = directory.path().join("repo");
-    std::fs::create_dir_all(&repo)?;
-    isolated_git(&repo).args(["init", "-q"]).status()?;
-
-    json_output(
-        tracking()?
-            .current_dir(directory.path())
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args([
-                "setup",
-                "--repo",
-                repo.to_string_lossy().as_ref(),
-                "--install-scheduler",
-                "--scheduler-target",
-                "scheduler",
-            ]),
-    )?;
-
-    let persisted_config: Value =
-        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
-    assert_eq!(
-        persisted_config["schedulerTarget"],
-        scheduler_dir.to_string_lossy().as_ref()
-    );
-
-    let shown = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "show"]),
-    )?;
-    assert_eq!(shown["schedule"]["at"], "18:45");
-    assert_eq!(shown["schedule"]["timezone"], "local");
-    assert_eq!(shown["active"], true);
-    assert_eq!(shown["health"]["healthy"], true);
-    assert!(shown["nextRun"].is_string());
-
-    let scheduler_state_path = data_dir.join("scheduler.json");
-    let mut legacy_state: Value =
-        serde_json::from_str(&std::fs::read_to_string(&scheduler_state_path)?)?;
-    legacy_state
-        .as_object_mut()
-        .ok_or("scheduler state object")?
-        .remove("installedFileHashes");
-    std::fs::write(
-        &scheduler_state_path,
-        serde_json::to_vec_pretty(&legacy_state)?,
-    )?;
-    let unknown_integrity = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "show"]),
-    )?;
-    assert_eq!(unknown_integrity["health"]["healthy"], false);
-
-    let updated = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args([
-                "schedule",
-                "update",
-                "--at",
-                "17:30",
-                "--schedule-timezone",
-                "local",
-            ]),
-    )?;
-    assert_eq!(updated["schedule"]["at"], "17:30");
-    assert_eq!(updated["active"], true);
-    assert_eq!(updated["health"]["healthy"], true);
-    assert!(updated["nextRun"]
-        .as_str()
-        .is_some_and(|value| value.contains("17:30 local")));
-
-    let nested_pause = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "pause"]),
-    )?;
-    assert_eq!(nested_pause["status"], "paused");
-
-    let repeated_setup = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args([
-                "setup",
-                "--repo",
-                repo.to_string_lossy().as_ref(),
-                "--at",
-                "16:15",
-            ]),
-    )?;
-    assert_eq!(repeated_setup["active"], false);
-    assert_eq!(repeated_setup["schedule"]["at"], "16:15");
-    let repeated_config: Value =
-        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
-    assert_eq!(
-        repeated_config["schedulerTarget"],
-        scheduler_dir.to_string_lossy().as_ref()
-    );
-
-    std::fs::remove_dir_all(&repo)?;
-    tracking()?
-        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-        .arg("resume")
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            "Git source is invalid or unavailable",
-        ));
-    let paused = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "show"]),
-    )?;
-    assert_eq!(paused["active"], false);
-    assert_eq!(paused["nextRun"], Value::Null);
-
-    std::fs::create_dir_all(&repo)?;
-    isolated_git(&repo).args(["init", "-q"]).status()?;
-    let scheduler_state: Value =
-        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
-    let installed_file = scheduler_state["installedFiles"][0]
-        .as_str()
-        .ok_or("installed scheduler file")?;
-    let original = std::fs::read_to_string(installed_file)?;
-    std::fs::write(installed_file, format!("{original}\n# modified\n"))?;
-    tracking()?
-        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-        .args(["schedule", "resume"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("installed and healthy"));
-    json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "update", "--at", "17:30"]),
-    )?;
-    let nested_resume = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "resume"]),
-    )?;
-    assert_eq!(nested_resume["status"], "active");
-
-    let top_level_pause = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .arg("pause"),
-    )?;
-    assert_eq!(top_level_pause["status"], "paused");
-    Ok(())
-}
-
-#[cfg(not(target_os = "windows"))]
-#[test]
-fn schedule_inspection_and_repair_do_not_open_the_run_store(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = tempdir()?;
-    let data_dir = directory.path().join("state");
-    let scheduler_dir = directory.path().join("scheduler");
-    json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args([
-                "setup",
-                "--install-scheduler",
-                "--scheduler-target",
-                scheduler_dir.to_string_lossy().as_ref(),
-            ]),
-    )?;
-    std::fs::write(data_dir.join("companion.sqlite3"), "not a sqlite database")?;
-
-    let shown = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "show"]),
-    )?;
-    assert_eq!(shown["health"]["healthy"], true);
-    let updated = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["schedule", "update", "--at", "17:30"]),
-    )?;
-    assert_eq!(updated["schedule"]["at"], "17:30");
+    assert_eq!(removed["status"], "uninstalled");
+    assert!(!scheduler_file.exists());
+    assert_eq!(std::fs::read_to_string(settings)?, "[]");
     Ok(())
 }
 
 #[test]
-fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
+fn public_setup_rejects_invalid_source_configuration_before_persisting(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let directory_path = directory.path().canonicalize()?;
     let data_dir = directory.path().join("state");
     std::fs::create_dir(directory.path().join("not-a-repo"))?;
-    isolated_git(&directory.path().join("not-a-repo"))
-        .args(["init", "-q"])
-        .status()?;
-    std::fs::write(
-        directory.path().join("broken.ics"),
-        "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n",
-    )?;
-    let setup = json_output(
-        tracking()?
-            .current_dir(directory.path())
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["setup", "--repo", "not-a-repo", "--ics", "broken.ics"]),
-    )?;
-    let setup_output = serde_json::to_string(&setup)?;
-    assert!(!setup_output.contains("not-a-repo"));
-    assert!(!setup_output.contains("broken.ics"));
-    let persisted: Value =
-        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
-    let configured_repo = PathBuf::from(
-        persisted["sources"][0]["path"]
-            .as_str()
-            .ok_or("configured repository path")?,
-    );
-    let configured_calendar = PathBuf::from(
-        persisted["sources"][1]["path"]
-            .as_str()
-            .ok_or("configured calendar path")?,
-    );
-    assert!(configured_repo.is_absolute());
-    assert!(configured_calendar.is_absolute());
-    assert_eq!(
-        configured_repo.canonicalize()?,
-        directory_path.join("not-a-repo").canonicalize()?
-    );
-    assert_eq!(
-        configured_calendar.canonicalize()?,
-        directory_path.join("broken.ics").canonicalize()?
-    );
-
-    std::fs::remove_dir_all(directory.path().join("not-a-repo").join(".git"))?;
     std::fs::write(directory.path().join("broken.ics"), "BEGIN:VEVENT\n")?;
+    tracking()?
+        .current_dir(directory.path())
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["setup", "--repo", "not-a-repo", "--ics", "broken.ics"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Git source is invalid"));
+    assert!(!data_dir.join("config.json").exists());
+    assert!(directory_path.join("not-a-repo").exists());
+    Ok(())
+}
 
-    let tested = json_output(
-        tracking()?
-            .current_dir(directory.path().join("not-a-repo"))
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["sources", "test", "2026-07-24"]),
-    )?;
-    assert_eq!(tested["sources"][0]["health"], "unhealthy");
-    assert_eq!(tested["sources"][1]["health"], "unhealthy");
-    assert!(tested["sources"][0]["reason"].is_string());
-    assert!(tested["sources"][1]["reason"].is_string());
+#[cfg(unix)]
+#[test]
+fn source_identity_rejects_symlink_aliases_of_the_same_repository(
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempdir()?;
+    let data = directory.path().join("state");
+    let repo = directory.path().join("repo");
+    let alias = directory.path().join("repo-alias");
+    std::fs::create_dir(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    symlink(&repo, &alias)?;
+    tracking()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args([
+            "setup",
+            "--repo",
+            repo.to_string_lossy().as_ref(),
+            "--repo",
+            alias.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("duplicate selection"));
+    assert!(!data.join("config.json").exists());
     Ok(())
 }
 
@@ -676,6 +489,80 @@ fn sources_configure_and_list_report_versioned_redacted_health(
         .as_str()
         .is_some_and(|value| value.contains("invalid RFC 5545")));
     assert!(!serde_json::to_string(&invalid)?.contains("private@example.test"));
+    Ok(())
+}
+
+#[test]
+fn setup_reruns_preserve_omitted_sources_and_uninstall_disables_public_runs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert_eq!(persisted["sources"].as_array().map(Vec::len), Some(1));
+    assert_eq!(persisted["submission"]["mode"], "review");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("uninstall"),
+    )?;
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["run", "2026-03-08"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("uninstalled"));
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert_eq!(persisted["submission"]["mode"], "draft");
+    assert_eq!(
+        persisted["submission"]["automaticSubmissionAuthorized"],
+        false
+    );
+    Ok(())
+}
+
+#[test]
+fn collection_rechecks_calendar_size_after_configuration() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let calendar = directory.path().join("calendar.ics");
+    std::fs::write(&calendar, "BEGIN:VCALENDAR\nEND:VCALENDAR\n")?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--ics", calendar.to_string_lossy().as_ref()]),
+    )?;
+    std::fs::write(
+        &calendar,
+        format!(
+            "BEGIN:VCALENDAR\n{}\nEND:VCALENDAR\n",
+            "x".repeat(1024 * 1024)
+        ),
+    )?;
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"]),
+    )?;
+    assert_eq!(run["status"], "source-failed");
+    assert!(run["collectionFailures"][0]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("1 MiB")));
     Ok(())
 }
 
@@ -929,19 +816,20 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
         scheduler_state["operationKeys"],
         serde_json::json!(["keep-this-operation-key"])
     );
-    let resumed = json_output(
-        tracking()?
-            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .arg("resume"),
-    )?;
-    assert_eq!(resumed["status"], "active");
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .arg("resume")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "host scheduler activation was not completed",
+        ));
 
-    let scheduled = json_output(
+    let run = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["internal", "scheduler", "run", "--date", "2026-07-24"]),
+            .args(["run", "2026-07-24"]),
     )?;
-    let run = &scheduled["result"];
     assert_eq!(run["selectedDate"], "2026-07-24");
     assert_eq!(run["status"], "completed");
     assert_eq!(run["networkAccess"], false);
@@ -977,6 +865,73 @@ fn public_automatic_run_surfaces_runtime_submission_gates() -> Result<(), Box<dy
         .as_str()
         .ok_or("next safe action")?
         .contains("runtime gates"));
+    Ok(())
+}
+
+#[test]
+fn public_run_generates_proposals_from_the_configured_provider_stage(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&directory, "public.json", valid_provider_response())?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--provider-fixture",
+                fixture.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    let drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-03-08",
+            "worklogs": []
+        })],
+    )?;
+    let run = json_output(
+        tracking()?
+            .env(
+                "DRAG_TRACKING_TEMPO_WORK_ATTRIBUTES",
+                r#"{"_Account_":"RD"}"#,
+            )
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"]),
+    )?;
+    assert_eq!(run["proposals"], 1);
+    assert_eq!(run["submitted"], 0);
+    assert_eq!(run["liveMutationAllowed"], false);
+    Ok(())
+}
+
+#[test]
+fn public_run_gates_audit_when_an_enabled_source_fails() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+    std::fs::remove_dir_all(&repo)?;
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"]),
+    )?;
+    assert_eq!(run["status"], "source-failed");
+    assert!(run["collectionFailures"]
+        .as_array()
+        .is_some_and(|items| items.len() == 1));
+    assert_eq!(run["networkAccess"], false);
+    assert_eq!(run["submitted"], 0);
     Ok(())
 }
 
@@ -1717,6 +1672,65 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
         .stderr(predicate::str::contains(
             "launchd calendar intervals use the system timezone",
         ));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn public_scheduler_setup_and_resume_mutate_the_real_user_scheduler_boundary(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let bin = directory.path().join("bin");
+    let data = directory.path().join("state");
+    let target = home.join(".config/systemd/user");
+    std::fs::create_dir_all(&bin)?;
+    let systemctl = bash_executable(
+        &directory,
+        "systemctl",
+        &format!(
+            "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" >> '{}'\n",
+            directory.path().join("systemctl.log").display()
+        ),
+    )?;
+    std::fs::rename(systemctl, bin.join("systemctl"))?;
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let setup = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--install-scheduler",
+                "--scheduler-target",
+                target.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    assert_eq!(setup["active"], true);
+    assert_eq!(setup["scheduler"]["hostSchedulerMutated"], true);
+    json_output(
+        tracking()?
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .arg("pause"),
+    )?;
+    let resumed = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .env("PATH", &path)
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .arg("resume"),
+    )?;
+    assert_eq!(resumed["status"], "active");
+    let commands = std::fs::read_to_string(directory.path().join("systemctl.log"))?;
+    assert!(commands.contains("enable --now drag-tracking.timer"));
+    assert!(commands.contains("disable --now drag-tracking.timer"));
     Ok(())
 }
 
@@ -2757,6 +2771,21 @@ fn collect_git_activity_covers_shallow_rewritten_and_unusual_subject_fixtures(
         .ok_or("subject")?
         .contains("café"));
     assert!(!commit["branch"].as_str().ok_or("branch")?.is_empty());
+    let outside_date = json_output(
+        companion()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "collect",
+                "--repo",
+                shallow.to_string_lossy().as_ref(),
+                "--date",
+                "2026-07-24",
+            ]),
+    )?;
+    assert_eq!(
+        outside_date["git"]["commits"].as_array().map(Vec::len),
+        Some(0)
+    );
     Ok(())
 }
 

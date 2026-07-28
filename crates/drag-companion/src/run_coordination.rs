@@ -9,10 +9,10 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
     let output = cli.output;
     let _state_lock = match &cli.command {
         Command::Contract => None,
-        Command::Purge(_) | Command::Rollout(_) | Command::Internal(_) => {
-            Some(acquire_companion_state_lock(&data_dir, true)?)
-        }
-        _ => Some(acquire_companion_state_lock(&data_dir, false)?),
+        command => Some(acquire_companion_state_lock(
+            &data_dir,
+            command_requires_exclusive_lock(command),
+        )?),
     };
 
     match cli.command {
@@ -121,6 +121,28 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
             }
         },
         Command::Contract => unreachable!("contract commands return before state resolution"),
+    }
+}
+
+fn command_requires_exclusive_lock(command: &Command) -> bool {
+    match command {
+        Command::Setup(_)
+        | Command::Run(_)
+        | Command::Pause
+        | Command::ResumeTracking
+        | Command::Uninstall
+        | Command::Purge(_)
+        | Command::Rollout(_)
+        | Command::Internal(_) => true,
+        Command::Sources(args) => !matches!(
+            &args.operation,
+            PublicSourcesOperation::List | PublicSourcesOperation::Test(_)
+        ),
+        Command::Schedule(args) => !matches!(&args.operation, PublicScheduleOperation::Show),
+        Command::Review(args) => {
+            args.approve || matches!(&args.operation, Some(PublicReviewOperation::Approve(_)))
+        }
+        _ => false,
     }
 }
 
