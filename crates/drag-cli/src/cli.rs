@@ -128,9 +128,9 @@ pub enum TrackingCommand {
 
 #[derive(Debug, Args)]
 pub struct TrackingSetupArgs {
-    /// Submission policy: draft, review, or automatic.
-    #[arg(long, value_enum, default_value_t = TrackingSubmissionMode::Draft)]
-    pub mode: TrackingSubmissionMode,
+    /// Submission policy: draft, review, or automatic. Defaults to draft in unattended setup.
+    #[arg(long, value_enum)]
+    pub mode: Option<TrackingSubmissionMode>,
     /// Explicitly authorize automatic worklog submission.
     #[arg(long)]
     pub authorize_automatic: bool,
@@ -143,12 +143,12 @@ pub struct TrackingSetupArgs {
     /// Scheduler unit or launch-agent directory.
     #[arg(long, value_name = "DIR", requires = "install_scheduler")]
     pub scheduler_target: Option<PathBuf>,
-    /// Local weekday run time in HH:MM.
-    #[arg(long, default_value = "18:45")]
-    pub at: String,
-    /// IANA timezone or `local`.
-    #[arg(long, default_value = "local")]
-    pub schedule_timezone: String,
+    /// Local weekday run time in HH:MM. Defaults to 18:45 in unattended setup.
+    #[arg(long)]
+    pub at: Option<String>,
+    /// IANA timezone or `local`. Defaults to local in unattended setup.
+    #[arg(long)]
+    pub schedule_timezone: Option<String>,
     /// Local Git repository to observe. Repeat for multiple repositories.
     #[arg(long = "repo", value_name = "DIR")]
     pub repos: Vec<PathBuf>,

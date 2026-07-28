@@ -7,6 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Optional automatic-tracking onboarding after successful interactive Jira and
+  Tempo setup, shared with terminal `drag tracking setup`, with local source
+  validation and independent hook, scheduler, and submission authorization.
 - Validated, independently selected Git, calendar, and Claude Code evidence
   sources with versioned health reports and bounded, redacted, non-mutating
   source tests. Complete runs now date-bound Git evidence, enforce collector

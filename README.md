@@ -80,6 +80,13 @@ Automatic tracking is a Drag capability backed by a separately packaged,
 versioned `drag-tracking` process. Configure approved local sources, a weekday
 schedule, and a submission policy, then inspect or run it through Drag:
 
+Interactive `drag setup` offers this tracking wizard only after Jira and Tempo
+have both connected. Declining or cancelling applies no tracking choices. The
+same wizard opens from `drag tracking setup` in a terminal and explains local
+evidence access, network use, scheduler and hook installation, and the separate
+permission required for automatic worklog submission. Non-terminal setup keeps
+the existing flag-driven behavior.
+
 ```bash
 drag tracking setup --mode draft
 # Configure the offline proposal adapter when collected evidence should become proposals:

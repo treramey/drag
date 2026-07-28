@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 12;
+const SCHEMA_VERSION: u64 = 13;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -1139,7 +1139,7 @@ fn setup_success_schema() -> Value {
         "oneOf": [
             {
                 "type": "object",
-                "required": ["configured", "path", "source", "verification"],
+                "required": ["configured", "path", "source", "verification", "automaticTracking"],
                 "properties": {
                     "configured": {"const": true},
                     "path": {"type": "string"},
@@ -1149,7 +1149,8 @@ fn setup_success_schema() -> Value {
                         "required": ["jira", "tempo"],
                         "properties": {"jira": {"const": "connected"}, "tempo": {"const": "connected"}},
                         "additionalProperties": false
-                    }
+                    },
+                    "automaticTracking": unattended_tracking_schema()
                 },
                 "additionalProperties": false
             },
@@ -1170,21 +1171,47 @@ fn setup_success_schema() -> Value {
                         "additionalProperties": false
                     },
                     "automaticTracking": {
-                        "type": "object",
-                        "required": ["configured", "optional", "nextCommand"],
-                        "properties": {
-                            "configured": {"const": false},
-                            "optional": {"const": true},
-                            "nextCommand": {"const": "drag tracking setup"}
-                        },
-                        "additionalProperties": false
+                        "oneOf": [
+                            object_schema(
+                                &["offered", "status", "configured", "nextCommand"],
+                                json!({
+                                    "offered": {"const": true},
+                                    "status": {"enum": ["declined", "cancelled"]},
+                                    "configured": {"const": false},
+                                    "nextCommand": {"const": "drag tracking setup"}
+                                })
+                            ),
+                            object_schema(
+                                &["offered", "status", "configured", "result", "followUpCommands"],
+                                json!({
+                                    "offered": {"const": true},
+                                    "status": {"const": "configured"},
+                                    "configured": {"const": true},
+                                    "result": {"type": "object"},
+                                    "followUpCommands": {"type": "array", "items": {"type": "string"}}
+                                })
+                            ),
+                            object_schema(
+                                &["offered", "status", "configured", "error", "nextCommand"],
+                                json!({
+                                    "offered": {"const": true},
+                                    "status": {"const": "failed"},
+                                    "configured": {"const": false},
+                                    "error": object_schema(
+                                        &["code", "message"],
+                                        json!({"code": {"type": "string"}, "message": {"type": "string"}})
+                                    ),
+                                    "nextCommand": {"const": "drag tracking setup"}
+                                })
+                            )
+                        ]
                     }
                 },
                 "additionalProperties": false
             },
             {
                 "type": "object",
-                "required": ["configured", "dryRun", "path", "source", "localValidation", "remoteVerification", "configuration"],
+                "required": ["configured", "dryRun", "path", "source", "localValidation", "remoteVerification", "configuration", "automaticTracking"],
                 "properties": {
                     "configured": {"const": false},
                     "dryRun": {"const": true},
@@ -1197,12 +1224,24 @@ fn setup_success_schema() -> Value {
                             object_schema(&["status", "jira", "tempo"], json!({"status": {"const": "completed"}, "jira": {"const": "connected"}, "tempo": {"const": "connected"}}))
                         ]
                     },
-                    "configuration": object_schema(&["status", "credentials"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}}))
+                    "configuration": object_schema(&["status", "credentials"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}})),
+                    "automaticTracking": unattended_tracking_schema()
                 },
                 "additionalProperties": false
             }
         ]
     })
+}
+
+fn unattended_tracking_schema() -> Value {
+    object_schema(
+        &["status", "effects", "nextCommand"],
+        json!({
+            "status": {"const": "notRequested"},
+            "effects": {"const": false},
+            "nextCommand": {"const": "drag tracking setup"}
+        }),
+    )
 }
 
 fn tracking_success_schema() -> Value {

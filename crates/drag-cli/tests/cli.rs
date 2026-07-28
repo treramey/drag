@@ -311,6 +311,31 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
 
 #[cfg(unix)]
 #[test]
+fn non_terminal_tracking_setup_remains_unattended_and_delegates_without_prompting(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(
+        &directory,
+        Some(
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf '%s' \"$*\"\n",
+        ),
+    )?;
+    let output = std::process::Command::new(&drag)
+        .args(["--output", "json", "tracking", "setup"])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!("--output json --drag-bin {} setup", drag.display())
+    );
+    assert!(output.stderr.is_empty());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn tracking_delegation_reports_missing_and_incompatible_processes(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let missing_directory = TempDir::new()?;
@@ -1187,7 +1212,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 12);
+    assert_eq!(contract["schemaVersion"], 13);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -2164,6 +2189,8 @@ fn headless_setup_dry_run_emits_a_secret_free_local_plan_without_writing(
     assert_eq!(body["data"]["localValidation"]["status"], "passed");
     assert_eq!(body["data"]["remoteVerification"]["status"], "planned");
     assert_eq!(body["data"]["configuration"]["status"], "planned");
+    assert_eq!(body["data"]["automaticTracking"]["status"], "notRequested");
+    assert_eq!(body["data"]["automaticTracking"]["effects"], false);
     assert_eq!(fs::read(&path)?, original);
     let all_output = format!(
         "{}{}",

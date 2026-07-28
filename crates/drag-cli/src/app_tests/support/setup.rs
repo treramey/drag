@@ -58,6 +58,8 @@ fn pty_first_run_hides_tokens_and_emits_json_success() -> Result<(), Box<dyn std
     assert!(!String::from_utf8_lossy(tempo_output.before()).contains("pty-tempo-secret"));
     session.send("\r")?;
     expect_terminal_restoration(&mut session)?;
+    session.expect("Set up automatic tracking now?")?;
+    session.send("n\r")?;
     session.expect(Eof)?;
 
     let body = read_pty_json_output(&path)?;
@@ -100,6 +102,8 @@ fn pty_authentication_retries_reuse_latest_jira_values_and_retry_only_tempo_toke
     session.expect("Save configuration")?;
     session.send("\r")?;
     expect_terminal_restoration(&mut session)?;
+    session.expect("Set up automatic tracking now?")?;
+    session.send("n\r")?;
     session.expect(Eof)?;
 
     let saved = Config::load(&path)?;
@@ -131,6 +135,8 @@ fn pty_reconfiguration_offers_defaults_and_retains_tokens() -> Result<(), Box<dy
     session.expect("Save configuration")?;
     session.send("\r")?;
     expect_terminal_restoration(&mut session)?;
+    session.expect("Set up automatic tracking now?")?;
+    session.send("n\r")?;
     session.expect(Eof)?;
 
     let saved = Config::load(&path)?;
@@ -292,6 +298,230 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
             .as_slice(),
         ["jira-browser:false", "tempo-browser:false", "save"]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn interactive_setup_decline_has_no_tracking_effects_after_connections_succeed(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let installer = Arc::new(FakeTrackingSetupInstaller::default());
+    let app = App::with_onboarding_session(
+        path.clone(),
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+            config_update: None,
+        },
+        ScriptedOnboardingSession {
+            events: Arc::new(Mutex::new(Vec::new())),
+        },
+    )
+    .with_tracking_setup(
+        FakeTrackingOnboardingSession {
+            outcome: TrackingOnboardingOutcome::Declined,
+        },
+        Arc::clone(&installer),
+    );
+
+    let result = app
+        .setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+            dry_run: false,
+            verify: false,
+        })
+        .await?;
+
+    assert!(path.exists());
+    assert_eq!(result.data["automaticTracking"]["status"], "declined");
+    assert!(installer
+        .plans
+        .lock()
+        .map_err(|_| "test tracking plan lock was poisoned")?
+        .is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn interactive_setup_applies_each_tracking_authorization_and_reports_completion(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let installer = Arc::new(FakeTrackingSetupInstaller::default());
+    let scheduler_target = directory.path().join("scheduler");
+    let plan = TrackingSetupPlan {
+        mode: crate::cli::TrackingSubmissionMode::Automatic,
+        authorize_automatic: true,
+        install_scheduler: true,
+        install_hooks: false,
+        scheduler_target: Some(scheduler_target.clone()),
+        at: "17:30".to_owned(),
+        schedule_timezone: "Europe/Warsaw".to_owned(),
+        repos: vec![directory.path().to_path_buf()],
+        ics_files: Vec::new(),
+    };
+    let app = App::with_onboarding_session(
+        path,
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+            config_update: None,
+        },
+        ScriptedOnboardingSession {
+            events: Arc::new(Mutex::new(Vec::new())),
+        },
+    )
+    .with_tracking_setup(
+        FakeTrackingOnboardingSession {
+            outcome: TrackingOnboardingOutcome::Configure(plan.clone()),
+        },
+        Arc::clone(&installer),
+    );
+
+    let result = app
+        .setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+            dry_run: false,
+            verify: false,
+        })
+        .await?;
+
+    assert_eq!(
+        installer
+            .plans
+            .lock()
+            .map_err(|_| "test tracking plan lock was poisoned")?
+            .as_slice(),
+        [plan]
+    );
+    let tracking = &result.data["automaticTracking"];
+    assert_eq!(tracking["status"], "configured");
+    assert_eq!(tracking["result"]["active"], false);
+    assert!(tracking["result"].get("nextRun").is_some());
+    assert_eq!(tracking["result"]["sources"][0]["health"], "healthy");
+    assert_eq!(tracking["result"]["submission"]["mode"], "automatic");
+    assert_eq!(
+        tracking["result"]["submission"]["effectiveMutationPermission"],
+        false
+    );
+    assert_eq!(
+        tracking["followUpCommands"].as_array().map(Vec::len),
+        Some(3)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelling_tracking_onboarding_preserves_connected_drag_without_tracking_effects(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let installer = Arc::new(FakeTrackingSetupInstaller::default());
+    let app = App::with_onboarding_session(
+        path.clone(),
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+            config_update: None,
+        },
+        ScriptedOnboardingSession {
+            events: Arc::new(Mutex::new(Vec::new())),
+        },
+    )
+    .with_tracking_setup(
+        FakeTrackingOnboardingSession {
+            outcome: TrackingOnboardingOutcome::Cancelled,
+        },
+        Arc::clone(&installer),
+    );
+
+    let result = app
+        .setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+            dry_run: false,
+            verify: false,
+        })
+        .await?;
+
+    assert!(path.exists());
+    assert_eq!(result.data["automaticTracking"]["status"], "cancelled");
+    assert!(installer
+        .plans
+        .lock()
+        .map_err(|_| "test tracking plan lock was poisoned")?
+        .is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn tracking_install_failure_preserves_successful_drag_setup_and_reports_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let path = directory.path().join("config.json");
+    let installer = FakeTrackingSetupInstaller {
+        plans: Mutex::new(Vec::new()),
+        failure: Some("scheduler directory is unavailable".to_owned()),
+    };
+    let plan = TrackingSetupPlan {
+        mode: crate::cli::TrackingSubmissionMode::Draft,
+        authorize_automatic: false,
+        install_scheduler: false,
+        install_hooks: false,
+        scheduler_target: None,
+        at: "18:45".to_owned(),
+        schedule_timezone: "local".to_owned(),
+        repos: Vec::new(),
+        ics_files: Vec::new(),
+    };
+    let app = App::with_onboarding_session(
+        path.clone(),
+        FakeVerifier {
+            jira_error: None,
+            tempo_error: None,
+            tempo_accounts: Arc::new(Mutex::new(Vec::new())),
+            config_update: None,
+        },
+        ScriptedOnboardingSession {
+            events: Arc::new(Mutex::new(Vec::new())),
+        },
+    )
+    .with_tracking_setup(
+        FakeTrackingOnboardingSession {
+            outcome: TrackingOnboardingOutcome::Configure(plan),
+        },
+        installer,
+    );
+
+    let result = app
+        .setup(SetupArgs {
+            from_env: false,
+            no_open: true,
+            dry_run: false,
+            verify: false,
+        })
+        .await?;
+
+    assert_eq!(result.data["configured"], true);
+    assert_eq!(result.data["automaticTracking"]["status"], "failed");
+    assert_eq!(
+        result.data["automaticTracking"]["error"]["code"],
+        "tracking_unavailable"
+    );
+    assert!(result.data["automaticTracking"]["error"]["message"]
+        .as_str()
+        .is_some_and(|message| message.contains("scheduler directory is unavailable")));
+    assert_eq!(
+        result.data["automaticTracking"]["nextCommand"],
+        "drag tracking setup"
+    );
+    assert!(path.exists());
     Ok(())
 }
 

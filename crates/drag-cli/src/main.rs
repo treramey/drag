@@ -19,6 +19,7 @@ mod setup_tui;
 mod tempo_openapi;
 mod terminal;
 mod tracking;
+mod tracking_setup;
 mod transport;
 mod tui_theme;
 mod update;

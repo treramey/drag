@@ -256,6 +256,16 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     assert_eq!(setup["effects"]["schedulerInstalled"], true);
     assert_eq!(setup["effects"]["hooksInstalled"], false);
     assert_eq!(setup["effects"]["automaticSubmissionAuthorized"], false);
+    assert_eq!(setup["activity"]["state"], "paused");
+    assert!(setup.get("nextRun").is_some());
+    assert_eq!(
+        setup["followUpCommands"],
+        serde_json::json!([
+            "drag tracking status",
+            "drag tracking sources test",
+            "drag tracking schedule show"
+        ])
+    );
     let installed_files = setup["scheduler"]["installedFiles"]
         .as_array()
         .ok_or("installed scheduler files")?
@@ -911,7 +921,7 @@ fn public_run_persists_an_actionable_failure_and_resumes_after_an_incomplete_dra
     let complete_drag = bash_executable(
         &directory,
         "complete-drag",
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"2026-03-08\",\"total\":0,\"worklogs\":[]}}'\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":13}}'; exit 0; fi\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"2026-03-08\",\"total\":0,\"worklogs\":[]}}'\n",
     )?;
     let resumed = json_output(
         tracking()?
@@ -936,7 +946,7 @@ fn public_run_accepts_drag_relative_date_selectors() -> Result<(), Box<dyn std::
     let drag = bash_executable(
         &directory,
         "relative-date-drag",
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\ndate=\"${@: -1}\"\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"%s\",\"total\":0,\"worklogs\":[]}}' \"$date\"\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":13}}'; exit 0; fi\ndate=\"${@: -1}\"\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"%s\",\"total\":0,\"worklogs\":[]}}' \"$date\"\n",
     )?;
 
     let run = json_output(
@@ -2013,7 +2023,7 @@ fn configured_scheduler_runs_the_complete_workflow_with_only_an_explicit_iso_dat
     let drag = bash_executable(
         &directory,
         "scheduler-drag",
-        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\ndate=\"${@: -1}\"\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"%s\",\"total\":0,\"worklogs\":[]}}' \"$date\"\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":13}}'; exit 0; fi\ndate=\"${@: -1}\"\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"%s\",\"total\":0,\"worklogs\":[]}}' \"$date\"\n",
     )?;
 
     let scheduled = json_output(
@@ -2297,7 +2307,7 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
             .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
             .args(["scheduler", "status"]),
     )?;
-    assert_eq!(status["dragMachineContract"]["requiredVersion"], 12);
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 13);
     assert_eq!(status["dragMachineContract"]["compatible"], true);
     assert_eq!(status["package"]["name"], "drag-tracking");
     assert_eq!(status["package"]["independent"], true);
@@ -4046,7 +4056,7 @@ set -euo pipefail
 log="{}/commands.log"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":12,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":13,"name":"drag"}}}}'
   exit 0
 fi
 	if [[ "$*" == *" log "* ]]; then
@@ -4146,7 +4156,7 @@ log="{0}/commands.log"
 state="{0}/remote.jsonl"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":12,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":13,"name":"drag"}}}}'
   exit 0
 fi
 if [[ "$*" == *" list "* ]]; then
@@ -5160,7 +5170,7 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
     let drag = bash_executable(
         &dir,
         "bad-drag",
-        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":13}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
     )?;
     companion()?
         .args([

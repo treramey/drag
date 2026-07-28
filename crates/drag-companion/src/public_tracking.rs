@@ -116,6 +116,10 @@ pub(crate) fn setup_tracking(
         "status": "configured",
         "installed": config.installed,
         "active": config.active,
+        "activity": {
+            "active": config.active,
+            "state": if config.active { "scheduled" } else { "paused" }
+        },
         "privacy": {
             "evidenceAccess": "only explicitly configured local sources",
             "rawEvidenceRemainsLocal": true,
@@ -134,6 +138,12 @@ pub(crate) fn setup_tracking(
             "automaticSubmissionAuthorized": config.submission.automatic_submission_authorized
         },
         "scheduler": scheduler,
+        "nextRun": next_run_description(&config),
+        "followUpCommands": [
+            "drag tracking status",
+            "drag tracking sources test",
+            "drag tracking schedule show"
+        ],
         "networkAccess": false,
         "liveMutationAllowed": false,
         "nextSafeAction": if config.active {
