@@ -61,17 +61,17 @@ pub(crate) fn install_scheduler_files(
         ));
     }
     let mut state = scheduler_status(data_dir)?["state"].clone();
+    let target_dir = absolute_path(&args.target_dir)?;
     let installed = if args.platform == "launchd" {
         vec![
-            args.target_dir.join("email.trevors.drag-tracking.plist"),
-            args.target_dir
-                .join("email.trevors.drag-tracking.catch-up.plist"),
+            target_dir.join("email.trevors.drag-tracking.plist"),
+            target_dir.join("email.trevors.drag-tracking.catch-up.plist"),
         ]
     } else {
         vec![
-            args.target_dir.join("drag-tracking.service"),
-            args.target_dir.join("drag-tracking.timer"),
-            args.target_dir.join("drag-tracking-catch-up.service"),
+            target_dir.join("drag-tracking.service"),
+            target_dir.join("drag-tracking.timer"),
+            target_dir.join("drag-tracking-catch-up.service"),
         ]
     };
     preflight_scheduler_destinations(&installed)?;
@@ -117,18 +117,31 @@ pub(crate) fn install_scheduler_files(
             render_systemd_catch_up_service(&catch_up_command),
         ]
     };
-    fs::create_dir_all(&args.target_dir).map_err(|source| CompanionError::CreateDir {
-        path: args.target_dir.clone(),
+    fs::create_dir_all(&target_dir).map_err(|source| CompanionError::CreateDir {
+        path: target_dir.clone(),
         source,
     })?;
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
     })?;
-    remove_owned_legacy_scheduler_files(&args.target_dir)?;
+    remove_owned_legacy_scheduler_files(&target_dir)?;
     for (path, content) in installed.iter().zip(rendered) {
         write_owned_file(path, &content)?;
     }
+    let installed_file_hashes = installed
+        .iter()
+        .map(|path| {
+            let content = fs::read_to_string(path).map_err(|source| CompanionError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            Ok((
+                path.to_string_lossy().into_owned(),
+                Value::String(sha256_str(&content)),
+            ))
+        })
+        .collect::<Result<serde_json::Map<String, Value>, CompanionError>>()?;
     state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
     if state.get("enabled").is_none() {
         state["enabled"] = serde_json::json!(true);
@@ -140,10 +153,23 @@ pub(crate) fn install_scheduler_files(
     state["at"] = serde_json::json!(args.at);
     state["timezone"] = serde_json::json!(args.timezone);
     state["installedFiles"] = serde_json::json!(installed);
+    state["installedFileHashes"] = Value::Object(installed_file_hashes);
     write_scheduler_state(data_dir, state)?;
     Ok(
         serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
     )
+}
+
+pub(crate) fn absolute_path(path: &Path) -> Result<PathBuf, CompanionError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .map_err(|source| CompanionError::Read {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn preflight_scheduler_destinations(paths: &[PathBuf]) -> Result<(), CompanionError> {
@@ -223,15 +249,13 @@ pub(crate) fn uninstall_scheduler_files(
             removed.push(path);
         }
     }
-    write_scheduler_state(
-        data_dir,
-        serde_json::json!({
-            "schemaVersion": SCHEDULER_SCHEMA_VERSION,
-            "enabled": false,
-            "removedFiles": removed,
-            "operationKeys": scheduler_status(data_dir)?.get("state").and_then(|s| s.get("operationKeys")).cloned().unwrap_or_else(|| serde_json::json!([])),
-        }),
-    )?;
+    let mut state = scheduler_status(data_dir)?["state"].clone();
+    state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
+    state["enabled"] = Value::Bool(false);
+    state["installedFiles"] = serde_json::json!([]);
+    state["installedFileHashes"] = serde_json::json!({});
+    state["removedFiles"] = serde_json::json!(removed);
+    write_scheduler_state(data_dir, state)?;
     Ok(
         serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": false, "removedFiles": removed }),
     )
@@ -457,8 +481,42 @@ pub(crate) fn is_owned_scheduler_file(path: &Path) -> Result<bool, CompanionErro
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(content.contains("managed-by=drag-tracking")
-        || content.contains("managed-by=drag-companion"))
+    let marker = content.lines().next().unwrap_or_default();
+    Ok(matches!(
+        marker,
+        "# managed-by=drag-tracking"
+            | "# managed-by=drag-companion"
+            | "<!-- managed-by=drag-tracking timezone=local -->"
+            | "<!-- managed-by=drag-companion timezone=local -->"
+    ))
+}
+
+pub(crate) fn scheduler_files_healthy(state: &Value) -> bool {
+    let Some(files) = state.get("installedFiles").and_then(Value::as_array) else {
+        return true;
+    };
+    let hashes = state.get("installedFileHashes").and_then(Value::as_object);
+    files.iter().all(|file| {
+        file.as_str().is_some_and(|path| {
+            let path = Path::new(path);
+            if !path.exists() || !is_owned_scheduler_file(path).unwrap_or(false) {
+                return false;
+            }
+            hashes
+                .and_then(|hashes| hashes.get(path.to_string_lossy().as_ref()))
+                .and_then(Value::as_str)
+                .is_some_and(|expected| {
+                    fs::read_to_string(path).is_ok_and(|content| sha256_str(&content) == expected)
+                })
+        })
+    })
+}
+
+pub(crate) fn scheduler_files_installed(state: &Value) -> bool {
+    state
+        .get("installedFiles")
+        .and_then(Value::as_array)
+        .is_some_and(|files| !files.is_empty())
 }
 
 pub(crate) fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {
