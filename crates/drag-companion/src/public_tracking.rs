@@ -259,6 +259,15 @@ pub(crate) fn run_tracking_for_date(
         let bundle = build_bundle(data_dir, date)?;
         progress.bundle_items = bundle.evidence.len();
         progress.bundle_contradictions = bundle.contradictions.len();
+        if proposal_counts(data_dir, date)?.proposals == 0 {
+            if let Some(fixture) = &config.provider_fixture {
+                propose_from_fixture(data_dir, date, fixture)?;
+            } else if !bundle.evidence.is_empty() {
+                progress.warnings.push(
+                    "proposal provider is not configured; configure an offline provider fixture with tracking setup --provider-fixture FILE".to_owned(),
+                );
+            }
+        }
         progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
 
         let before_audit = proposal_counts(data_dir, date)?;
