@@ -245,9 +245,21 @@ pub(crate) fn run_tracking_for_date(
         progress.observations = collected.git.commits.len() + collected.calendar.events.len();
         let collection_failures = collected.failures.len() + collected.calendar.failures.len();
         if collection_failures > 0 {
+            progress.collection_failures = collected
+                .failures
+                .iter()
+                .chain(collected.calendar.failures.iter())
+                .map(|failure| {
+                    serde_json::json!({
+                        "source": minimized_reference(&failure.repository),
+                        "error": redact(&failure.error)
+                    })
+                })
+                .collect();
             progress.warnings.push(format!(
                 "{collection_failures} configured source collection(s) failed; inspect tracking sources test"
             ));
+            return Ok(());
         }
         progress.imported_evidence = if journal_path(data_dir).exists() {
             import_journal(data_dir)?
@@ -273,8 +285,8 @@ pub(crate) fn run_tracking_for_date(
         let before_audit = proposal_counts(data_dir, date)?;
         let approved_review =
             config.submission.mode == SubmissionMode::Review && approval_matches(data_dir, date)?;
-        progress.network_access = true;
         if before_audit.proposals > 0 {
+            progress.network_access = true;
             let audit = audit_drag_day(
                 data_dir,
                 drag_bin,
@@ -282,7 +294,8 @@ pub(crate) fn run_tracking_for_date(
                 config.submission.mode == SubmissionMode::Automatic || approved_review,
             )?;
             progress.existing_worklogs = audit.existing_worklogs.len();
-        } else {
+        } else if config.submission.mode != SubmissionMode::Automatic {
+            progress.network_access = true;
             let read = read_drag_day(drag_bin, date)?;
             progress.existing_worklogs = read.worklogs.len();
         }
@@ -309,6 +322,16 @@ pub(crate) fn run_tracking_for_date(
         if execution_authorized {
             progress.mutation_attempted = true;
             let execution = execute_drag_worklogs(data_dir, drag_bin, date, true)?;
+            if execution.status != "executed" {
+                progress.terminal_status = Some(execution.status);
+                progress.warnings.push(match execution.status {
+                    "gated" => "submission was blocked by runtime safety gates".to_owned(),
+                    "uncertain" => {
+                        "submission outcome is uncertain; reconcile before retrying".to_owned()
+                    }
+                    status => format!("submission ended with status {status}"),
+                });
+            }
             progress.submitted = execution.submitted;
             progress.skipped = execution.skipped;
             progress.network_access |= execution.network_access;
@@ -320,7 +343,11 @@ pub(crate) fn run_tracking_for_date(
 
     match outcome {
         Ok(()) => {
-            let status = if progress.warnings.is_empty() {
+            let status = if let Some(status) = progress.terminal_status {
+                status
+            } else if !progress.collection_failures.is_empty() {
+                "source-failed"
+            } else if progress.warnings.is_empty() {
                 "completed"
             } else {
                 "partial"
@@ -812,6 +839,8 @@ struct TrackingRunProgress {
     date: NaiveDate,
     resumed: bool,
     source_health: Vec<Value>,
+    collection_failures: Vec<Value>,
+    terminal_status: Option<&'static str>,
     observations: usize,
     imported_evidence: usize,
     bundle_items: usize,
@@ -834,6 +863,8 @@ impl TrackingRunProgress {
             date,
             resumed: run_path(data_dir, date).exists(),
             source_health: source_statuses(config),
+            collection_failures: Vec::new(),
+            terminal_status: None,
             observations: 0,
             imported_evidence: 0,
             bundle_items: 0,
@@ -859,6 +890,7 @@ impl TrackingRunProgress {
             "resumed": self.resumed,
             "resumable": true,
             "sourceHealth": self.source_health,
+            "collectionFailures": self.collection_failures,
             "observations": self.observations,
             "importedEvidence": self.imported_evidence,
             "evidenceBundle": {

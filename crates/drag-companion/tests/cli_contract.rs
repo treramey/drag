@@ -2002,6 +2002,14 @@ fn configured_scheduler_runs_the_complete_workflow_with_only_an_explicit_iso_dat
                 scheduler_dir.to_string_lossy().as_ref(),
             ]),
     )?;
+    let scheduler_state_path = data_dir.join("scheduler.json");
+    let mut scheduler_state: Value =
+        serde_json::from_slice(&std::fs::read(&scheduler_state_path)?)?;
+    scheduler_state["enabled"] = Value::Bool(true);
+    std::fs::write(
+        &scheduler_state_path,
+        serde_json::to_vec_pretty(&scheduler_state)?,
+    )?;
     let drag = bash_executable(
         &directory,
         "scheduler-drag",
