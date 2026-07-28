@@ -491,17 +491,7 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
         .get("installedFiles")
         .and_then(Value::as_array)
         .is_some_and(|files| !files.is_empty());
-    let scheduler_healthy = scheduler_state
-        .get("installedFiles")
-        .and_then(Value::as_array)
-        .is_none_or(|files| {
-            files.iter().all(|file| {
-                file.as_str().is_some_and(|path| {
-                    let path = Path::new(path);
-                    path.exists() && is_owned_scheduler_file(path).unwrap_or(false)
-                })
-            })
-        });
+    let scheduler_healthy = scheduler_files_healthy(scheduler_state);
     let scheduler_active = scheduler_state
         .get("enabled")
         .and_then(Value::as_bool)

@@ -286,6 +286,16 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
         .ok_or("pending action")?
         .contains("repair"));
 
+    let scheduler_state_path = data_dir.join("scheduler.json");
+    let mut scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&scheduler_state_path)?)?;
+    scheduler_state["successfulOperationKeys"] = serde_json::json!(["scheduler.run.2026-07-24"]);
+    scheduler_state["lastSuccessfulDate"] = serde_json::json!("2026-07-24");
+    std::fs::write(
+        &scheduler_state_path,
+        serde_json::to_vec_pretty(&scheduler_state)?,
+    )?;
+
     let uninstalled = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -294,6 +304,18 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     assert_eq!(uninstalled["historyPreserved"], true);
     assert!(installed_files.iter().all(|path| !path.exists()));
     assert!(data_dir.join("companion.sqlite3").exists());
+    let preserved: Value = serde_json::from_str(&std::fs::read_to_string(&scheduler_state_path)?)?;
+    assert_eq!(preserved["lastSuccessfulDate"], "2026-07-24");
+    assert_eq!(
+        preserved["successfulOperationKeys"][0],
+        "scheduler.run.2026-07-24"
+    );
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["run", "2026-07-25"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not configured"));
     Ok(())
 }
 
@@ -358,6 +380,20 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
     )?;
     assert_eq!(nested_pause["status"], "paused");
 
+    let repeated_setup = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+    assert_eq!(repeated_setup["active"], false);
+    assert_eq!(repeated_setup["schedule"]["at"], "17:30");
+    let repeated_config: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert_eq!(
+        repeated_config["schedulerTarget"],
+        scheduler_dir.to_string_lossy().as_ref()
+    );
+
     std::fs::remove_dir_all(&repo)?;
     tracking()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -377,6 +413,24 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
 
     std::fs::create_dir_all(&repo)?;
     isolated_git(&repo).args(["init", "-q"]).status()?;
+    let scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
+    let installed_file = scheduler_state["installedFiles"][0]
+        .as_str()
+        .ok_or("installed scheduler file")?;
+    let original = std::fs::read_to_string(installed_file)?;
+    std::fs::write(installed_file, format!("{original}\n# modified\n"))?;
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["schedule", "resume"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("installed and healthy"));
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "update", "--at", "17:30"]),
+    )?;
     let nested_resume = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -400,7 +454,13 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
     let directory_path = directory.path().canonicalize()?;
     let data_dir = directory.path().join("state");
     std::fs::create_dir(directory.path().join("not-a-repo"))?;
-    std::fs::write(directory.path().join("broken.ics"), "BEGIN:VEVENT\n")?;
+    isolated_git(&directory.path().join("not-a-repo"))
+        .args(["init", "-q"])
+        .status()?;
+    std::fs::write(
+        directory.path().join("broken.ics"),
+        "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n",
+    )?;
     let setup = json_output(
         tracking()?
             .current_dir(directory.path())
@@ -432,6 +492,9 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
         configured_calendar.canonicalize()?,
         directory_path.join("broken.ics").canonicalize()?
     );
+
+    std::fs::remove_dir_all(directory.path().join("not-a-repo").join(".git"))?;
+    std::fs::write(directory.path().join("broken.ics"), "BEGIN:VEVENT\n")?;
 
     let tested = json_output(
         tracking()?

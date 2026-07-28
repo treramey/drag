@@ -24,14 +24,17 @@ pub(crate) fn setup_tracking(
     }
 
     let mut config = load_tracking_config(data_dir)?.unwrap_or_default();
+    let sources = configured_sources(args.repos, args.ics_files)?;
+    validate_source_configuration(&sources)?;
     config.installed = true;
-    config.active = args.scheduler_target.is_some();
-    config.sources = configured_sources(args.repos, args.ics_files)?;
-    config.schedule = TrackingSchedule {
-        weekdays: true,
-        at: args.at.clone(),
-        timezone: args.schedule_timezone.clone(),
-    };
+    config.sources = sources;
+    if args.scheduler_target.is_some() || config.scheduler_target.is_none() {
+        config.schedule = TrackingSchedule {
+            weekdays: true,
+            at: args.at.clone(),
+            timezone: args.schedule_timezone.clone(),
+        };
+    }
     config.submission = TrackingSubmission {
         mode: args.mode,
         automatic_submission_authorized: args.authorize_automatic,
@@ -59,6 +62,11 @@ pub(crate) fn setup_tracking(
             .retain(|source| source.kind != TrackingSourceKind::ClaudeCode);
         config.sources.push(claude_code_source()?);
     }
+    validate_tracking_configuration(&config)?;
+    let scheduler_state = scheduler_status(data_dir)?;
+    config.active = config.scheduler_target.is_some()
+        && scheduler_state["enabled"].as_bool().unwrap_or(false)
+        && scheduler_files_healthy(&scheduler_state["state"]);
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
@@ -573,6 +581,7 @@ pub(crate) fn uninstall_tracking(
     config.active = false;
     config.hooks_installed = false;
     config.scheduler_target = None;
+    config.submission.automatic_submission_authorized = false;
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "status": "uninstalled",
@@ -591,11 +600,13 @@ pub(crate) fn uninstall_tracking(
 }
 
 fn require_config(data_dir: &Path) -> Result<TrackingConfig, CompanionError> {
-    load_tracking_config(data_dir)?.ok_or_else(|| {
-        CompanionError::Proposal(
-            "automatic tracking is not configured; run tracking setup first".to_owned(),
-        )
-    })
+    load_tracking_config(data_dir)?
+        .filter(|config| config.installed)
+        .ok_or_else(|| {
+            CompanionError::Proposal(
+                "automatic tracking is not configured; run tracking setup first".to_owned(),
+            )
+        })
 }
 
 fn validate_tracking_configuration(config: &TrackingConfig) -> Result<(), CompanionError> {
