@@ -3,6 +3,7 @@ use crate::*;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Contract {
+    pub(crate) schema_version: u32,
     pub(crate) binary: &'static str,
     pub(crate) default_mode: &'static str,
     pub(crate) config_dir: &'static str,
@@ -62,10 +63,11 @@ pub(crate) struct RunResult {
 
 pub(crate) fn contract() -> Contract {
     Contract {
-        binary: "drag-companion",
+        schema_version: TRACKING_MACHINE_CONTRACT_VERSION,
+        binary: "drag-tracking",
         default_mode: DEFAULT_MODE,
-        config_dir: "$DRAG_COMPANION_CONFIG or .drag-companion/config.json",
-        data_dir: "$DRAG_COMPANION_DATA or .drag-companion",
+        config_dir: "$DRAG_TRACKING_DATA/config.json or ~/.drag/tracking/config.json",
+        data_dir: "$DRAG_TRACKING_DATA or ~/.drag/tracking",
         adapters: adapters(),
         default_network_access: false,
         possible_network_access: true,
@@ -76,12 +78,45 @@ pub(crate) fn contract() -> Contract {
         possible_live_mutation_allowed: true,
         conditional_live_mutation_allowed: vec![
             "execute requires --authorize-live",
-            "execute requires DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1",
+            "automatic execution requires DRAG_TRACKING_LIVE_MUTATION_ROLLOUT=1",
             "execute requires persisted rollout general-autonomy permission",
         ],
         drag_boundary: drag_boundary(),
         commands: vec![
+            command(
+                "setup",
+                false,
+                vec!["persist explicit source, schedule, and submission consent", "optionally install owned scheduler and hook files"],
+                vec![],
+            ),
             command("status", false, vec![], vec![]),
+            command(
+                "run",
+                false,
+                vec!["coordinate one complete resumable tracking workflow"],
+                vec![],
+            ).with_possible_network(vec!["Drag read boundary and conditionally authorized submission"]),
+            command(
+                "review",
+                false,
+                vec!["optionally persist approval bound to the current proposal-set digest"],
+                vec!["inspect", "approve"],
+            ),
+            command("pause", false, vec!["disable scheduled tracking while preserving history"], vec![]),
+            command("resume", false, vec!["validate configuration and enable scheduled tracking"], vec![]),
+            command("uninstall", false, vec!["remove only tracking-owned scheduler and hook files"], vec![]),
+            command(
+                "sources",
+                false,
+                vec![
+                    "inspect supported and configured local evidence sources",
+                    "persist validated explicitly selected source settings",
+                    "run bounded redacted collector checks without persisting evidence or worklogs",
+                ],
+                vec!["list", "configure", "test"],
+            ),
+            command("schedule", false, vec!["persist and install an explicitly configured weekday schedule"], vec!["show", "update", "pause", "resume"]),
+            command("internal", false, vec![], vec!["diagnostics", "recovery", "replay"]),
             command("collect", false, vec!["capture fake observations"], vec![]),
             command(
                 "capture",
@@ -134,7 +169,7 @@ pub(crate) fn contract() -> Contract {
                     "drag list complete day before create",
                     "drag log --json - only when --authorize-live and rollout env are enabled",
                 ],
-            ).with_possible_network(vec!["drag list complete day before create", "drag log submission when live mutation conditions pass"]).with_possible_live_mutation(vec!["--authorize-live", "DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1", "persisted rollout permits general-autonomy"]),
+            ).with_possible_network(vec!["drag list complete day before create", "drag log submission when live mutation conditions pass"]).with_possible_live_mutation(vec!["--authorize-live", "DRAG_TRACKING_LIVE_MUTATION_ROLLOUT=1 (deprecated DRAG_COMPANION alias accepted)", "persisted rollout permits general-autonomy"]),
             command(
                 "rollout",
                 false,

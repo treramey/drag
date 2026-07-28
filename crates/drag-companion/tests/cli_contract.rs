@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::error::Error>> {
@@ -11,6 +11,10 @@ fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::erro
 
 fn companion() -> Result<Command, Box<dyn std::error::Error>> {
     Ok(Command::cargo_bin("drag-companion")?)
+}
+
+fn tracking() -> Result<Command, Box<dyn std::error::Error>> {
+    Ok(Command::cargo_bin("drag-tracking")?)
 }
 
 fn bash_executable(
@@ -87,6 +91,1001 @@ fn git_fixtures_clear_inherited_repository_environment() {
     ] {
         assert!(cleared.iter().any(|name| name == required));
     }
+}
+
+#[test]
+fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let output = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "status"])
+        .env("TEMPO_TOKEN", "must-not-be-loaded")
+        .env("ATLASSIAN_TOKEN", "must-not-be-loaded")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let envelope: Value = serde_json::from_slice(&output)?;
+    assert_eq!(envelope["ok"], true);
+    let status = &envelope["data"];
+    assert_eq!(status["schemaVersion"], 2);
+    assert_eq!(status["configuration"]["configured"], false);
+    assert_eq!(status["activity"]["state"], "idle");
+    assert_eq!(status["scheduler"]["healthy"], true);
+    assert_eq!(status["submission"]["mode"], "draft");
+    assert_eq!(status["submission"]["effectiveMutationPermission"], false);
+    assert!(status["latestRun"].is_null());
+    assert_eq!(status["networkAccess"], false);
+    assert_eq!(status["liveMutationAllowed"], false);
+    assert!(status["pendingAction"].is_string());
+
+    let contract = json_output(tracking()?.arg("contract"))?;
+    assert_eq!(contract["binary"], "drag-tracking");
+    assert_eq!(contract["schemaVersion"], 2);
+
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["reconcile", "--date", "2026-07-24"])
+        .assert()
+        .success();
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "human", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Configuration:"))
+        .stdout(predicate::str::contains("Activity:"))
+        .stdout(predicate::str::contains("Scheduler:"))
+        .stdout(predicate::str::contains("Submission mode: draft"))
+        .stdout(predicate::str::contains(
+            "Effective mutation permission: disabled",
+        ))
+        .stdout(predicate::str::contains("Latest run: 2026-07-24"))
+        .stdout(predicate::str::contains("Pending action:"));
+
+    let connection = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    connection.execute(
+        "UPDATE coordinated_runs SET started_at = '2026-07-24T10:00:00Z' WHERE local_date = '2026-07-24'",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO coordinated_runs (tempo_account, local_date, state, started_at, finished_at) VALUES ('default', '2026-07-22', 'completed', '2026-07-25T10:00:00Z', '2026-07-25T10:01:00Z')",
+        [],
+    )?;
+    let status = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("status"),
+    )?;
+    assert_eq!(status["latestRun"]["selectedDate"], "2026-07-22");
+    Ok(())
+}
+
+#[test]
+fn contract_probe_does_not_resolve_or_migrate_tracking_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let legacy = directory.path().join(".drag-companion");
+    let home = directory.path().join("home");
+    std::fs::create_dir(&legacy)?;
+    std::fs::write(legacy.join("state.json"), "legacy")?;
+    std::fs::create_dir(&home)?;
+
+    let contract = json_output(
+        tracking()?
+            .current_dir(directory.path())
+            .env("HOME", &home)
+            .env_remove("DRAG_TRACKING_DATA")
+            .env_remove("DRAG_COMPANION_DATA")
+            .arg("contract"),
+    )?;
+    assert_eq!(contract["schemaVersion"], 2);
+    assert!(legacy.exists());
+    assert!(!home.join(".drag/tracking").exists());
+    Ok(())
+}
+
+#[test]
+fn tracking_json_failures_use_stderr_without_loading_credentials(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    std::fs::create_dir_all(&data_dir)?;
+    std::fs::write(data_dir.join("scheduler.json"), "{not-json")?;
+    let output = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "status"])
+        .env_remove("TEMPO_TOKEN")
+        .env_remove("TEMPO_ACCOUNT_ID")
+        .env_remove("ATLASSIAN_EMAIL")
+        .env_remove("ATLASSIAN_TOKEN")
+        .env_remove("ATLASSIAN_HOST")
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["ok"], false);
+    assert_eq!(error["error"]["code"], "tracking_error");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("tracking error message")?
+        .contains("scheduler state schema"));
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_authorized(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("systemd");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "setup", "--mode", "automatic"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "automatic mode requires separate --authorize-automatic consent",
+        ));
+    assert!(!scheduler_dir.exists());
+
+    let setup = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--mode",
+                "review",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    assert_eq!(setup["status"], "configured");
+    assert_eq!(setup["effects"]["schedulerInstalled"], true);
+    assert_eq!(setup["effects"]["hooksInstalled"], false);
+    assert_eq!(setup["effects"]["automaticSubmissionAuthorized"], false);
+    let installed_files = setup["scheduler"]["installedFiles"]
+        .as_array()
+        .ok_or("installed scheduler files")?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+    assert!(!installed_files.is_empty());
+    assert!(installed_files.iter().all(|path| path.exists()));
+
+    let status = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("status"),
+    )?;
+    assert_eq!(status["submission"]["mode"], "review");
+    assert_eq!(status["scheduler"]["active"], true);
+    assert_eq!(status["sources"][0]["health"], "healthy");
+    std::fs::remove_file(&installed_files[0])?;
+    let unhealthy = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("status"),
+    )?;
+    assert_eq!(unhealthy["scheduler"]["healthy"], false);
+    assert!(unhealthy["pendingAction"]
+        .as_str()
+        .ok_or("pending action")?
+        .contains("repair"));
+
+    let uninstalled = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("uninstall"),
+    )?;
+    assert_eq!(uninstalled["historyPreserved"], true);
+    assert!(installed_files.iter().all(|path| !path.exists()));
+    assert!(data_dir.join("companion.sqlite3").exists());
+    Ok(())
+}
+
+#[test]
+fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let directory_path = directory.path().canonicalize()?;
+    let data_dir = directory.path().join("state");
+    std::fs::create_dir(directory.path().join("not-a-repo"))?;
+    std::fs::write(directory.path().join("broken.ics"), "BEGIN:VEVENT\n")?;
+    let setup = json_output(
+        tracking()?
+            .current_dir(directory.path())
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", "not-a-repo", "--ics", "broken.ics"]),
+    )?;
+    let setup_output = serde_json::to_string(&setup)?;
+    assert!(!setup_output.contains("not-a-repo"));
+    assert!(!setup_output.contains("broken.ics"));
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    let configured_repo = PathBuf::from(
+        persisted["sources"][0]["path"]
+            .as_str()
+            .ok_or("configured repository path")?,
+    );
+    let configured_calendar = PathBuf::from(
+        persisted["sources"][1]["path"]
+            .as_str()
+            .ok_or("configured calendar path")?,
+    );
+    assert!(configured_repo.is_absolute());
+    assert!(configured_calendar.is_absolute());
+    assert_eq!(
+        configured_repo.canonicalize()?,
+        directory_path.join("not-a-repo").canonicalize()?
+    );
+    assert_eq!(
+        configured_calendar.canonicalize()?,
+        directory_path.join("broken.ics").canonicalize()?
+    );
+
+    let tested = json_output(
+        tracking()?
+            .current_dir(directory.path().join("not-a-repo"))
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-07-24"]),
+    )?;
+    assert_eq!(tested["sources"][0]["health"], "unhealthy");
+    assert_eq!(tested["sources"][1]["health"], "unhealthy");
+    assert!(tested["sources"][0]["reason"].is_string());
+    assert!(tested["sources"][1]["reason"].is_string());
+    Ok(())
+}
+
+#[test]
+fn sources_configure_and_list_report_versioned_redacted_health(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("private-project");
+    let calendar = directory.path().join("private-calendar.ics");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    std::fs::write(&calendar, "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n")?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+
+    let configured = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "sources",
+                "configure",
+                "--ics",
+                calendar.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    assert_eq!(configured["schemaVersion"], 2);
+    assert_eq!(configured["effects"]["configurationPersisted"], true);
+    assert_eq!(configured["networkAccess"], false);
+    assert_eq!(configured["liveMutationAllowed"], false);
+    let configured_sources = configured["sources"].as_array().ok_or("sources")?;
+    assert_eq!(configured_sources.len(), 2);
+    assert!(configured_sources.iter().all(|source| {
+        source["configured"] == true
+            && source["available"] == true
+            && source["health"] == "healthy"
+            && source["reason"].is_null()
+            && source["reference"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("local-source:sha256:"))
+    }));
+    let configured_text = serde_json::to_string(&configured)?;
+    assert!(!configured_text.contains("private-project"));
+    assert!(!configured_text.contains("private-calendar.ics"));
+
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert_eq!(persisted["sources"].as_array().map(Vec::len), Some(2));
+    assert!(persisted.to_string().contains("private-project"));
+    assert!(persisted.to_string().contains("private-calendar.ics"));
+
+    std::fs::remove_file(&calendar)?;
+    let listed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "list"]),
+    )?;
+    assert_eq!(listed["schemaVersion"], 2);
+    assert_eq!(listed["networkAccess"], false);
+    assert_eq!(listed["liveMutationAllowed"], false);
+    let sources = listed["configured"]
+        .as_array()
+        .ok_or("listed configured sources")?;
+    assert!(sources.iter().any(|source| source["health"] == "healthy"));
+    let unavailable = sources
+        .iter()
+        .find(|source| source["health"] == "unavailable")
+        .ok_or("unavailable source")?;
+    assert_eq!(unavailable["available"], false);
+    assert!(unavailable["reason"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let listed_text = serde_json::to_string(&listed)?;
+    assert!(!listed_text.contains("private-project"));
+    assert!(!listed_text.contains("private-calendar.ics"));
+
+    std::fs::write(
+        &calendar,
+        "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:private@example.test\n",
+    )?;
+    let invalid = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-03-08"]),
+    )?;
+    let invalid_calendar = invalid["sources"]
+        .as_array()
+        .and_then(|sources| sources.iter().find(|source| source["kind"] == "calendar"))
+        .ok_or("invalid calendar source")?;
+    assert_eq!(invalid_calendar["available"], true);
+    assert_eq!(invalid_calendar["health"], "unhealthy");
+    assert!(invalid_calendar["reason"]
+        .as_str()
+        .is_some_and(|value| value.contains("invalid RFC 5545")));
+    assert!(!serde_json::to_string(&invalid)?.contains("private@example.test"));
+    Ok(())
+}
+
+#[test]
+fn claude_source_selection_is_independent_from_hook_installation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+
+    let setup = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--install-hooks",
+            ]),
+    )?;
+    assert_eq!(setup["effects"]["hooksInstalled"], true);
+    assert!(setup["sources"].as_array().is_some_and(|sources| sources
+        .iter()
+        .any(|source| { source["kind"] == "claude-code" && source["health"] == "healthy" })));
+    let settings = home.join(".claude/settings.json");
+    let hooks_before = std::fs::read(&settings)?;
+
+    let deselected = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "configure", "--no-claude-code"]),
+    )?;
+    assert!(deselected["sources"]
+        .as_array()
+        .is_some_and(|sources| sources.len() == 1 && sources[0]["kind"] == "git"));
+    assert_eq!(std::fs::read(&settings)?, hooks_before);
+
+    let selected = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "configure", "--claude-code"]),
+    )?;
+    assert!(selected["sources"].as_array().is_some_and(|sources| sources
+        .iter()
+        .any(|source| { source["kind"] == "claude-code" && source["health"] == "healthy" })));
+    let tested = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-03-08"]),
+    )?;
+    let claude = tested["sources"]
+        .as_array()
+        .and_then(|sources| {
+            sources
+                .iter()
+                .find(|source| source["kind"] == "claude-code")
+        })
+        .ok_or("tested Claude source")?;
+    assert_eq!(claude["health"], "healthy");
+    assert_eq!(claude["check"]["observations"], 0);
+    assert_eq!(std::fs::read(&settings)?, hooks_before);
+    Ok(())
+}
+
+#[test]
+fn sources_configure_rejects_invalid_settings_without_replacing_valid_sources(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("valid-repo");
+    let invalid_calendar = directory.path().join("customer-secret.ics");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    std::fs::write(
+        &invalid_calendar,
+        "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:private-customer@example.test\n",
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+    let before = std::fs::read(data_dir.join("config.json"))?;
+
+    let output = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args([
+            "--output",
+            "json",
+            "sources",
+            "configure",
+            "--ics",
+            invalid_calendar.to_string_lossy().as_ref(),
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["ok"], false);
+    assert!(error["error"]["message"]
+        .as_str()
+        .is_some_and(|value| value.contains("calendar source is invalid")));
+    let diagnostics = String::from_utf8(output.stderr)?;
+    assert!(!diagnostics.contains("customer-secret.ics"));
+    assert!(!diagnostics.contains("private-customer@example.test"));
+    assert_eq!(std::fs::read(data_dir.join("config.json"))?, before);
+    Ok(())
+}
+
+#[test]
+fn sources_test_is_bounded_redacted_and_does_not_persist_evidence_or_worklogs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("secret-client-repo");
+    let calendar = directory.path().join("executive-calendar.ics");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    std::fs::write(repo.join("work.txt"), "private work")?;
+    isolated_git(&repo).args(["add", "."]).status()?;
+    isolated_git(&repo)
+        .env("GIT_AUTHOR_DATE", "2026-03-08T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-03-08T12:00:00Z")
+        .args([
+            "-c",
+            "user.name=Private Person",
+            "-c",
+            "user.email=private.person@example.test",
+            "commit",
+            "-q",
+            "-m",
+            "SECRET-CUSTOMER launch plan",
+        ])
+        .status()?;
+    std::fs::write(
+        &calendar,
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:board@example.test\nDTSTART:20260308T130000Z\nDTEND:20260308T140000Z\nSUMMARY:SECRET-BOARD acquisition\nEND:VEVENT\nEND:VCALENDAR\n",
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("setup"),
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "sources",
+                "configure",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--ics",
+                calendar.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    let config_before = std::fs::read(data_dir.join("config.json"))?;
+
+    let tested = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-03-08"]),
+    )?;
+    assert_eq!(tested["schemaVersion"], 2);
+    assert_eq!(tested["selectedDate"], "2026-03-08");
+    assert_eq!(tested["redaction"]["applied"], true);
+    assert_eq!(tested["redaction"]["rawEvidenceIncluded"], false);
+    assert_eq!(tested["bounds"]["sourceLimit"], 64);
+    assert_eq!(tested["bounds"]["observationLimitPerSource"], 200);
+    assert_eq!(tested["bounds"]["configuredSources"], 2);
+    assert_eq!(tested["bounds"]["testedSources"], 2);
+    assert_eq!(tested["bounds"]["truncated"], false);
+    assert_eq!(tested["effects"]["configurationPersisted"], false);
+    assert_eq!(tested["effects"]["evidencePersisted"], false);
+    assert_eq!(tested["effects"]["worklogsGenerated"], 0);
+    assert_eq!(tested["networkAccess"], false);
+    assert_eq!(tested["liveMutationAllowed"], false);
+    let sources = tested["sources"].as_array().ok_or("tested sources")?;
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().all(|source| {
+        source["health"] == "healthy"
+            && source["check"]["bounded"] == true
+            && source["check"]["observationLimit"] == 200
+            && source["check"]["observations"].as_u64().is_some()
+    }));
+    let diagnostics = serde_json::to_string(&tested)?;
+    for secret in [
+        "SECRET-CUSTOMER",
+        "SECRET-BOARD",
+        "Private Person",
+        "private.person@example.test",
+        "board@example.test",
+        "secret-client-repo",
+        "executive-calendar.ics",
+    ] {
+        assert!(!diagnostics.contains(secret), "leaked {secret}");
+    }
+    assert_eq!(std::fs::read(data_dir.join("config.json"))?, config_before);
+    assert!(!data_dir.join("journal.jsonl").exists());
+    assert!(!data_dir.join("companion.sqlite3").exists());
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn public_schedule_aliases_and_run_keep_one_intent_level_result(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("systemd");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+
+    let paused = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "pause"]),
+    )?;
+    assert_eq!(paused["status"], "paused");
+    let mut scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
+    scheduler_state["operationKeys"] = serde_json::json!(["keep-this-operation-key"]);
+    std::fs::write(
+        data_dir.join("scheduler.json"),
+        serde_json::to_vec_pretty(&scheduler_state)?,
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "update", "--at", "17:30"]),
+    )?;
+    let scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
+    assert_eq!(scheduler_state["enabled"], false);
+    assert_eq!(
+        scheduler_state["operationKeys"],
+        serde_json::json!(["keep-this-operation-key"])
+    );
+    let resumed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("resume"),
+    )?;
+    assert_eq!(resumed["status"], "active");
+
+    let scheduled = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["internal", "scheduler", "run", "--date", "2026-07-24"]),
+    )?;
+    let run = &scheduled["result"];
+    assert_eq!(run["selectedDate"], "2026-07-24");
+    assert_eq!(run["status"], "completed");
+    assert_eq!(run["networkAccess"], false);
+    assert_eq!(run["liveMutationAllowed"], false);
+    assert!(run["sourceHealth"].is_array());
+    assert!(run["evidenceBundle"].is_object());
+    assert!(run["phases"].is_array());
+    Ok(())
+}
+
+#[test]
+fn public_automatic_run_surfaces_runtime_submission_gates() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "automatic", "--authorize-automatic"]),
+    )?;
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["run", "2026-07-24"]),
+    )?;
+    assert_eq!(run["status"], "gated");
+    assert_eq!(run["submitted"], 0);
+    assert_eq!(run["liveMutationAllowed"], false);
+    assert!(run["warnings"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(run["nextSafeAction"]
+        .as_str()
+        .ok_or("next safe action")?
+        .contains("runtime gates"));
+    Ok(())
+}
+
+#[test]
+fn review_approval_is_invalidated_when_the_proposal_set_changes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&directory, "valid.json", valid_provider_response())?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "internal",
+                "propose",
+                "--date",
+                "2026-03-08",
+                "--fixture",
+                fixture.to_str().ok_or("fixture")?,
+            ]),
+    )?;
+    let connection = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let proposal: String =
+        connection.query_row("SELECT id FROM proposals LIMIT 1", [], |row| row.get(0))?;
+    for (name, value) in [
+        ("tempoAccountId", "account-default"),
+        ("issueKey", "DRAG-150"),
+        ("start", "2026-03-08T13:00:00Z"),
+        ("end", "2026-03-08T14:00:00Z"),
+        ("description", "Implemented proposal adapter"),
+        ("attributes", "{}"),
+    ] {
+        connection.execute(
+            "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![proposal, name, value],
+        )?;
+    }
+
+    let approved = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "approve", "2026-03-08"]),
+    )?;
+    assert_eq!(approved["approval"]["approved"], true);
+    let approved_digest = approved["proposalSetDigest"].clone();
+
+    connection.execute(
+        "UPDATE proposal_drag_resolutions SET value = 'Changed description' WHERE proposal_id = ?1 AND name = 'description'",
+        [&proposal],
+    )?;
+    let changed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "2026-03-08"]),
+    )?;
+    assert_ne!(changed["proposalSetDigest"], approved_digest);
+    assert_eq!(changed["approval"]["approved"], false);
+    Ok(())
+}
+
+#[test]
+fn default_state_migration_is_atomic_and_refuses_two_active_stores(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let working = directory.path().join("working");
+    let legacy = working.join(".drag-companion");
+    std::fs::create_dir_all(&legacy)?;
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(legacy.join("recovery-record"), "uncertain-operation")?;
+
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env_remove("DRAG_TRACKING_DATA")
+        .env_remove("DRAG_COMPANION_DATA")
+        .arg("status")
+        .assert()
+        .success();
+    let migrated = home.join(".drag/tracking");
+    assert!(!legacy.exists());
+    assert_eq!(
+        std::fs::read_to_string(migrated.join("recovery-record"))?,
+        "uncertain-operation"
+    );
+    assert!(migrated.join("migration.json").exists());
+
+    std::fs::create_dir_all(&legacy)?;
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env_remove("DRAG_TRACKING_DATA")
+        .env_remove("DRAG_COMPANION_DATA")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("both legacy tracking state"));
+    Ok(())
+}
+
+#[test]
+fn default_state_migration_resumes_after_interruption_and_preserves_recovery_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let working = directory.path().join("working");
+    let legacy = working.join(".drag-companion");
+    std::fs::create_dir_all(&working)?;
+    std::fs::create_dir_all(&home)?;
+    tracking()?
+        .current_dir(&working)
+        .args(["--data-dir", legacy.to_string_lossy().as_ref(), "status"])
+        .assert()
+        .success();
+    tracking()?
+        .args(["--data-dir", legacy.to_string_lossy().as_ref()])
+        .args([
+            "internal",
+            "rollout",
+            "record",
+            "--gate",
+            "fixture",
+            "--schema-valid",
+            "--provenance-retained",
+            "--secrets-redacted",
+        ])
+        .assert()
+        .success();
+    let connection = rusqlite::Connection::open(legacy.join("companion.sqlite3"))?;
+    connection.execute(
+        "INSERT INTO mutation_operations (id, state, idempotency_key, local_date, tempo_account, payload_json) VALUES ('legacy-uncertain', 'uncertain', 'legacy-operation-key', '2026-03-08', 'default', '{}')",
+        [],
+    )?;
+    drop(connection);
+    std::fs::create_dir_all(legacy.join("runs"))?;
+    for (name, body) in [
+        ("journal.jsonl", "journal"),
+        (
+            "scheduler.json",
+            r#"{"schemaVersion":2,"operationKeys":["legacy-key"]}"#,
+        ),
+        (
+            "runs/2026-03-08.json",
+            r#"{"date":"2026-03-08","status":"uncertain"}"#,
+        ),
+    ] {
+        std::fs::write(legacy.join(name), body)?;
+    }
+
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION", "1")
+        .env_remove("DRAG_TRACKING_DATA")
+        .env_remove("DRAG_COMPANION_DATA")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration interrupted"));
+    assert!(legacy.exists());
+
+    let output = json_output(
+        tracking()?
+            .current_dir(directory.path())
+            .env("HOME", &home)
+            .env_remove("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION")
+            .env_remove("DRAG_TRACKING_DATA")
+            .env_remove("DRAG_COMPANION_DATA")
+            .arg("status"),
+    )?;
+    let migrated = home.join(".drag/tracking");
+    assert_eq!(output["configuration"]["migration"]["status"], "completed");
+    for name in [
+        "journal.jsonl",
+        "companion.sqlite3",
+        "scheduler.json",
+        "rollout-state.json",
+        "runs/2026-03-08.json",
+    ] {
+        assert!(migrated.join(name).exists(), "missing {name}");
+    }
+    let operations = json_output(
+        tracking()?
+            .args(["--data-dir", migrated.to_string_lossy().as_ref()])
+            .args(["internal", "process-spy", "--date", "2026-03-08"]),
+    )?;
+    assert_eq!(operations["operations"][0]["state"], "uncertain");
+    let scheduler = json_output(
+        tracking()?
+            .args(["--data-dir", migrated.to_string_lossy().as_ref()])
+            .args(["internal", "scheduler", "status"]),
+    )?;
+    assert_eq!(scheduler["state"]["operationKeys"][0], "legacy-key");
+    Ok(())
+}
+
+#[test]
+fn tracking_environment_conflicts_are_explicit() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    tracking()?
+        .args(["--data-dir", directory.path().to_string_lossy().as_ref()])
+        .env("DRAG_TRACKING_RETENTION_RAW_DAYS", "30")
+        .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "60")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DRAG_TRACKING_RETENTION_RAW_DAYS and deprecated DRAG_COMPANION_RETENTION_RAW_DAYS conflict",
+        ));
+    Ok(())
+}
+
+#[test]
+fn default_state_migration_finalizes_after_interruption_following_atomic_move(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let working = directory.path().join("working");
+    let legacy = working.join(".drag-companion");
+    std::fs::create_dir_all(&legacy)?;
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(legacy.join("journal.jsonl"), "preserved")?;
+
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION", "after-move")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration interrupted"));
+    assert!(!legacy.exists());
+    assert!(home.join(".drag/tracking").exists());
+
+    let output = json_output(
+        tracking()?
+            .current_dir(&working)
+            .env("HOME", &home)
+            .env_remove("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION")
+            .args([
+                "--data-dir",
+                home.join(".drag/tracking").to_string_lossy().as_ref(),
+                "status",
+            ]),
+    )?;
+    assert_eq!(output["configuration"]["migration"]["status"], "completed");
+    Ok(())
+}
+
+#[test]
+fn tracking_status_supplies_recovery_for_old_and_rejects_corrupt_migration_records(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    tracking()?
+        .args([
+            "--data-dir",
+            directory.path().to_string_lossy().as_ref(),
+            "status",
+        ])
+        .assert()
+        .success();
+    std::fs::write(
+        directory.path().join("migration.json"),
+        r#"{"schemaVersion":1,"source":".drag-companion","status":"completed"}"#,
+    )?;
+    let old = json_output(tracking()?.args([
+        "--data-dir",
+        directory.path().to_string_lossy().as_ref(),
+        "status",
+    ]))?;
+    assert!(old["configuration"]["migration"]["recoveryAction"]
+        .as_str()
+        .ok_or("recovery action")?
+        .contains("move the directory back"));
+
+    std::fs::write(directory.path().join("migration.json"), "not-json")?;
+    tracking()?
+        .args([
+            "--data-dir",
+            directory.path().to_string_lossy().as_ref(),
+            "status",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration record"));
+    Ok(())
+}
+
+#[test]
+fn legacy_retention_parse_error_names_the_legacy_variable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    tracking()?
+        .args(["--data-dir", directory.path().to_string_lossy().as_ref()])
+        .env("DRAG_COMPANION_RETENTION_NOW", "not-a-timestamp")
+        .env_remove("DRAG_TRACKING_RETENTION_NOW")
+        .args(["internal", "retention", "enforce"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DRAG_COMPANION_RETENTION_NOW must be RFC3339",
+        ));
+    Ok(())
+}
+
+#[test]
+fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let structured = companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "status"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let structured: Value = serde_json::from_slice(&structured)?;
+    assert_eq!(structured["ok"], true);
+    assert_eq!(structured["data"]["schemaVersion"], 2);
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "human", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Automatic time tracking"))
+        .stderr(predicate::str::contains("drag-companion` is deprecated"))
+        .stderr(predicate::str::contains("use `drag tracking`"));
+
+    companion()?.arg("not-a-command").assert().code(2);
+    Ok(())
 }
 
 #[test]
@@ -370,23 +1369,24 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("status"))
-        .stdout(predicate::str::contains("collect"))
-        .stdout(predicate::str::contains("reconcile"))
+        .stdout(predicate::str::contains("setup"))
+        .stdout(predicate::str::contains("run"))
+        .stdout(predicate::str::contains("review"))
         .stdout(predicate::str::contains("resume"))
-        .stdout(predicate::str::contains("report"))
-        .stdout(predicate::str::contains("log"))
-        .stdout(predicate::str::contains("purge"))
-        .stdout(predicate::str::contains("scheduler"))
-        .stdout(predicate::str::contains("claude-hook"));
+        .stdout(predicate::str::contains("sources"))
+        .stdout(predicate::str::contains("schedule"))
+        .stdout(predicate::str::contains("collect").not())
+        .stdout(predicate::str::contains("reconcile").not())
+        .stdout(predicate::str::contains("claude-hook").not());
 
     companion()?
-        .args(["reconcile", "--help"])
+        .args(["internal", "reconcile", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--date"));
 
     companion()?
-        .args(["scheduler", "--help"])
+        .args(["internal", "scheduler", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("install"))
@@ -399,11 +1399,13 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destructively(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let data = dir.path().join("data & state");
+    let drag_config = dir.path().join("selected config.json");
     let systemd = dir.path().join("systemd");
     let launchd = dir.path().join("launchd");
     std::fs::create_dir_all(&systemd)?;
@@ -411,6 +1413,7 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
 
     let installed = json_output(
         companion()?
+            .env("DRAG_CONFIG", &drag_config)
             .args(["--data-dir", data.to_string_lossy().as_ref()])
             .args([
                 "scheduler",
@@ -423,16 +1426,17 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     )?;
     assert_eq!(installed["status"], "installed");
     assert_eq!(installed["hostSchedulerMutated"], false);
-    let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
-    let catch_up_service =
-        std::fs::read_to_string(systemd.join("drag-companion-catch-up.service"))?;
-    let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
+    let service = std::fs::read_to_string(systemd.join("drag-tracking.service"))?;
+    let catch_up_service = std::fs::read_to_string(systemd.join("drag-tracking-catch-up.service"))?;
+    let timer = std::fs::read_to_string(systemd.join("drag-tracking.timer"))?;
     assert!(service.contains("scheduler run --date"));
     assert!(service.contains("date +%%F"));
     assert!(catch_up_service.contains("scheduler catch-up"));
     assert!(service.contains("data & state'"));
+    assert!(service.contains("DRAG_CONFIG="));
+    assert!(service.contains("selected config.json"));
     assert!(timer.contains("18:45:00"));
-    assert!(timer.contains("Persistent=false"));
+    assert!(timer.contains("Persistent=true"));
     assert_eq!(
         std::fs::read_to_string(systemd.join("unrelated.timer"))?,
         "keep me"
@@ -450,15 +1454,18 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
             ])
             .arg(&launchd),
     )?;
-    let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
+    let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-tracking.plist"))?;
     let catch_up_plist =
-        std::fs::read_to_string(launchd.join("email.trevors.drag-companion.catch-up.plist"))?;
+        std::fs::read_to_string(launchd.join("email.trevors.drag-tracking.catch-up.plist"))?;
     assert!(plist.contains("scheduler run --date"));
     assert!(plist.contains("date +%F"));
     assert!(catch_up_plist.contains("scheduler catch-up"));
     assert!(plist.contains("data &amp; state"));
     assert!(plist.contains("<integer>18</integer>"));
     assert!(plist.contains("<integer>45</integer>"));
+    assert_eq!(plist.matches("<key>Weekday</key>").count(), 5);
+    assert!(plist.contains("<key>Weekday</key><integer>1</integer>"));
+    assert!(plist.contains("<key>Weekday</key><integer>5</integer>"));
     assert!(!plist.contains("RunAtLoad"));
     assert!(catch_up_plist.contains("RunAtLoad"));
 
@@ -482,6 +1489,28 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn scheduler_install_is_rejected_without_writing_unusable_resources_on_windows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+    let target = dir.path().join("scheduler");
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args(["scheduler", "install", "--target-dir"])
+        .arg(&target)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "scheduler installation is not supported on Windows",
+        ));
+    assert!(!target.exists());
+    assert!(!data.join("scheduler.json").exists());
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configuration(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -489,7 +1518,11 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
     let data = dir.path().join("data");
     let target = dir.path().join("systemd");
     std::fs::create_dir_all(&target)?;
-    std::fs::write(target.join("drag-companion.timer"), "# unrelated timer")?;
+    std::fs::write(target.join("drag-tracking.timer"), "# unrelated timer")?;
+    std::fs::write(
+        target.join("drag-companion.timer"),
+        "# managed-by=drag-companion\nlegacy schedule",
+    )?;
 
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -507,13 +1540,14 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
             "refusing to overwrite unrelated file",
         ));
     assert_eq!(
-        std::fs::read_to_string(target.join("drag-companion.timer"))?,
+        std::fs::read_to_string(target.join("drag-tracking.timer"))?,
         "# unrelated timer"
     );
+    assert!(target.join("drag-companion.timer").exists());
 
     std::fs::write(
-        target.join("drag-companion.timer"),
-        "# managed-by=drag-companion\n",
+        target.join("drag-tracking.timer"),
+        "# managed-by=drag-tracking\n",
     )?;
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -540,7 +1574,7 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
             ])
             .arg(&target),
     )?;
-    assert!(!target.join("drag-companion.timer").exists());
+    assert!(!target.join("drag-tracking.timer").exists());
     assert_eq!(
         std::fs::read_to_string(target.join("other.service"))?,
         "keep"
@@ -732,9 +1766,9 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
             .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
             .args(["scheduler", "status"]),
     )?;
-    assert_eq!(status["dragMachineContract"]["requiredVersion"], 10);
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 12);
     assert_eq!(status["dragMachineContract"]["compatible"], true);
-    assert_eq!(status["package"]["name"], "drag-companion");
+    assert_eq!(status["package"]["name"], "drag-tracking");
     assert_eq!(status["package"]["independent"], true);
     Ok(())
 }
@@ -1057,7 +2091,8 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         .clone();
     let contract: Value = serde_json::from_slice(&output)?;
 
-    assert_eq!(contract["binary"], "drag-companion");
+    assert_eq!(contract["binary"], "drag-tracking");
+    assert_eq!(contract["schemaVersion"], 2);
     assert_eq!(contract["defaultMode"], "capture-only");
     assert_eq!(contract["adapters"]["collector"], "fake");
     assert_eq!(contract["adapters"]["mutator"], "disabled");
@@ -1069,7 +2104,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         .as_array()
         .ok_or("top-level live conditions")?
         .iter()
-        .any(|item| item == "execute requires DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1"));
+        .any(|item| item == "automatic execution requires DRAG_TRACKING_LIVE_MUTATION_ROLLOUT=1"));
 
     let commands = contract["commands"].as_array().ok_or("commands array")?;
     for required in [
@@ -1985,7 +3020,7 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
     let rendered = serde_json::to_string(&installed)?;
     assert_eq!(
         rendered
-            .matches("drag-companion claude-hook capture")
+            .matches("drag-tracking internal claude-hook capture")
             .count(),
         2
     );
@@ -2004,7 +3039,9 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
         removed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
         "echo keep-tool"
     );
-    assert!(!serde_json::to_string(&removed)?.contains("drag-companion claude-hook capture"));
+    assert!(
+        !serde_json::to_string(&removed)?.contains("drag-tracking internal claude-hook capture")
+    );
     Ok(())
 }
 
@@ -2024,7 +3061,7 @@ fn claude_hook_install_defaults_to_the_user_claude_settings_file(
     let installed: Value = serde_json::from_str(&std::fs::read_to_string(settings)?)?;
     assert_eq!(
         serde_json::to_string(&installed)?
-            .matches("drag-companion claude-hook capture")
+            .matches("drag-tracking internal claude-hook capture")
             .count(),
         2
     );
@@ -2463,7 +3500,7 @@ set -euo pipefail
 log="{}/commands.log"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":10,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":12,"name":"drag"}}}}'
   exit 0
 fi
 	if [[ "$*" == *" log "* ]]; then
@@ -2563,7 +3600,7 @@ log="{0}/commands.log"
 state="{0}/remote.jsonl"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":10,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":12,"name":"drag"}}}}'
   exit 0
 fi
 if [[ "$*" == *" list "* ]]; then
@@ -2893,6 +3930,7 @@ fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
             &data,
             "--drag-bin",
             drag.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             "2026-03-08",
@@ -3576,7 +4614,7 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
     let drag = bash_executable(
         &dir,
         "bad-drag",
-        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":10}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
     )?;
     companion()?
         .args([
@@ -3845,6 +4883,7 @@ fn reconcile_resume_status_persist_phases_and_skip_confirmed_work(
         .args([
             "--data-dir",
             data_dir.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             date,
@@ -3957,6 +4996,7 @@ fn stale_lease_is_recovered_but_unexpired_lease_blocks_takeover(
         .args([
             "--data-dir",
             data_dir.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             date,
@@ -4017,6 +5057,7 @@ fn retries_only_read_only_phases_and_blocked_pre_mutation_never_submits(
         .args([
             "--data-dir",
             data_dir.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             blocked_date,

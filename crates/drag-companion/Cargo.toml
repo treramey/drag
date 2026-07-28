@@ -8,8 +8,12 @@ authors.workspace = true
 publish = false
 
 [[bin]]
-name = "drag-companion"
+name = "drag-tracking"
 path = "src/main.rs"
+
+[[bin]]
+name = "drag-companion"
+path = "src/compatibility.rs"
 
 [dependencies]
 chrono.workspace = true

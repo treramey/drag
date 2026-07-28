@@ -7,6 +7,14 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Validated, independently selected Git, calendar, and Claude Code evidence
+  sources with versioned health reports and bounded, redacted, non-mutating
+  source tests.
+- First-class `drag tracking` setup, status, run, review, source, schedule,
+  pause, resume, and safe uninstall workflows delegated to the separately
+  packaged `drag-tracking` process, with explicit effect authorization,
+  digest-bound review approval, state migration, versioned compatibility
+  checks, and a one-release `drag-companion` compatibility shim.
 - Portable Agent Skill recipes for coding-session logging, read-only daily and
   weekly audits, and explicitly authorized create-first worklog correction.
 - Conservative `read`, `mutation`, and `ambiguous` effect labels in generated

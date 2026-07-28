@@ -34,6 +34,7 @@ To build from this repository:
 
 ```bash
 cargo install --path crates/drag-cli
+cargo install --path crates/drag-companion
 ```
 
 ## Quick start
@@ -69,10 +70,46 @@ drag delete 123456 --dry-run
 | `drag delete` | `drag d` | Delete one or more worklogs |
 | `drag setup` | | Connect and verify Jira and Tempo |
 | `drag doctor` | | Check configuration and connections |
+| `drag tracking` | | Configure, run, review, pause, and inspect automatic tracking |
 | `drag tempo` | | Call the Tempo API from generated commands |
 | `drag schema` | | Inspect Drag or Tempo schemas |
 
 Run `drag <command> --help` for every option.
+
+Automatic tracking is a Drag capability backed by a separately packaged,
+versioned `drag-tracking` process. Configure approved local sources, a weekday
+schedule, and a submission policy, then inspect or run it through Drag:
+
+```bash
+drag tracking setup --mode draft
+drag tracking status
+drag tracking run today
+drag tracking review today
+drag tracking sources list
+drag tracking sources configure --repo ~/work/project
+drag tracking sources configure --ics ~/calendar.ics
+drag tracking sources test today
+drag tracking schedule show
+drag --output json tracking status
+```
+
+Draft mode cannot submit worklogs. Review mode requires an approval bound to
+the current proposal-set digest. Automatic mode requires separate setup-time
+authorization plus every runtime rollout, duplicate, uncertainty, and kill
+switch gate. Scheduler files, Claude hooks, and automatic submission are
+authorized independently. Tracking state lives under `~/.drag/tracking`; the
+first run atomically migrates a legacy `.drag-companion` store when only that
+store exists.
+
+Source configuration validates each selected local repository and calendar
+before saving it and leaves other source kinds unchanged. Claude Code can be
+selected with `sources configure --claude-code` after its separately authorized
+hooks are installed. Source tests cap observations, return redacted references
+instead of paths or evidence content, and never persist evidence or generate or
+submit worklogs.
+
+The deprecated `drag-companion` executable remains available as a compatibility
+shim for this release.
 
 When `drag list` opens an interactive terminal report, use Left/Right Arrow or
 `h`/`l` to change days, Up/Down Arrow or `k`/`j` to move between worklogs, and

@@ -11,6 +11,7 @@
   "bugs": "https://github.com/treramey/drag/issues",
   "bin": {
     "drag": "run.js",
+    "drag-tracking": "run-tracking.js",
     "drag-companion": "run-companion.js"
   },
   "scripts": {
@@ -25,6 +26,7 @@
     "install.js",
     "platform.js",
     "run.js",
+    "run-tracking.js",
     "run-companion.js"
   ],
   "publishConfig": {
@@ -34,21 +36,25 @@
     "x86_64-unknown-linux-gnu": {
       "artifact": "drag-x86_64-unknown-linux-gnu.tar.gz",
       "binary": "drag",
+      "trackingBinary": "drag-tracking",
       "companionBinary": "drag-companion"
     },
     "x86_64-apple-darwin": {
       "artifact": "drag-x86_64-apple-darwin.tar.gz",
       "binary": "drag",
+      "trackingBinary": "drag-tracking",
       "companionBinary": "drag-companion"
     },
     "aarch64-apple-darwin": {
       "artifact": "drag-aarch64-apple-darwin.tar.gz",
       "binary": "drag",
+      "trackingBinary": "drag-tracking",
       "companionBinary": "drag-companion"
     },
     "x86_64-pc-windows-msvc": {
       "artifact": "drag-x86_64-pc-windows-msvc.zip",
       "binary": "drag.exe",
+      "trackingBinary": "drag-tracking.exe",
       "companionBinary": "drag-companion.exe"
     }
   }

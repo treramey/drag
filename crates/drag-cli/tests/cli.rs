@@ -197,6 +197,151 @@ fn reports_version() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn tracking_status_is_discoverable_from_standard_help() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Command::cargo_bin("drag")?.arg("--help").output()?;
+    assert!(root.status.success());
+    assert!(String::from_utf8(root.stdout)?.contains("tracking"));
+
+    let tracking = Command::cargo_bin("drag")?
+        .args(["tracking", "--help"])
+        .output()?;
+    assert!(tracking.status.success());
+    let stdout = String::from_utf8(tracking.stdout)?;
+    for command in [
+        "setup",
+        "status",
+        "run",
+        "review",
+        "pause",
+        "resume",
+        "uninstall",
+        "sources",
+        "schedule",
+    ] {
+        assert!(
+            stdout.contains(command),
+            "missing tracking command {command}"
+        );
+    }
+    assert!(stdout.contains("automatic time tracking"));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copied_drag_with_tracking(
+    directory: &TempDir,
+    tracking_script: Option<&str>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = Command::cargo_bin("drag")?.get_program().to_owned();
+    let drag = directory.path().join("drag");
+    fs::copy(source, &drag)?;
+    let mut permissions = fs::metadata(&drag)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&drag, permissions)?;
+
+    if let Some(script) = tracking_script {
+        let tracking = directory.path().join("drag-tracking");
+        fs::write(&tracking, script)?;
+        let mut permissions = fs::metadata(&tracking)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(tracking, permissions)?;
+    }
+    Ok(drag)
+}
+
+#[cfg(unix)]
+#[test]
+fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(
+        &directory,
+        Some(
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nprintf 'config:%s\\n' \"$DRAG_CONFIG\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
+        ),
+    )?;
+    let selected_config = directory.path().join("selected-config.json");
+
+    let mut command = std::process::Command::new(&drag);
+    command
+        .args(["--output", "json", "--config"])
+        .arg(&selected_config)
+        .args([
+            "tracking",
+            "sources",
+            "configure",
+            "--repo",
+            "/tmp/repo",
+            "--clear-ics",
+            "--claude-code",
+        ])
+        .env("DRAG_CONFIG", directory.path().join("wrong-config.json"))
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .ok_or("tracking stdin was not piped")?
+        .write_all(b"tracking stdin\n")?;
+    let output = child.wait_with_output()?;
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        format!(
+            "arguments:--output json --drag-bin {} sources configure --repo /tmp/repo --clear-ics --claude-code\nconfig:{}\ntracking stdin\n",
+            drag.display(),
+            selected_config.display()
+        )
+    );
+    assert_eq!(String::from_utf8(output.stderr)?, "tracking stderr\n");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn tracking_delegation_reports_missing_and_incompatible_processes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let missing_directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(&missing_directory, None)?;
+    let missing = std::process::Command::new(drag)
+        .args(["--output", "json", "tracking", "status"])
+        .env("PATH", "")
+        .output()?;
+    assert_eq!(missing.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&missing.stderr)?;
+    assert_eq!(error["error"]["code"], "tracking_unavailable");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("missing tracking error message")?
+        .contains("reinstall"));
+
+    let incompatible_directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(
+        &incompatible_directory,
+        Some("#!/bin/sh\nprintf '{\"schemaVersion\":999,\"binary\":\"drag-tracking\"}'\n"),
+    )?;
+    let incompatible = std::process::Command::new(drag)
+        .args(["--output", "json", "tracking", "status"])
+        .env("PATH", "")
+        .output()?;
+    assert_eq!(incompatible.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&incompatible.stderr)?;
+    assert_eq!(error["error"]["code"], "tracking_incompatible");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("incompatible tracking error message")?
+        .contains("expected contract version 2"));
+    Ok(())
+}
+
+#[test]
 fn local_skill_generation_is_configuration_free_deterministic_and_safe(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
@@ -222,7 +367,7 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     );
     let body: Value = serde_json::from_slice(&first.stdout)?;
     assert_eq!(body["data"]["scope"], "local");
-    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(8));
+    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(9));
 
     let log_path = directory.path().join("skills/drag-log/SKILL.md");
     let delete_path = directory.path().join("skills/drag-delete/SKILL.md");
@@ -231,6 +376,10 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     assert!(first_log.contains("--dry-run"));
     let delete = fs::read_to_string(delete_path)?;
     assert!(delete.contains("permanently removes Tempo worklogs"));
+    let tracking = fs::read_to_string(directory.path().join("skills/drag-tracking/SKILL.md"))?;
+    assert!(tracking.contains("drag tracking setup"));
+    assert!(tracking.contains("drag tracking review"));
+    assert!(tracking.contains("Never invoke the hidden `drag-tracking internal`"));
     let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
     assert!(!index.contains("drag-tempo"));
     for recipe in [
@@ -844,6 +993,8 @@ fn repeated_log_attribute_flags_use_the_last_value_for_each_key(
             "log",
             "ABC-1",
             "30m",
+            "--start",
+            "09:00",
             "--attr",
             "_Test_=first",
             "--attr",
@@ -871,7 +1022,7 @@ fn repeated_log_attribute_flags_use_the_last_value_for_each_key(
         .args([
             "log",
             "--json",
-            r#"{"issueKey":"ABC-1","durationOrInterval":"30m","attributes":{"_Test_":"last","_Worktype_":"Development=Backend"}}"#,
+            r#"{"issueKey":"ABC-1","durationOrInterval":"30m","start":"09:00","attributes":{"_Test_":"last","_Worktype_":"Development=Backend"}}"#,
             "--dry-run",
         ])
         .output()?;
@@ -1031,7 +1182,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 10);
+    assert_eq!(contract["schemaVersion"], 12);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");
@@ -1083,6 +1234,14 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         contract["commands"]["delete"]["aliases"],
         serde_json::json!(["d"])
+    );
+    assert_eq!(
+        contract["commands"]["tracking"]["sideEffects"]["sourcesTest"],
+        serde_json::json!(["runBoundedRedactedLocalChecks"])
+    );
+    assert_eq!(
+        contract["commands"]["tracking"]["networkAccess"]["sources"],
+        serde_json::json!({"local": "read", "jira": "none", "tempo": "none"})
     );
     let log_arguments = contract["commands"]["log"]["arguments"]
         .as_array()

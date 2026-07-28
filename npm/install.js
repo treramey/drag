@@ -49,7 +49,7 @@ async function install() {
       run("tar", ["-xzf", archive, "-C", installDir, "--strip-components=1"]);
     }
 
-    const binaries = [platform.binary, platform.companionBinary];
+    const binaries = [platform.binary, platform.trackingBinary, platform.companionBinary];
     for (const name of binaries) {
       let binary = path.join(installDir, name);
       if (!fs.existsSync(binary)) {

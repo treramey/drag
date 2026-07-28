@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 10;
+const SCHEMA_VERSION: u64 = 12;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -140,6 +140,7 @@ enum CommandIdentity {
     Delete,
     Setup,
     Doctor,
+    Tracking,
     Tempo,
     Resolve,
     Schema,
@@ -155,11 +156,13 @@ impl CommandIdentity {
             "delete" => Some(Self::Delete),
             "setup" => Some(Self::Setup),
             "doctor" => Some(Self::Doctor),
+            "tracking" => Some(Self::Tracking),
             "resolve" => Some(Self::Resolve),
             "tempo" => Some(Self::Tempo),
             "schema" => Some(Self::Schema),
             "generate-skills" => Some(Self::GenerateSkills),
             "help" => Some(Self::Help),
+            path if path.starts_with("tracking ") => Some(Self::Tracking),
             _ => None,
         }
     }
@@ -459,6 +462,10 @@ fn command_skill_policy(identity: CommandIdentity) -> Option<CommandSkillPolicy>
             heading: "Read-only resolution policy",
             guidance: "`resolve` verifies a proposed Jira issue key and discovers required Tempo work attributes through Drag's authenticated adapters. It is read-only, returns stable JSON, and must be used by automation before constructing companion payloads that would otherwise rely on seeded resolution rows.",
         }),
+        CommandIdentity::Tracking => Some(CommandSkillPolicy {
+            heading: "Tracking safety policy",
+            guidance: "Use intent-level `drag tracking setup|status|run|review|pause|resume|uninstall`, `drag tracking sources ...`, and `drag tracking schedule ...` commands. Never invoke the hidden `drag-tracking internal` pipeline for normal work. Draft mode cannot submit. Review mode requires `drag tracking review approve DATE` for the current proposal-set digest. Automatic mode requires separate setup authorization and every runtime safety gate.",
+        }),
         CommandIdentity::Setup
         | CommandIdentity::Doctor
         | CommandIdentity::Tempo
@@ -577,6 +584,32 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             error_codes: [remote_errors, vec!["remote_check_failed"]].concat(),
             side_effects: json!({"default": []}),
             network_access: json!({"default": {}, "remote": {"jira": "read", "tempo": "read"}}),
+            dry_run: unsupported_dry_run(),
+        },
+        CommandIdentity::Tracking => CommandSemantics {
+            success: tracking_success_schema(),
+            error_codes: vec![
+                "usage",
+                "tracking_error",
+                "tracking_unavailable",
+                "tracking_incompatible",
+            ],
+            side_effects: json!({
+                "status": ["initializeLocalTrackingStateIfMissing"],
+                "setup": ["persistTrackingConfiguration", "explicitlyAuthorizedSchedulerOrHookInstallation"],
+                "run": ["persistResumableRunState", "conditionallySubmitApprovedWorklogs"],
+                "reviewApprove": ["persistProposalSetDigestApproval"],
+                "sourcesList": ["readLocalSourceHealth"],
+                "sourcesConfigure": ["readLocalSourceHealth", "persistValidatedSourceSelection"],
+                "sourcesTest": ["runBoundedRedactedLocalChecks"],
+                "pauseResume": ["updateSchedulerState"],
+                "uninstall": ["removeOnlyTrackingOwnedFiles", "preserveHistory"]
+            }),
+            network_access: json!({
+                "default": {},
+                "sources": {"local": "read", "jira": "none", "tempo": "none"},
+                "run": {"drag": "read", "tempoMutation": "conditionalOnModeApprovalAndRuntimeGates"}
+            }),
             dry_run: unsupported_dry_run(),
         },
         CommandIdentity::Resolve => CommandSemantics {
@@ -820,6 +853,15 @@ fn command_behavior_contract(identity: CommandIdentity) -> Value {
         CommandIdentity::Doctor => json!({
             "remote": "opt-in read-only Jira and Tempo checks",
             "remoteStatuses": ["connected", "notConfigured", "failed"]
+        }),
+        CommandIdentity::Tracking => json!({
+            "processBoundary": "drag-tracking executable",
+            "contractVersion": 2,
+            "discovery": ["adjacentExecutable", "PATH"],
+            "delegation": "noShellWithInheritedStandardStreamsAndExitStatus",
+            "publicCommands": ["setup", "status", "run", "review", "pause", "resume", "uninstall", "sources", "schedule"],
+            "status": "localOnlyWithoutDragCredentialLoading",
+            "internalStages": "hiddenInDragTracking"
         }),
         CommandIdentity::Resolve => json!({
             "boundary": "readOnlyJiraTempoResolution",
@@ -1113,7 +1155,7 @@ fn setup_success_schema() -> Value {
             },
             {
                 "type": "object",
-                "required": ["configured", "path", "source", "connection"],
+                "required": ["configured", "path", "source", "connection", "automaticTracking"],
                 "properties": {
                     "configured": {"const": true},
                     "path": {"type": "string"},
@@ -1124,6 +1166,16 @@ fn setup_success_schema() -> Value {
                         "properties": {
                             "jira": {"type": "object", "required": ["status", "hostname", "email"], "properties": {"status": {"const": "connected"}, "hostname": {"type": "string"}, "email": {"type": "string"}}, "additionalProperties": false},
                             "tempo": {"type": "object", "required": ["status"], "properties": {"status": {"const": "connected"}}, "additionalProperties": false}
+                        },
+                        "additionalProperties": false
+                    },
+                    "automaticTracking": {
+                        "type": "object",
+                        "required": ["configured", "optional", "nextCommand"],
+                        "properties": {
+                            "configured": {"const": false},
+                            "optional": {"const": true},
+                            "nextCommand": {"const": "drag tracking setup"}
                         },
                         "additionalProperties": false
                     }
@@ -1148,6 +1200,66 @@ fn setup_success_schema() -> Value {
                     "configuration": object_schema(&["status", "credentials"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}}))
                 },
                 "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn tracking_success_schema() -> Value {
+    json!({
+        "oneOf": [
+            object_schema(
+                &[
+                    "schemaVersion",
+                    "status",
+                    "configuration",
+                    "activity",
+                    "scheduler",
+                    "submission",
+                    "latestRun",
+                    "pendingAction",
+                    "networkAccess",
+                    "liveMutationAllowed",
+                ],
+                json!({
+                    "schemaVersion": {"const": 2},
+                    "status": {"type": "string"},
+                    "configuration": {"type": "object"},
+                    "activity": {"type": "object"},
+                    "scheduler": {"type": "object"},
+                    "submission": {"type": "object"},
+                    "latestRun": {"type": ["object", "null"]},
+                    "pendingAction": {"type": "string"},
+                    "networkAccess": {"type": "boolean"},
+                    "liveMutationAllowed": {"type": "boolean"}
+                }),
+            ),
+            object_schema(
+                &[
+                    "schemaVersion",
+                    "selectedDate",
+                    "status",
+                    "networkAccess",
+                    "liveMutationAllowed",
+                    "nextSafeAction",
+                ],
+                json!({
+                    "schemaVersion": {"const": 2},
+                    "selectedDate": {"type": "string", "format": "date"},
+                    "status": {"type": "string"},
+                    "networkAccess": {"type": "boolean"},
+                    "liveMutationAllowed": {"type": "boolean"},
+                    "nextSafeAction": {"type": "string"}
+                }),
+            ),
+            {
+                "type": "object",
+                "required": ["networkAccess", "liveMutationAllowed"],
+                "properties": {
+                    "networkAccess": {"type": "boolean"},
+                    "liveMutationAllowed": {"type": "boolean"}
+                },
+                "additionalProperties": true
             }
         ]
     })
@@ -1203,6 +1315,7 @@ fn command_failure_details(identity: CommandIdentity) -> Value {
         | CommandIdentity::List
         | CommandIdentity::Delete
         | CommandIdentity::Setup
+        | CommandIdentity::Tracking
         | CommandIdentity::Resolve
         | CommandIdentity::Tempo
         | CommandIdentity::Schema
@@ -1273,7 +1386,10 @@ fn error_contract() -> Value {
             "remote_check_failed": {
                 "exitCodes": [1, 2],
                 "selection": "most severe failed remote check"
-            }
+            },
+            "tracking_unavailable": 1,
+            "tracking_incompatible": 1,
+            "tracking_error": 1
         }
     })
 }

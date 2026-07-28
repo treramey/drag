@@ -272,10 +272,15 @@ impl App {
             "connection": {
                 "jira": {"status": "connected", "hostname": credentials.hostname, "email": credentials.atlassian_user_email},
                 "tempo": {"status": "connected"}
+            },
+            "automaticTracking": {
+                "configured": false,
+                "optional": true,
+                "nextCommand": "drag tracking setup"
             }
         });
         let human = format!(
-            "Connected {} to Jira and Tempo. Configuration saved to {}. Next, try `drag list`.",
+            "Connected {} to Jira and Tempo. Configuration saved to {}. Next, try `drag list`. Automatic tracking is optional; configure its local sources, schedule, and submission policy with `drag tracking setup`.",
             credentials.atlassian_user_email,
             self.path.display()
         );

@@ -1,20 +1,42 @@
 use crate::*;
 
 pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
+    if matches!(&cli.command, Command::Contract) {
+        return print_json(&contract());
+    }
     let drag_bin = cli.drag_bin.clone();
-    let data_dir = cli
-        .data_dir
-        .unwrap_or_else(|| PathBuf::from(".drag-companion"));
+    let data_dir = resolve_data_dir(cli.data_dir.clone())?;
+    let output = cli.output;
     let _state_lock = match &cli.command {
         Command::Contract => None,
-        Command::Purge(_) | Command::Rollout(_) => {
+        Command::Purge(_) | Command::Rollout(_) | Command::Internal(_) => {
             Some(acquire_companion_state_lock(&data_dir, true)?)
         }
         _ => Some(acquire_companion_state_lock(&data_dir, false)?),
     };
 
     match cli.command {
-        Command::Status => print_json(&status_payload(&data_dir)?),
+        Command::Setup(args) => setup_tracking(&data_dir, &drag_bin, args, output),
+        Command::Status => tracking_status(&data_dir, output),
+        Command::Run(args) => run_tracking(&data_dir, &drag_bin, args, output),
+        Command::Review(args) => review_tracking(&data_dir, args, output),
+        Command::Pause => set_tracking_active(&data_dir, false, output),
+        Command::ResumeTracking => set_tracking_active(&data_dir, true, output),
+        Command::Uninstall => uninstall_tracking(&data_dir, output),
+        Command::Sources(args) => match args.operation {
+            PublicSourcesOperation::List => list_sources(&data_dir, output),
+            PublicSourcesOperation::Configure(args) => configure_sources(&data_dir, args, output),
+            PublicSourcesOperation::Test(args) => test_sources(&data_dir, args, output),
+        },
+        Command::Schedule(args) => match args.operation {
+            PublicScheduleOperation::Show => show_schedule(&data_dir, output),
+            PublicScheduleOperation::Update(args) => {
+                update_schedule(&data_dir, &drag_bin, args, output)
+            }
+            PublicScheduleOperation::Pause => set_tracking_active(&data_dir, false, output),
+            PublicScheduleOperation::Resume => set_tracking_active(&data_dir, true, output),
+        },
+        Command::Internal(args) => handle_internal(&data_dir, &drag_bin, args.command),
         Command::Collect(args) => {
             let result = collect_activity(&data_dir, &args)?;
             print_json(&result)
@@ -34,10 +56,6 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
         }
         Command::Reconcile(args) => {
             let result = coordinated_run(&data_dir, &drag_bin, args.date, false)?;
-            print_json(&result)
-        }
-        Command::Resume(args) => {
-            let result = coordinated_run(&data_dir, &drag_bin, args.date, true)?;
             print_json(&result)
         }
         Command::Report(args) => println_safe_markdown(&daily_report(&data_dir, args.date)?),
@@ -102,7 +120,106 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
                 )
             }
         },
-        Command::Contract => print_json(&contract()),
+        Command::Contract => unreachable!("contract commands return before state resolution"),
+    }
+}
+
+fn handle_internal(
+    data_dir: &Path,
+    drag_bin: &Path,
+    command: InternalCommand,
+) -> Result<(), CompanionError> {
+    match command {
+        InternalCommand::Collect(args) => print_json(&collect_activity(data_dir, &args)?),
+        InternalCommand::Capture(args) => {
+            let event = evidence_event(args.date);
+            append_journal_event(data_dir, &event)?;
+            print_json(&serde_json::json!({
+                "status": "captured",
+                "eventId": event.event_id,
+                "journal": journal_path(data_dir)
+            }))
+        }
+        InternalCommand::Import => {
+            let imported = import_journal(data_dir)?;
+            print_json(&serde_json::json!({
+                "status": "imported",
+                "imported": imported,
+                "store": store_path(data_dir)
+            }))
+        }
+        InternalCommand::Reconcile(args) => {
+            print_json(&coordinated_run(data_dir, drag_bin, args.date, false)?)
+        }
+        InternalCommand::Resume(args) => {
+            print_json(&coordinated_run(data_dir, drag_bin, args.date, true)?)
+        }
+        InternalCommand::Report(args) => println_safe_markdown(&daily_report(data_dir, args.date)?),
+        InternalCommand::Log(args) => print_json(&operator_log(data_dir, args.date)?),
+        InternalCommand::Bundle(args) => print_json(&build_bundle(data_dir, args.date)?),
+        InternalCommand::Propose(args) => {
+            print_json(&propose_from_fixture(data_dir, args.date, &args.fixture)?)
+        }
+        InternalCommand::Read(args) => print_json(&read_drag_day(drag_bin, args.date)?),
+        InternalCommand::Audit(args) => print_json(&audit_drag_day(
+            data_dir,
+            drag_bin,
+            args.date,
+            args.authorize_unattended,
+        )?),
+        InternalCommand::Preview(args) => print_json(&preview_drag_payload(
+            data_dir,
+            drag_bin,
+            args.date,
+            args.proposal.as_deref(),
+        )?),
+        InternalCommand::Execute(args) => print_json(&execute_drag_worklogs(
+            data_dir,
+            drag_bin,
+            args.date,
+            args.authorize_live,
+        )?),
+        InternalCommand::Rollout(args) => handle_rollout(data_dir, args),
+        InternalCommand::Replay(args) => {
+            print_json(&run_replay(&args.fixtures, args.artifacts.as_deref())?)
+        }
+        InternalCommand::ProcessSpy(args) => print_json(&process_spy(data_dir, args.date)?),
+        InternalCommand::Purge(args) => {
+            print_json(&purge_state(data_dir, args.acknowledge_lost_recovery)?)
+        }
+        InternalCommand::Retention(args) => match args.operation {
+            RetentionOperation::Enforce => {
+                print_json(&enforce_retention(data_dir, RetentionTrigger::Operator)?)
+            }
+        },
+        InternalCommand::Scheduler(args) => handle_scheduler(data_dir, drag_bin, args),
+        InternalCommand::ClaudeHook(args) => match args.operation {
+            ClaudeHookOperation::Install(args) => {
+                install_claude_hooks(&args.settings)?;
+                print_json(&serde_json::json!({
+                    "status": "installed",
+                    "settings": args.settings,
+                    "events": ["SessionStart", "SessionEnd"]
+                }))
+            }
+            ClaudeHookOperation::Remove(args) => {
+                remove_claude_hooks(&args.settings)?;
+                print_json(&serde_json::json!({
+                    "status": "removed",
+                    "settings": args.settings
+                }))
+            }
+            ClaudeHookOperation::Capture => {
+                let event = read_claude_hook_event(data_dir)?;
+                append_journal_event(data_dir, &event)?;
+                print_json(&serde_json::json!({
+                    "status": "captured",
+                    "eventId": event.event_id,
+                    "journal": journal_path(data_dir),
+                    "networkAccess": false
+                }))
+            }
+        },
     }
 }
 

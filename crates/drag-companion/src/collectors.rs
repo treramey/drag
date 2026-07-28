@@ -909,7 +909,9 @@ pub(crate) fn is_our_command(command: &Value) -> bool {
     command
         .get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| command.contains(CLAUDE_HOOK_COMMAND))
+        .is_some_and(|command| {
+            command.contains(CLAUDE_HOOK_COMMAND) || command.contains(LEGACY_CLAUDE_HOOK_COMMAND)
+        })
 }
 
 pub(crate) fn read_claude_hook_event(data_dir: &Path) -> Result<JournalEvent, CompanionError> {

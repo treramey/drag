@@ -16,7 +16,7 @@
           version = workspace.workspace.package.version;
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          cargoBuildFlags = [ "--package" "drag-cli" ];
+          cargoBuildFlags = [ "--package" "drag-cli" "--package" "drag-companion" ];
           cargoTestFlags = [ "--workspace" ];
           meta = with pkgs.lib; {
             description = "A fast Tempo.io Cloud command-line client";

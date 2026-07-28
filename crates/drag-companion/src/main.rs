@@ -9,7 +9,7 @@ use chrono::{
     Timelike, Utc,
 };
 use chrono_tz::Tz;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -30,13 +30,16 @@ const PROPOSAL_ADAPTER: &str = "provider-fixture";
 const MAX_BUNDLE_BYTES: usize = 128 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_PROVIDER_ATTEMPTS: u32 = 2;
-const CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
+const CLAUDE_HOOK_COMMAND: &str = "drag-tracking internal claude-hook capture";
+const LEGACY_CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
 const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
 const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
 const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
 const SCHEDULER_SCHEMA_VERSION: u32 = 2;
-const DRAG_MACHINE_CONTRACT_VERSION: u32 = 10;
-const TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES";
+const DRAG_MACHINE_CONTRACT_VERSION: u32 = 12;
+const TRACKING_MACHINE_CONTRACT_VERSION: u32 = 2;
+const TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_TRACKING_TEMPO_WORK_ATTRIBUTES";
+const LEGACY_TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES";
 const DEFAULT_SCHEDULE_TIME: &str = "18:45";
 const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
 
@@ -46,14 +49,17 @@ mod contract;
 mod drag_gateway;
 mod errors;
 mod evidence_bundles;
+mod evidence_sources;
 mod execution;
 mod operator_retention;
 mod persistence_journal;
 mod provider_proposals;
+mod public_tracking;
 mod replay;
 mod rollout;
 mod run_coordination;
 mod scheduler;
+mod tracking_config;
 
 pub(crate) use cli_contract::*;
 pub(crate) use collectors::*;
@@ -61,18 +67,30 @@ pub(crate) use contract::*;
 pub(crate) use drag_gateway::*;
 pub(crate) use errors::*;
 pub(crate) use evidence_bundles::*;
+pub(crate) use evidence_sources::*;
 pub(crate) use execution::*;
 pub(crate) use operator_retention::*;
 pub(crate) use persistence_journal::*;
 pub(crate) use provider_proposals::*;
+pub(crate) use public_tracking::*;
 pub(crate) use replay::*;
 pub(crate) use rollout::*;
 pub(crate) use run_coordination::*;
 pub(crate) use scheduler::*;
+pub(crate) use tracking_config::*;
 
 fn main() {
-    if let Err(error) = run(Cli::parse()) {
-        eprintln!("{error}");
+    let cli = Cli::parse();
+    let output = cli.output;
+    if let Err(error) = run(cli) {
+        if output == Some(TrackingOutputMode::Json) {
+            let _ = print_error_json(&serde_json::json!({
+                "ok": false,
+                "error": {"code": "tracking_error", "message": error.to_string()}
+            }));
+        } else {
+            eprintln!("{error}");
+        }
         std::process::exit(1);
     }
 }

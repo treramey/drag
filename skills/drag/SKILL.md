@@ -22,6 +22,7 @@ Use `drag` to work with Tempo Cloud through stable structured output and explici
 | [`drag-log`](../drag-log/SKILL.md) | `drag log` | Add a worklog using a duration or interval |
 | [`drag-list`](../drag-list/SKILL.md) | `drag list` | List worklogs for a date without changing Jira or Tempo |
 | [`drag-delete`](../drag-delete/SKILL.md) | `drag delete` | Delete one or more worklogs |
+| [`drag-tracking`](../drag-tracking/SKILL.md) | `drag tracking` | Manage automatic time tracking |
 
 ## Configuration and secrets
 

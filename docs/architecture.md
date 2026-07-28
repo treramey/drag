@@ -137,32 +137,40 @@ filesystem, process, prompt, and HTTP behavior in `drag-cli`. Update
 `drag schema`, tests, README examples, and `CHANGELOG.md` when a public
 contract changes.
 
-## Companion process boundary
+## Tracking process boundary
 
-`drag-companion` is a sibling workspace binary rather than a module inside
-`drag` or `drag-cli`. The companion owns end-of-day capture state and scheduler
-lifecycle descriptions, while Drag remains a separate structured process
-boundary. When the companion needs Drag behavior, it must invoke the public
+`drag-tracking` is a sibling workspace binary rather than a module inside
+`drag` or `drag-cli`. It owns end-of-day capture state and scheduler lifecycle
+descriptions, while Drag remains a separate structured process boundary.
+Every `drag tracking` method verifies the adjacent or discoverable tracking
+machine contract, then delegates without a shell while inheriting standard
+streams and exit status. When tracking needs Drag behavior, it must invoke the public
 `drag` CLI and consume the stable `drag schema` contract instead of linking into
 `drag-cli` internals. This keeps side effects auditable, preserves Drag's CLI and
-schema as the integration seam, and prevents a model or companion workflow from
+schema as the integration seam, and prevents a model or tracking workflow from
 receiving shell access or direct Tempo mutation authority.
 
-The v1 companion defaults to capture-only fake adapters. Its machine-readable
-contract reports no network access and no live mutation path. Unsupported
-collectors such as Jira activity, Codex, and proprietary calendars remain
-deferred until separate tickets define their adapters and safety invariants.
+`drag-companion` is a compatibility shim for the transition. It delegates to
+`drag-tracking`, warns only for explicitly human output, and leaves structured
+stdout unchanged.
+
+The public surface owns intent-level setup, status, run, review, source,
+schedule, pause, resume, and uninstall methods. Pipeline stages remain hidden
+under `drag-tracking internal` for diagnostics, tests, replay, and recovery.
+Draft mode cannot mutate. Review approval is bound to an immutable proposal-set
+digest. Automatic execution additionally requires explicit authorization and
+all durable rollout, duplicate, uncertainty, and kill-switch gates.
 
 ### Scheduler package and recovery
 
-`drag-companion` is packaged as its own binary and advertises an independent
+`drag-tracking` is packaged as its own binary and advertises an independent
 machine contract. Package startup and `scheduler status` report the required
 Drag machine contract version before any scheduler work is attempted.
 
 The scheduler installs only files it owns. Linux installs a systemd user
-`drag-companion.timer` and `drag-companion.service`. macOS installs the launchd
-agent `email.trevors.drag-companion.plist`. Both invoke the same scheduler-safe
-explicit-date command, `drag-companion scheduler run --date YYYY-MM-DD`, with the
+`drag-tracking.timer` and `drag-tracking.service`. macOS installs the launchd
+agent `email.trevors.drag-tracking.plist`. Both invoke the same scheduler-safe
+explicit-date command under `drag-tracking internal scheduler`, with the
 default 18:45 configured local time. systemd uses `Persistent=true`; launchd uses
 `RunAtLoad`, so startup/wake paths reconcile catch-up through companion state
 rather than granting host schedulers mutation authority.
@@ -171,18 +179,27 @@ Catch-up selects at most one day: the latest missed weekday newer than the last
 success and no older than seven days. DST, timezone changes, sleep/wake startup,
 duplicate triggers, disabled state, and old misses are covered by CLI fixtures.
 Duplicate triggers are suppressed by durable operation keys in
-`.drag-companion/scheduler.json`.
+`~/.drag/tracking/scheduler.json`.
 
 Install and uninstall are non-destructive. The installer refuses to overwrite a
-same-named file unless it contains `managed-by=drag-companion`; uninstall removes
-only those owned files and preserves unrelated hooks, services, launch agents,
-and user configuration.
+same-named file unless it contains `managed-by=drag-tracking`; migration also
+recognizes and replaces legacy owned files marked `managed-by=drag-companion`.
+Uninstall removes only owned files and preserves history, unrelated hooks,
+services, launch agents, and user configuration.
 
 Scheduler upgrades are atomic. State writes go through a temporary file, existing
 state is copied to `scheduler.json.bak`, and migrations preserve operation keys
 and resumability metadata. To roll back, stop the host scheduler, restore the
 backup over `scheduler.json`, reinstall the previous package, then run
 `scheduler status` before re-enabling. The immediate kill switch is either the
-`DRAG_COMPANION_KILL_SWITCH` environment variable or a `scheduler.kill` file in
-the data directory; when active, every scheduler entrypoint returns shadow mode
-and prevents mutation before work starts.
+`DRAG_TRACKING_KILL_SWITCH` environment variable or a `scheduler.kill` file in
+the data directory; the legacy `DRAG_COMPANION_KILL_SWITCH` remains recognized
+during the compatibility release. When active, every scheduler entrypoint
+returns shadow mode and prevents mutation before work starts.
+
+The first default-path invocation atomically renames a lone legacy
+`.drag-companion` store to `~/.drag/tracking` and records
+`migration.json`. It refuses to proceed when both stores exist so two
+schedulers cannot become active over divergent recovery ledgers. To roll back,
+pause tracking, move `~/.drag/tracking` back to `.drag-companion`, reinstall
+the previous package, inspect status, and only then re-enable its scheduler.

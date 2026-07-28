@@ -37,15 +37,15 @@ pub(crate) struct RetentionConfig {
 pub(crate) fn retention_config_values() -> RetentionConfig {
     RetentionConfig {
         raw_days: retention_days(
-            "DRAG_COMPANION_RETENTION_RAW_DAYS",
+            "DRAG_TRACKING_RETENTION_RAW_DAYS",
             RAW_EVIDENCE_RETENTION_DAYS,
         ),
         normalized_days: retention_days(
-            "DRAG_COMPANION_RETENTION_NORMALIZED_DAYS",
+            "DRAG_TRACKING_RETENTION_NORMALIZED_DAYS",
             NORMALIZED_EVIDENCE_RETENTION_DAYS,
         ),
         report_ledger_days: retention_days(
-            "DRAG_COMPANION_RETENTION_REPORT_LEDGER_DAYS",
+            "DRAG_TRACKING_RETENTION_REPORT_LEDGER_DAYS",
             REPORT_LEDGER_RETENTION_DAYS,
         ),
     }
@@ -459,6 +459,7 @@ pub(crate) fn run_file_is_protected(path: &Path) -> bool {
 }
 
 pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
+    let configured = config_path(data_dir).exists() || scheduler_state_path(data_dir).exists();
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
@@ -470,9 +471,142 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
     let now = epoch_ms();
     let mut stmt = conn.prepare("SELECT tempo_account, local_date, owner_id, heartbeat_at, expires_at_ms FROM run_leases WHERE expires_at_ms > ?1 ORDER BY local_date")?;
     let leases = stmt.query_map([now], |row| Ok(serde_json::json!({"tempoAccount": row.get::<_, String>(0)?, "localDate": row.get::<_, String>(1)?, "ownerId": row.get::<_, String>(2)?, "heartbeatAt": row.get::<_, String>(3)?, "expiresAtMs": row.get::<_, i64>(4)?})))?.collect::<Result<Vec<_>, _>>()?;
-    Ok(
-        serde_json::json!({ "status": "ready", "mode": DEFAULT_MODE, "networkAccess": false, "liveMutationAllowed": false, "rollout": rollout_status_value(&load_rollout_state(data_dir)?, None), "retention": retention_config(), "nextSafeAction": "run reconcile for an explicit date, or resume only after checking status and report output", "journal": journal_path(data_dir), "store": store_path(data_dir), "activeLeases": leases }),
-    )
+    let latest_run = conn
+        .query_row(
+            "SELECT local_date, state, started_at, finished_at FROM coordinated_runs ORDER BY started_at DESC, local_date DESC LIMIT 1",
+            [],
+            |row| {
+                Ok(serde_json::json!({
+                    "selectedDate": row.get::<_, String>(0)?,
+                    "status": row.get::<_, String>(1)?,
+                    "startedAt": row.get::<_, String>(2)?,
+                    "finishedAt": row.get::<_, Option<String>>(3)?,
+                }))
+            },
+        )
+        .optional()?;
+    let scheduler = scheduler_status(data_dir)?;
+    let scheduler_state = &scheduler["state"];
+    let scheduler_installed = scheduler_state
+        .get("installedFiles")
+        .and_then(Value::as_array)
+        .is_some_and(|files| !files.is_empty());
+    let scheduler_healthy = scheduler_state
+        .get("installedFiles")
+        .and_then(Value::as_array)
+        .is_none_or(|files| {
+            files.iter().all(|file| {
+                file.as_str().is_some_and(|path| {
+                    let path = Path::new(path);
+                    path.exists() && is_owned_scheduler_file(path).unwrap_or(false)
+                })
+            })
+        });
+    let scheduler_active = scheduler_state
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let activity_state = if leases.is_empty() { "idle" } else { "running" };
+    let pending_action = if !configured {
+        "run `drag tracking setup` to configure automatic time tracking"
+    } else if !scheduler_installed {
+        "install the tracking schedule with `drag tracking setup`"
+    } else if !scheduler_healthy {
+        "repair the missing or modified tracking scheduler files"
+    } else if !scheduler_active {
+        "resume the tracking schedule when automatic tracking should run"
+    } else {
+        "no action required"
+    };
+    Ok(serde_json::json!({
+        "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
+        "status": "ready",
+        "configuration": {
+            "configured": configured,
+            "dataDirectory": data_dir,
+        },
+        "activity": {
+            "state": activity_state,
+            "activeRuns": leases.len(),
+        },
+        "scheduler": {
+            "installed": scheduler_installed,
+            "active": scheduler_active,
+            "healthy": scheduler_healthy,
+            "killSwitchActive": scheduler["killSwitchActive"],
+        },
+        "submission": {
+            "mode": "draft",
+            "automaticSubmissionAuthorized": false,
+            "effectiveMutationPermission": false,
+        },
+        "latestRun": latest_run,
+        "pendingAction": pending_action,
+        "networkAccess": false,
+        "liveMutationAllowed": false,
+        "mode": DEFAULT_MODE,
+        "rollout": rollout_status_value(&load_rollout_state(data_dir)?, None),
+        "retention": retention_config(),
+        "nextSafeAction": "run reconcile for an explicit date, or resume only after checking status and report output",
+        "journal": journal_path(data_dir),
+        "store": store_path(data_dir),
+        "activeLeases": leases,
+    }))
+}
+
+pub(crate) fn print_tracking_status(status: &Value) -> Result<(), CompanionError> {
+    let configured = if status["configuration"]["configured"] == Value::Bool(true) {
+        "configured"
+    } else {
+        "not configured"
+    };
+    let scheduler = if status["scheduler"]["active"] == Value::Bool(true) {
+        "active"
+    } else if status["scheduler"]["installed"] == Value::Bool(true) {
+        "paused"
+    } else {
+        "not installed"
+    };
+    let latest = status["latestRun"]["selectedDate"]
+        .as_str()
+        .map_or_else(|| "none".to_owned(), ToOwned::to_owned);
+    let submission_mode = status["submission"]["mode"].as_str().unwrap_or("unknown");
+    let mutation_permission =
+        if status["submission"]["effectiveMutationPermission"] == Value::Bool(true) {
+            "enabled"
+        } else {
+            "disabled"
+        };
+    let scheduler_health = if status["scheduler"]["healthy"] == Value::Bool(true) {
+        "healthy"
+    } else {
+        "unhealthy"
+    };
+    let pending = status["pendingAction"]
+        .as_str()
+        .unwrap_or("inspect tracking status");
+    println_safe_markdown(&format!(
+        "Automatic time tracking\nConfiguration: {configured}\nActivity: {}\nScheduler: {scheduler} ({scheduler_health})\nSubmission mode: {submission_mode}\nEffective mutation permission: {mutation_permission}\nLatest run: {latest}\nPending action: {pending}\n",
+        status["activity"]["state"].as_str().unwrap_or("unknown"),
+    ))
+}
+
+pub(crate) fn public_tracking_status(status: &Value) -> Value {
+    serde_json::json!({
+        "schemaVersion": status["schemaVersion"],
+        "status": status["status"],
+        "configuration": status["configuration"],
+        "activity": status["activity"],
+        "scheduler": status["scheduler"],
+        "submission": status["submission"],
+        "latestRun": status["latestRun"],
+        "sources": status["sources"],
+        "timezone": status["timezone"],
+        "migration": status["configuration"]["migration"],
+        "pendingAction": status["pendingAction"],
+        "networkAccess": status["networkAccess"],
+        "liveMutationAllowed": status["liveMutationAllowed"],
+    })
 }
 
 pub(crate) fn run_id(date: NaiveDate) -> String {
@@ -536,6 +670,7 @@ pub(crate) fn created_ids(data_dir: &Path, date: NaiveDate) -> Result<Vec<String
 pub(crate) fn next_safe_action(status: &str) -> &'static str {
     match status {
         "completed" => "review the report and keep the ledger for idempotency",
+        "gated" => "inspect the runtime gates before authorizing any submission",
         "partial" => {
             "inspect skips and failures, then run audit or preview before any authorized execute"
         }
