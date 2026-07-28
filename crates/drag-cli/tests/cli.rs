@@ -236,18 +236,23 @@ fn copied_drag_with_tracking(
 
     let source = Command::cargo_bin("drag")?.get_program().to_owned();
     let drag = directory.path().join("drag");
-    fs::copy(source, &drag)?;
-    let mut permissions = fs::metadata(&drag)?.permissions();
+    let pending_drag = directory.path().join("drag.pending");
+    fs::copy(source, &pending_drag)?;
+    let mut permissions = fs::metadata(&pending_drag)?.permissions();
     permissions.set_mode(0o700);
-    fs::set_permissions(&drag, permissions)?;
+    fs::set_permissions(&pending_drag, permissions)?;
+    fs::rename(&pending_drag, &drag)?;
 
     if let Some(script) = tracking_script {
         let tracking = directory.path().join("drag-tracking");
-        fs::write(&tracking, script)?;
-        let mut permissions = fs::metadata(&tracking)?.permissions();
+        let pending_tracking = directory.path().join("drag-tracking.pending");
+        fs::write(&pending_tracking, script)?;
+        let mut permissions = fs::metadata(&pending_tracking)?.permissions();
         permissions.set_mode(0o700);
-        fs::set_permissions(tracking, permissions)?;
+        fs::set_permissions(&pending_tracking, permissions)?;
+        fs::rename(pending_tracking, tracking)?;
     }
+    std::thread::sleep(std::time::Duration::from_millis(50));
     Ok(drag)
 }
 
