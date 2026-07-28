@@ -52,6 +52,7 @@ pub(crate) fn install_scheduler_files(
     drag_bin: &Path,
     args: &SchedulerInstallArgs,
 ) -> Result<Value, CompanionError> {
+    reject_unsupported_scheduler_host()?;
     fs::create_dir_all(&args.target_dir).map_err(|source| CompanionError::CreateDir {
         path: args.target_dir.clone(),
         source,
@@ -131,6 +132,18 @@ pub(crate) fn install_scheduler_files(
     Ok(
         serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
     )
+}
+
+#[cfg(target_os = "windows")]
+fn reject_unsupported_scheduler_host() -> Result<(), CompanionError> {
+    Err(CompanionError::Proposal(
+        "scheduler installation is not supported on Windows".to_owned(),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn reject_unsupported_scheduler_host() -> Result<(), CompanionError> {
+    Ok(())
 }
 
 fn remove_owned_legacy_scheduler_files(target_dir: &Path) -> Result<(), CompanionError> {
