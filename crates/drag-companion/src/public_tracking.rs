@@ -438,10 +438,17 @@ pub(crate) fn show_schedule(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
+    validate_schedule(&config.schedule)?;
+    let status = status_payload(data_dir)?;
     let result = serde_json::json!({
         "schedule": config.schedule,
         "active": config.active,
         "nextRun": next_run_description(&config),
+        "health": {
+            "installed": status["scheduler"]["installed"],
+            "healthy": status["scheduler"]["healthy"],
+            "killSwitchActive": status["scheduler"]["killSwitchActive"]
+        },
         "networkAccess": false,
         "liveMutationAllowed": false
     });
@@ -480,9 +487,17 @@ pub(crate) fn update_schedule(
         None
     };
     save_tracking_config(data_dir, &config)?;
+    let status = status_payload(data_dir)?;
     let result = serde_json::json!({
         "status": "updated",
         "schedule": config.schedule,
+        "active": config.active,
+        "nextRun": next_run_description(&config),
+        "health": {
+            "installed": status["scheduler"]["installed"],
+            "healthy": status["scheduler"]["healthy"],
+            "killSwitchActive": status["scheduler"]["killSwitchActive"]
+        },
         "scheduler": scheduler,
         "networkAccess": false,
         "liveMutationAllowed": false
@@ -496,10 +511,22 @@ pub(crate) fn set_tracking_active(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let mut config = require_config(data_dir)?;
-    if active && config.scheduler_target.is_none() {
-        return Err(CompanionError::Proposal(
-            "tracking cannot resume until owned scheduler files are installed".to_owned(),
-        ));
+    if active {
+        validate_tracking_configuration(&config)?;
+        if config.scheduler_target.is_none() {
+            return Err(CompanionError::Proposal(
+                "tracking cannot resume until owned scheduler files are installed".to_owned(),
+            ));
+        }
+        let status = status_payload(data_dir)?;
+        if status["scheduler"]["installed"] != Value::Bool(true)
+            || status["scheduler"]["healthy"] != Value::Bool(true)
+        {
+            return Err(CompanionError::Proposal(
+                "tracking cannot resume until owned scheduler files are installed and healthy"
+                    .to_owned(),
+            ));
+        }
     }
     config.active = active;
     let _ = set_scheduler_enabled_state(data_dir, active)?;
@@ -569,6 +596,21 @@ fn require_config(data_dir: &Path) -> Result<TrackingConfig, CompanionError> {
             "automatic tracking is not configured; run tracking setup first".to_owned(),
         )
     })
+}
+
+fn validate_tracking_configuration(config: &TrackingConfig) -> Result<(), CompanionError> {
+    validate_schedule(&config.schedule)?;
+    validate_source_configuration(&config.sources)
+}
+
+fn validate_schedule(schedule: &TrackingSchedule) -> Result<(), CompanionError> {
+    validate_time_and_timezone(&schedule.at, &schedule.timezone)?;
+    if !schedule.weekdays {
+        return Err(CompanionError::Proposal(
+            "tracking schedule must run on weekdays".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn select_public_date(raw: Option<&str>, timezone: &str) -> Result<NaiveDate, CompanionError> {

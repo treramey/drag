@@ -297,6 +297,102 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("scheduler");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+
+    let shown = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "show"]),
+    )?;
+    assert_eq!(shown["schedule"]["at"], "18:45");
+    assert_eq!(shown["schedule"]["timezone"], "local");
+    assert_eq!(shown["active"], true);
+    assert_eq!(shown["health"]["healthy"], true);
+    assert!(shown["nextRun"].is_string());
+
+    let updated = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "schedule",
+                "update",
+                "--at",
+                "17:30",
+                "--schedule-timezone",
+                "local",
+            ]),
+    )?;
+    assert_eq!(updated["schedule"]["at"], "17:30");
+    assert_eq!(updated["active"], true);
+    assert_eq!(updated["health"]["healthy"], true);
+    assert!(updated["nextRun"]
+        .as_str()
+        .is_some_and(|value| value.contains("17:30 local")));
+
+    let nested_pause = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "pause"]),
+    )?;
+    assert_eq!(nested_pause["status"], "paused");
+
+    std::fs::remove_dir_all(&repo)?;
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .arg("resume")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Git source is invalid or unavailable",
+        ));
+    let paused = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "show"]),
+    )?;
+    assert_eq!(paused["active"], false);
+    assert_eq!(paused["nextRun"], Value::Null);
+
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    let nested_resume = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "resume"]),
+    )?;
+    assert_eq!(nested_resume["status"], "active");
+
+    let top_level_pause = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("pause"),
+    )?;
+    assert_eq!(top_level_pause["status"], "paused");
+    Ok(())
+}
+
 #[test]
 fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
 ) -> Result<(), Box<dyn std::error::Error>> {
