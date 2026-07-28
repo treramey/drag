@@ -537,6 +537,211 @@ fn default_state_migration_is_atomic_and_refuses_two_active_stores(
 }
 
 #[test]
+fn default_state_migration_resumes_after_interruption_and_preserves_recovery_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let working = directory.path().join("working");
+    let legacy = working.join(".drag-companion");
+    std::fs::create_dir_all(&working)?;
+    std::fs::create_dir_all(&home)?;
+    tracking()?
+        .current_dir(&working)
+        .args(["--data-dir", legacy.to_string_lossy().as_ref(), "status"])
+        .assert()
+        .success();
+    tracking()?
+        .args(["--data-dir", legacy.to_string_lossy().as_ref()])
+        .args([
+            "internal",
+            "rollout",
+            "record",
+            "--gate",
+            "fixture",
+            "--schema-valid",
+            "--provenance-retained",
+            "--secrets-redacted",
+        ])
+        .assert()
+        .success();
+    let connection = rusqlite::Connection::open(legacy.join("companion.sqlite3"))?;
+    connection.execute(
+        "INSERT INTO mutation_operations (id, state, idempotency_key, local_date, tempo_account, payload_json) VALUES ('legacy-uncertain', 'uncertain', 'legacy-operation-key', '2026-03-08', 'default', '{}')",
+        [],
+    )?;
+    drop(connection);
+    std::fs::create_dir_all(legacy.join("runs"))?;
+    for (name, body) in [
+        ("journal.jsonl", "journal"),
+        (
+            "scheduler.json",
+            r#"{"schemaVersion":2,"operationKeys":["legacy-key"]}"#,
+        ),
+        (
+            "runs/2026-03-08.json",
+            r#"{"date":"2026-03-08","status":"uncertain"}"#,
+        ),
+    ] {
+        std::fs::write(legacy.join(name), body)?;
+    }
+
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION", "1")
+        .env_remove("DRAG_TRACKING_DATA")
+        .env_remove("DRAG_COMPANION_DATA")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration interrupted"));
+    assert!(legacy.exists());
+
+    let output = json_output(
+        tracking()?
+            .current_dir(directory.path())
+            .env("HOME", &home)
+            .env_remove("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION")
+            .env_remove("DRAG_TRACKING_DATA")
+            .env_remove("DRAG_COMPANION_DATA")
+            .arg("status"),
+    )?;
+    let migrated = home.join(".drag/tracking");
+    assert_eq!(output["configuration"]["migration"]["status"], "completed");
+    for name in [
+        "journal.jsonl",
+        "companion.sqlite3",
+        "scheduler.json",
+        "rollout-state.json",
+        "runs/2026-03-08.json",
+    ] {
+        assert!(migrated.join(name).exists(), "missing {name}");
+    }
+    let operations = json_output(
+        tracking()?
+            .args(["--data-dir", migrated.to_string_lossy().as_ref()])
+            .args(["internal", "process-spy", "--date", "2026-03-08"]),
+    )?;
+    assert_eq!(operations["operations"][0]["state"], "uncertain");
+    let scheduler = json_output(
+        tracking()?
+            .args(["--data-dir", migrated.to_string_lossy().as_ref()])
+            .args(["internal", "scheduler", "status"]),
+    )?;
+    assert_eq!(scheduler["state"]["operationKeys"][0], "legacy-key");
+    Ok(())
+}
+
+#[test]
+fn tracking_environment_conflicts_are_explicit() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    tracking()?
+        .args(["--data-dir", directory.path().to_string_lossy().as_ref()])
+        .env("DRAG_TRACKING_RETENTION_RAW_DAYS", "30")
+        .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "60")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DRAG_TRACKING_RETENTION_RAW_DAYS and deprecated DRAG_COMPANION_RETENTION_RAW_DAYS conflict",
+        ));
+    Ok(())
+}
+
+#[test]
+fn default_state_migration_finalizes_after_interruption_following_atomic_move(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let working = directory.path().join("working");
+    let legacy = working.join(".drag-companion");
+    std::fs::create_dir_all(&legacy)?;
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(legacy.join("journal.jsonl"), "preserved")?;
+
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION", "after-move")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration interrupted"));
+    assert!(!legacy.exists());
+    assert!(home.join(".drag/tracking").exists());
+
+    let output = json_output(
+        tracking()?
+            .current_dir(&working)
+            .env("HOME", &home)
+            .env_remove("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION")
+            .args([
+                "--data-dir",
+                home.join(".drag/tracking").to_string_lossy().as_ref(),
+                "status",
+            ]),
+    )?;
+    assert_eq!(output["configuration"]["migration"]["status"], "completed");
+    Ok(())
+}
+
+#[test]
+fn tracking_status_supplies_recovery_for_old_and_rejects_corrupt_migration_records(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    tracking()?
+        .args([
+            "--data-dir",
+            directory.path().to_string_lossy().as_ref(),
+            "status",
+        ])
+        .assert()
+        .success();
+    std::fs::write(
+        directory.path().join("migration.json"),
+        r#"{"schemaVersion":1,"source":".drag-companion","status":"completed"}"#,
+    )?;
+    let old = json_output(tracking()?.args([
+        "--data-dir",
+        directory.path().to_string_lossy().as_ref(),
+        "status",
+    ]))?;
+    assert!(old["configuration"]["migration"]["recoveryAction"]
+        .as_str()
+        .ok_or("recovery action")?
+        .contains("move the directory back"));
+
+    std::fs::write(directory.path().join("migration.json"), "not-json")?;
+    tracking()?
+        .args([
+            "--data-dir",
+            directory.path().to_string_lossy().as_ref(),
+            "status",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration record"));
+    Ok(())
+}
+
+#[test]
+fn legacy_retention_parse_error_names_the_legacy_variable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    tracking()?
+        .args(["--data-dir", directory.path().to_string_lossy().as_ref()])
+        .env("DRAG_COMPANION_RETENTION_NOW", "not-a-timestamp")
+        .env_remove("DRAG_TRACKING_RETENTION_NOW")
+        .args(["internal", "retention", "enforce"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DRAG_COMPANION_RETENTION_NOW must be RFC3339",
+        ));
+    Ok(())
+}
+
+#[test]
 fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;

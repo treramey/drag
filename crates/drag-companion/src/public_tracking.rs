@@ -95,7 +95,7 @@ pub(crate) fn tracking_status(
     let mut status = status_payload(data_dir)?;
     if let Some(config) = load_tracking_config(data_dir)? {
         status["configuration"]["configured"] = Value::Bool(config.installed);
-        status["configuration"]["migration"] = migration_status(data_dir);
+        status["configuration"]["migration"] = migration_status(data_dir)?;
         status["scheduler"]["active"] = Value::Bool(config.active);
         status["scheduler"]["nextRun"] = next_run_description(&config);
         status["submission"]["mode"] =
@@ -119,7 +119,7 @@ pub(crate) fn tracking_status(
             .to_owned(),
         );
     } else {
-        status["configuration"]["migration"] = migration_status(data_dir);
+        status["configuration"]["migration"] = migration_status(data_dir)?;
         status["sources"] = Value::Array(Vec::new());
         status["timezone"] = Value::String("local".to_owned());
     }
@@ -619,12 +619,32 @@ fn next_run_description(config: &TrackingConfig) -> Value {
     }
 }
 
-fn migration_status(data_dir: &Path) -> Value {
-    if data_dir.join("migration.json").exists() {
-        serde_json::json!({"status": "completed", "legacyStatePreserved": true})
-    } else {
-        serde_json::json!({"status": "notRequired"})
+fn migration_status(data_dir: &Path) -> Result<Value, CompanionError> {
+    let path = data_dir.join("migration.json");
+    if !path.exists() {
+        return Ok(serde_json::json!({
+            "status": "notRequired",
+            "recoveryAction": "no migration recovery action required"
+        }));
     }
+    let body = fs::read_to_string(&path).map_err(|source| CompanionError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let record: Value = serde_json::from_str(&body).map_err(|error| {
+        CompanionError::Proposal(format!(
+            "invalid migration record {}: {error}",
+            path.display()
+        ))
+    })?;
+    let recovery = record["recoveryAction"].as_str().unwrap_or(
+        "pause tracking, move the directory back to .drag-companion, and reinstall the previous release",
+    );
+    Ok(serde_json::json!({
+        "status": record["status"],
+        "legacyStatePreserved": true,
+        "recoveryAction": recovery
+    }))
 }
 
 fn print_public(
