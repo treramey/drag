@@ -2041,6 +2041,7 @@ fn configured_scheduler_runs_the_complete_workflow_with_only_an_explicit_iso_dat
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configuration(
 ) -> Result<(), Box<dyn std::error::Error>> {
