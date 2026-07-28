@@ -977,6 +977,8 @@ fn repeated_log_attribute_flags_use_the_last_value_for_each_key(
             "log",
             "ABC-1",
             "30m",
+            "--start",
+            "09:00",
             "--attr",
             "_Test_=first",
             "--attr",
@@ -1004,7 +1006,7 @@ fn repeated_log_attribute_flags_use_the_last_value_for_each_key(
         .args([
             "log",
             "--json",
-            r#"{"issueKey":"ABC-1","durationOrInterval":"30m","attributes":{"_Test_":"last","_Worktype_":"Development=Backend"}}"#,
+            r#"{"issueKey":"ABC-1","durationOrInterval":"30m","start":"09:00","attributes":{"_Test_":"last","_Worktype_":"Development=Backend"}}"#,
             "--dry-run",
         ])
         .output()?;

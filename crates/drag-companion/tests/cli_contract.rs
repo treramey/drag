@@ -214,7 +214,15 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     assert_eq!(setup["effects"]["schedulerInstalled"], true);
     assert_eq!(setup["effects"]["hooksInstalled"], false);
     assert_eq!(setup["effects"]["automaticSubmissionAuthorized"], false);
-    assert!(scheduler_dir.join("drag-tracking.timer").exists());
+    let installed_files = setup["scheduler"]["installedFiles"]
+        .as_array()
+        .ok_or("installed scheduler files")?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(std::path::PathBuf::from)
+        .collect::<Vec<_>>();
+    assert!(!installed_files.is_empty());
+    assert!(installed_files.iter().all(|path| path.exists()));
 
     let status = json_output(
         tracking()?
@@ -231,7 +239,7 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
             .arg("uninstall"),
     )?;
     assert_eq!(uninstalled["historyPreserved"], true);
-    assert!(!scheduler_dir.join("drag-tracking.timer").exists());
+    assert!(installed_files.iter().all(|path| !path.exists()));
     assert!(data_dir.join("companion.sqlite3").exists());
     Ok(())
 }
