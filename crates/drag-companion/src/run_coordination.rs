@@ -409,6 +409,16 @@ pub(crate) fn coordinated_run(
     date: NaiveDate,
     resume: bool,
 ) -> Result<CoordinatedRunResult, CompanionError> {
+    coordinated_run_with_submission(data_dir, drag_bin, date, resume, true)
+}
+
+pub(crate) fn coordinated_run_with_submission(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+    resume: bool,
+    submission_allowed: bool,
+) -> Result<CoordinatedRunResult, CompanionError> {
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
@@ -443,7 +453,7 @@ pub(crate) fn coordinated_run(
             resumed: resume,
             recovered_lease,
             skipped_confirmed_work: true,
-            submission_entered: status != "blocked",
+            submission_entered: submission_allowed && status != "blocked",
             network_access: false,
             live_mutation_allowed: false,
             phases: load_phase_records(&conn, date, &account)?,
@@ -451,14 +461,11 @@ pub(crate) fn coordinated_run(
     }
 
     let mut submission_entered = false;
-    let phases = [
-        "collecting",
-        "model",
-        "tempo_read",
-        "pre_mutation",
-        "submitting",
-        "completed",
-    ];
+    let mut phases = vec!["collecting", "model", "tempo_read", "pre_mutation"];
+    if submission_allowed {
+        phases.push("submitting");
+    }
+    phases.push("completed");
     for phase in phases {
         if phase_completed(&conn, date, &account, phase)? {
             continue;

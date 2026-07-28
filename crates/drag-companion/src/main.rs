@@ -84,10 +84,21 @@ fn main() {
     let output = cli.output;
     if let Err(error) = run(cli) {
         if output == Some(TrackingOutputMode::Json) {
-            let _ = print_error_json(&serde_json::json!({
-                "ok": false,
-                "error": {"code": "tracking_error", "message": error.to_string()}
-            }));
+            let body = match &error {
+                CompanionError::TrackingRun { details, .. } => serde_json::json!({
+                    "ok": false,
+                    "error": {
+                        "code": "tracking_run_failed",
+                        "message": error.to_string(),
+                        "details": details
+                    }
+                }),
+                _ => serde_json::json!({
+                    "ok": false,
+                    "error": {"code": "tracking_error", "message": error.to_string()}
+                }),
+            };
+            let _ = print_error_json(&body);
         } else {
             eprintln!("{error}");
         }

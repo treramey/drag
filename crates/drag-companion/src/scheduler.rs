@@ -482,8 +482,8 @@ pub(crate) fn scheduler_run_date(
         state["lastAttemptedDate"] = serde_json::json!(date.to_string());
         write_scheduler_state(data_dir, state)?;
     }
-    let result = if config_path(data_dir).exists() {
-        run_tracking_for_date(data_dir, drag_bin, date)?
+    let result = if let Some(config) = load_tracking_config(data_dir)? {
+        run_tracking_for_date(data_dir, drag_bin, &config, date)?
     } else {
         serde_json::to_value(coordinated_run(data_dir, drag_bin, date, existing_key)?)
             .map_err(CompanionError::Serialize)?

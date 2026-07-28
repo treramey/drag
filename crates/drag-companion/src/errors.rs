@@ -50,6 +50,11 @@ pub(crate) enum CompanionError {
     NotRetryable(&'static str),
     #[error("blocked before mutation; resume will not enter submission")]
     BlockedBeforeMutation,
+    #[error("tracking run failed: {message}")]
+    TrackingRun {
+        message: String,
+        details: Box<Value>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
