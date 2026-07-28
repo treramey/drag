@@ -34,8 +34,8 @@ pub(crate) fn setup_tracking(
         ));
     }
 
-    let update_repos = !args.repos.is_empty();
-    let update_calendars = !args.ics_files.is_empty();
+    let update_repos = args.clear_repos || !args.repos.is_empty();
+    let update_calendars = args.clear_ics || !args.ics_files.is_empty();
     let selected = configured_sources(args.repos, args.ics_files)?;
     if update_repos {
         config

@@ -152,9 +152,15 @@ pub struct TrackingSetupArgs {
     /// Local Git repository to observe. Repeat for multiple repositories.
     #[arg(long = "repo", value_name = "DIR")]
     pub repos: Vec<PathBuf>,
+    /// Remove every configured Git repository.
+    #[arg(long, conflicts_with = "repos")]
+    pub clear_repos: bool,
     /// Local ICS calendar file to observe. Repeat for multiple files.
     #[arg(long = "ics", value_name = "FILE")]
     pub ics_files: Vec<PathBuf>,
+    /// Remove every configured calendar.
+    #[arg(long, conflicts_with = "ics_files")]
+    pub clear_ics: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

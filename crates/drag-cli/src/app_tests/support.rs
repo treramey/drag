@@ -37,7 +37,8 @@ use crate::list::{
     ListReportAction, ListReportSession,
 };
 use crate::tracking_setup::{
-    TrackingOnboardingOutcome, TrackingOnboardingSession, TrackingSetupInstaller, TrackingSetupPlan,
+    TrackingOnboardingOutcome, TrackingOnboardingSession, TrackingSetupInstallFailure,
+    TrackingSetupInstaller, TrackingSetupPlan,
 };
 use crate::CliError;
 #[cfg(unix)]
@@ -268,9 +269,16 @@ impl TrackingOnboardingSession for FakeTrackingOnboardingSession {
 }
 
 impl TrackingSetupInstaller for FakeTrackingSetupInstaller {
-    fn install(&self, plan: &TrackingSetupPlan) -> Result<Value, CliError> {
+    fn install(&self, plan: &TrackingSetupPlan) -> Result<Value, TrackingSetupInstallFailure> {
         if let Some(message) = &self.failure {
-            return Err(CliError::TrackingUnavailable(message.clone()));
+            return Err(TrackingSetupInstallFailure {
+                error: CliError::TrackingUnavailable(message.clone()),
+                recovery: Some(serde_json::json!({
+                    "configuration": {"configured": false},
+                    "scheduler": {"healthy": true, "active": false},
+                    "pendingAction": "rerun tracking setup"
+                })),
+            });
         }
         self.plans
             .lock()

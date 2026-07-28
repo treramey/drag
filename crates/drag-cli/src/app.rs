@@ -28,9 +28,10 @@ use crate::setup::{
 };
 use crate::setup_tui::RatatuiOnboardingSession;
 use crate::tracking_setup::{
-    LineTrackingOnboardingSession, ProcessTrackingSetupInstaller, TrackingOnboardingOutcome,
-    TrackingOnboardingSession, TrackingSetupInstaller,
+    ProcessTrackingSetupInstaller, TrackingOnboardingOutcome, TrackingOnboardingSession,
+    TrackingSetupInstaller,
 };
+use crate::tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::{CliError, Rendered};
 
 pub struct App {
@@ -307,7 +308,7 @@ impl App {
             Ok(TrackingOnboardingOutcome::Cancelled)
         };
         let automatic_tracking = match tracking_outcome {
-            Err(error) => tracking_setup_failure(&error),
+            Err(error) => tracking_setup_failure(&error, None),
             Ok(TrackingOnboardingOutcome::Declined) => json!({
                 "offered": true,
                 "status": "declined",
@@ -333,15 +334,25 @@ impl App {
                             "drag tracking schedule show"
                         ]
                     }),
-                    Err(error) => tracking_setup_failure(&error),
+                    Err(failure) => {
+                        tracking_setup_failure(&failure.error, failure.recovery.as_ref())
+                    }
                 }
             }
         };
         let tracking_human = match automatic_tracking["status"].as_str() {
-            Some("configured") => " Automatic tracking is configured; review its activity, next run, sources, mode, and effective mutation permission with `drag tracking status`.",
-            Some("failed") => " Drag is connected, but automatic tracking setup failed. No tracking success was reported; inspect the structured error and retry with `drag tracking setup`.",
-            Some("cancelled") => " Automatic tracking setup was cancelled without applying tracking choices; run `drag tracking setup` to continue later.",
-            _ => " Automatic tracking was declined without tracking effects; run `drag tracking setup` whenever you are ready.",
+            Some("configured") => " Automatic tracking is configured; review its activity, next run, sources, mode, and effective mutation permission with `drag tracking status`.".to_owned(),
+            Some("failed") => {
+                let message = automatic_tracking["error"]["message"]
+                    .as_str()
+                    .unwrap_or("tracking setup failed");
+                format!(
+                    " Drag is connected, but automatic tracking setup failed: {}. Recoverable tracking state is included in structured output; retry with `drag tracking setup`.",
+                    crate::output::escape_terminal_data(message)
+                )
+            }
+            Some("cancelled") => " Automatic tracking setup was cancelled without applying tracking choices; run `drag tracking setup` to continue later.".to_owned(),
+            _ => " Automatic tracking was declined without tracking effects; run `drag tracking setup` whenever you are ready.".to_owned(),
         };
         let data = json!({
             "configured": true,
@@ -429,7 +440,10 @@ impl App {
     }
 }
 
-fn tracking_setup_failure(error: &CliError) -> serde_json::Value {
+fn tracking_setup_failure(
+    error: &CliError,
+    recovery: Option<&serde_json::Value>,
+) -> serde_json::Value {
     json!({
         "offered": true,
         "status": "failed",
@@ -438,6 +452,7 @@ fn tracking_setup_failure(error: &CliError) -> serde_json::Value {
             "code": error.code(),
             "message": error.to_string()
         },
+        "recovery": recovery,
         "nextCommand": "drag tracking setup"
     })
 }

@@ -362,6 +362,8 @@ async fn interactive_setup_applies_each_tracking_authorization_and_reports_compl
         schedule_timezone: "Europe/Warsaw".to_owned(),
         repos: vec![directory.path().to_path_buf()],
         ics_files: Vec::new(),
+        clear_repos: false,
+        clear_ics: true,
     };
     let app = App::with_onboarding_session(
         path,
@@ -479,6 +481,8 @@ async fn tracking_install_failure_preserves_successful_drag_setup_and_reports_re
         schedule_timezone: "local".to_owned(),
         repos: Vec::new(),
         ics_files: Vec::new(),
+        clear_repos: true,
+        clear_ics: true,
     };
     let app = App::with_onboarding_session(
         path.clone(),
@@ -521,6 +525,11 @@ async fn tracking_install_failure_preserves_successful_drag_setup_and_reports_re
         result.data["automaticTracking"]["nextCommand"],
         "drag tracking setup"
     );
+    assert_eq!(
+        result.data["automaticTracking"]["recovery"]["pendingAction"],
+        "rerun tracking setup"
+    );
+    assert!(result.human.contains("scheduler directory is unavailable"));
     assert!(path.exists());
     Ok(())
 }

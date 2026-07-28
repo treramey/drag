@@ -9,8 +9,9 @@ use crate::cli::{
     TrackingSourcesCommand, TrackingSubmissionMode,
 };
 use crate::tracking_setup::{
-    LineTrackingOnboardingSession, TrackingOnboardingOutcome, TrackingOnboardingSession,
+    TrackingOnboardingOutcome, TrackingOnboardingSession, TrackingSetupInstallFailure,
 };
+use crate::tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::{CliError, ResolvedOutputMode};
 
 const TRACKING_CONTRACT_VERSION: u64 = 2;
@@ -178,7 +179,7 @@ fn emit_interactive_setup_outcome(
     human: &str,
 ) -> Result<(), CliError> {
     if mode == ResolvedOutputMode::Human {
-        writeln!(std::io::stderr().lock(), "{human}")?;
+        writeln!(std::io::stdout().lock(), "{human}")?;
     } else {
         serde_json::to_writer(
             std::io::stdout().lock(),
@@ -199,7 +200,7 @@ fn emit_interactive_setup_outcome(
 pub(crate) fn run_setup_capture(
     args: crate::cli::TrackingSetupArgs,
     config_path: &std::path::Path,
-) -> Result<Value, CliError> {
+) -> Result<Value, TrackingSetupInstallFailure> {
     let executable = tracking_executable();
     verify_contract(&executable)?;
     let drag_executable = std::env::current_exe().map_err(|error| {
@@ -233,7 +234,10 @@ pub(crate) fn run_setup_capture(
             .unwrap_or_else(|| {
                 "tracking setup failed; run `drag tracking setup` to inspect and retry".to_owned()
             });
-        return Err(CliError::TrackingUnavailable(message));
+        return Err(TrackingSetupInstallFailure {
+            error: CliError::TrackingUnavailable(message),
+            recovery: run_status_capture(config_path).ok(),
+        });
     }
     let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
         CliError::TrackingIncompatible(
@@ -242,6 +246,38 @@ pub(crate) fn run_setup_capture(
     })?;
     envelope.get("data").cloned().ok_or_else(|| {
         CliError::TrackingIncompatible("drag-tracking setup result did not contain data".to_owned())
+            .into()
+    })
+}
+
+fn run_status_capture(config_path: &std::path::Path) -> Result<Value, CliError> {
+    let executable = tracking_executable();
+    verify_contract(&executable)?;
+    let output = Command::new(&executable)
+        .args(["--output", "json", "status"])
+        .env("DRAG_CONFIG", config_path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            tracking_unavailable(format!(
+                "could not query recoverable tracking state from `{}`: {error}",
+                executable.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(tracking_unavailable(
+            "could not query recoverable tracking state after setup failed".to_owned(),
+        ));
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        CliError::TrackingIncompatible(
+            "drag-tracking returned invalid recovery status JSON".to_owned(),
+        )
+    })?;
+    envelope.get("data").cloned().ok_or_else(|| {
+        CliError::TrackingIncompatible(
+            "drag-tracking recovery status did not contain data".to_owned(),
+        )
     })
 }
 
@@ -271,8 +307,14 @@ fn append_setup_args(command: &mut Command, args: crate::cli::TrackingSetupArgs)
     for repo in args.repos {
         command.args(["--repo".as_ref(), repo.as_os_str()]);
     }
+    if args.clear_repos {
+        command.arg("--clear-repos");
+    }
     for file in args.ics_files {
         command.args(["--ics".as_ref(), file.as_os_str()]);
+    }
+    if args.clear_ics {
+        command.arg("--clear-ics");
     }
 }
 
@@ -286,6 +328,8 @@ fn implicit_interactive_setup(args: &crate::cli::TrackingSetupArgs) -> bool {
         && args.schedule_timezone.is_none()
         && args.repos.is_empty()
         && args.ics_files.is_empty()
+        && !args.clear_repos
+        && !args.clear_ics
 }
 
 fn submission_mode_name(mode: TrackingSubmissionMode) -> &'static str {

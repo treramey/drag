@@ -1270,6 +1270,23 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
         serde_json::json!(["runBoundedRedactedLocalChecks"])
     );
     assert_eq!(
+        contract["commands"]["setup"]["sideEffects"]["interactiveTrackingAccepted"],
+        serde_json::json!([
+            "writeTrackingConfiguration",
+            "mayInstallTrackingSchedulerFiles",
+            "mayInstallClaudeHooks",
+            "mayAuthorizeAutomaticSubmission"
+        ])
+    );
+    let tracking_success_variants = contract["commands"]["tracking"]["success"]["oneOf"]
+        .as_array()
+        .ok_or("tracking success variants")?;
+    assert!(tracking_success_variants.iter().any(|variant| {
+        variant["properties"]["status"]["enum"]
+            .as_array()
+            .is_some_and(|statuses| statuses.iter().any(|status| status == "declined"))
+    }));
+    assert_eq!(
         contract["commands"]["tracking"]["networkAccess"]["sources"],
         serde_json::json!({"local": "read", "jira": "none", "tempo": "none"})
     );

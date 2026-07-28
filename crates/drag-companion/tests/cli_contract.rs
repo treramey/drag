@@ -527,6 +527,14 @@ fn setup_reruns_preserve_omitted_sources_and_uninstall_disables_public_runs(
     json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--clear-repos", "--clear-ics"]),
+    )?;
+    let cleared: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert!(cleared["sources"].as_array().is_some_and(Vec::is_empty));
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .arg("uninstall"),
     )?;
     tracking()?

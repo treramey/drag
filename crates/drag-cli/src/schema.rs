@@ -561,7 +561,13 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
                 "noOpen": ["verifyCredentials", "writeConfiguration"],
                 "fromEnv": ["verifyCredentials", "writeConfiguration"],
                 "fromEnvDryRun": [],
-                "fromEnvDryRunVerify": ["verifyCredentialsReadOnly"]
+                "fromEnvDryRunVerify": ["verifyCredentialsReadOnly"],
+                "interactiveTrackingAccepted": [
+                    "writeTrackingConfiguration",
+                    "mayInstallTrackingSchedulerFiles",
+                    "mayInstallClaudeHooks",
+                    "mayAuthorizeAutomaticSubmission"
+                ]
             }),
             network_access: json!({
                 "default": {"browser": "may-open", "jira": "read", "tempo": "read"},
@@ -1192,7 +1198,7 @@ fn setup_success_schema() -> Value {
                                 })
                             ),
                             object_schema(
-                                &["offered", "status", "configured", "error", "nextCommand"],
+                                &["offered", "status", "configured", "error", "recovery", "nextCommand"],
                                 json!({
                                     "offered": {"const": true},
                                     "status": {"const": "failed"},
@@ -1201,6 +1207,7 @@ fn setup_success_schema() -> Value {
                                         &["code", "message"],
                                         json!({"code": {"type": "string"}, "message": {"type": "string"}})
                                     ),
+                                    "recovery": {"type": ["object", "null"]},
                                     "nextCommand": {"const": "drag tracking setup"}
                                 })
                             )
@@ -1247,6 +1254,14 @@ fn unattended_tracking_schema() -> Value {
 fn tracking_success_schema() -> Value {
     json!({
         "oneOf": [
+            object_schema(
+                &["status", "configured", "nextCommand"],
+                json!({
+                    "status": {"enum": ["declined", "cancelled"]},
+                    "configured": {"const": false},
+                    "nextCommand": {"const": "drag tracking setup"}
+                }),
+            ),
             object_schema(
                 &[
                     "schemaVersion",
