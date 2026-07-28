@@ -331,7 +331,7 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
     let data_dir = directory.path().join("state");
-    let scheduler_dir = directory.path().join("scheduler");
+    let scheduler_dir = directory.path().canonicalize()?.join("scheduler");
     let repo = directory.path().join("repo");
     std::fs::create_dir_all(&repo)?;
     isolated_git(&repo).args(["init", "-q"]).status()?;
