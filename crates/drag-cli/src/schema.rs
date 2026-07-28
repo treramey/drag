@@ -599,11 +599,15 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
                 "setup": ["persistTrackingConfiguration", "explicitlyAuthorizedSchedulerOrHookInstallation"],
                 "run": ["persistResumableRunState", "conditionallySubmitApprovedWorklogs"],
                 "reviewApprove": ["persistProposalSetDigestApproval"],
+                "sourcesList": ["readLocalSourceHealth"],
+                "sourcesConfigure": ["readLocalSourceHealth", "persistValidatedSourceSelection"],
+                "sourcesTest": ["runBoundedRedactedLocalChecks"],
                 "pauseResume": ["updateSchedulerState"],
                 "uninstall": ["removeOnlyTrackingOwnedFiles", "preserveHistory"]
             }),
             network_access: json!({
                 "default": {},
+                "sources": {"local": "read", "jira": "none", "tempo": "none"},
                 "run": {"drag": "read", "tempoMutation": "conditionalOnModeApprovalAndRuntimeGates"}
             }),
             dry_run: unsupported_dry_run(),

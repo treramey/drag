@@ -86,6 +86,9 @@ drag tracking status
 drag tracking run today
 drag tracking review today
 drag tracking sources list
+drag tracking sources configure --repo ~/work/project
+drag tracking sources configure --ics ~/calendar.ics
+drag tracking sources test today
 drag tracking schedule show
 drag --output json tracking status
 ```
@@ -97,6 +100,13 @@ switch gate. Scheduler files, Claude hooks, and automatic submission are
 authorized independently. Tracking state lives under `~/.drag/tracking`; the
 first run atomically migrates a legacy `.drag-companion` store when only that
 store exists.
+
+Source configuration validates each selected local repository and calendar
+before saving it and leaves other source kinds unchanged. Claude Code can be
+selected with `sources configure --claude-code` after its separately authorized
+hooks are installed. Source tests cap observations, return redacted references
+instead of paths or evidence content, and never persist evidence or generate or
+submit worklogs.
 
 The deprecated `drag-companion` executable remains available as a compatibility
 shim for this release.

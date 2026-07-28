@@ -197,7 +197,7 @@ pub struct TrackingSourcesArgs {
 pub enum TrackingSourcesCommand {
     /// List supported and configured local evidence sources.
     List,
-    /// Replace the configured local evidence sources.
+    /// Update independently selected local evidence sources.
     Configure(TrackingSourceConfigurationArgs),
     /// Perform a bounded, non-mutating test of configured sources.
     Test(TrackingDateArgs),
@@ -206,11 +206,23 @@ pub enum TrackingSourcesCommand {
 #[derive(Debug, Args)]
 pub struct TrackingSourceConfigurationArgs {
     /// Local Git repository to observe. Repeat for multiple repositories.
-    #[arg(long = "repo", value_name = "DIR")]
+    #[arg(long = "repo", value_name = "DIR", conflicts_with = "clear_repos")]
     pub repos: Vec<PathBuf>,
+    /// Remove every configured Git repository without changing other sources.
+    #[arg(long, conflicts_with = "repos")]
+    pub clear_repos: bool,
     /// Local ICS calendar file to observe. Repeat for multiple files.
-    #[arg(long = "ics", value_name = "FILE")]
+    #[arg(long = "ics", value_name = "FILE", conflicts_with = "clear_ics")]
     pub ics_files: Vec<PathBuf>,
+    /// Remove every configured calendar without changing other sources.
+    #[arg(long, conflicts_with = "ics_files")]
+    pub clear_ics: bool,
+    /// Select the installed Claude Code lifecycle hook as an evidence source.
+    #[arg(long, conflicts_with = "no_claude_code")]
+    pub claude_code: bool,
+    /// Stop selecting Claude Code without removing its separately installed hooks.
+    #[arg(long, conflicts_with = "claude_code")]
+    pub no_claude_code: bool,
 }
 
 #[derive(Debug, Args)]

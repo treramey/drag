@@ -225,6 +225,7 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     let scheduler_dir = directory.path().join("systemd");
     let repo = directory.path().join("repo");
     std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
 
     tracking()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -310,13 +311,18 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["setup", "--repo", "not-a-repo", "--ics", "broken.ics"]),
     )?;
+    let setup_output = serde_json::to_string(&setup)?;
+    assert!(!setup_output.contains("not-a-repo"));
+    assert!(!setup_output.contains("broken.ics"));
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
     let configured_repo = PathBuf::from(
-        setup["sources"][0]["path"]
+        persisted["sources"][0]["path"]
             .as_str()
             .ok_or("configured repository path")?,
     );
     let configured_calendar = PathBuf::from(
-        setup["sources"][1]["path"]
+        persisted["sources"][1]["path"]
             .as_str()
             .ok_or("configured calendar path")?,
     );
@@ -341,6 +347,311 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
     assert_eq!(tested["sources"][1]["health"], "unhealthy");
     assert!(tested["sources"][0]["reason"].is_string());
     assert!(tested["sources"][1]["reason"].is_string());
+    Ok(())
+}
+
+#[test]
+fn sources_configure_and_list_report_versioned_redacted_health(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("private-project");
+    let calendar = directory.path().join("private-calendar.ics");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    std::fs::write(&calendar, "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n")?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+
+    let configured = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "sources",
+                "configure",
+                "--ics",
+                calendar.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    assert_eq!(configured["schemaVersion"], 2);
+    assert_eq!(configured["effects"]["configurationPersisted"], true);
+    assert_eq!(configured["networkAccess"], false);
+    assert_eq!(configured["liveMutationAllowed"], false);
+    let configured_sources = configured["sources"].as_array().ok_or("sources")?;
+    assert_eq!(configured_sources.len(), 2);
+    assert!(configured_sources.iter().all(|source| {
+        source["configured"] == true
+            && source["available"] == true
+            && source["health"] == "healthy"
+            && source["reason"].is_null()
+            && source["reference"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("local-source:sha256:"))
+    }));
+    let configured_text = serde_json::to_string(&configured)?;
+    assert!(!configured_text.contains("private-project"));
+    assert!(!configured_text.contains("private-calendar.ics"));
+
+    let persisted: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert_eq!(persisted["sources"].as_array().map(Vec::len), Some(2));
+    assert!(persisted.to_string().contains("private-project"));
+    assert!(persisted.to_string().contains("private-calendar.ics"));
+
+    std::fs::remove_file(&calendar)?;
+    let listed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "list"]),
+    )?;
+    assert_eq!(listed["schemaVersion"], 2);
+    assert_eq!(listed["networkAccess"], false);
+    assert_eq!(listed["liveMutationAllowed"], false);
+    let sources = listed["configured"]
+        .as_array()
+        .ok_or("listed configured sources")?;
+    assert!(sources.iter().any(|source| source["health"] == "healthy"));
+    let unavailable = sources
+        .iter()
+        .find(|source| source["health"] == "unavailable")
+        .ok_or("unavailable source")?;
+    assert_eq!(unavailable["available"], false);
+    assert!(unavailable["reason"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    let listed_text = serde_json::to_string(&listed)?;
+    assert!(!listed_text.contains("private-project"));
+    assert!(!listed_text.contains("private-calendar.ics"));
+
+    std::fs::write(
+        &calendar,
+        "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:private@example.test\n",
+    )?;
+    let invalid = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-03-08"]),
+    )?;
+    let invalid_calendar = invalid["sources"]
+        .as_array()
+        .and_then(|sources| sources.iter().find(|source| source["kind"] == "calendar"))
+        .ok_or("invalid calendar source")?;
+    assert_eq!(invalid_calendar["available"], true);
+    assert_eq!(invalid_calendar["health"], "unhealthy");
+    assert!(invalid_calendar["reason"]
+        .as_str()
+        .is_some_and(|value| value.contains("invalid RFC 5545")));
+    assert!(!serde_json::to_string(&invalid)?.contains("private@example.test"));
+    Ok(())
+}
+
+#[test]
+fn claude_source_selection_is_independent_from_hook_installation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&home)?;
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+
+    let setup = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--install-hooks",
+            ]),
+    )?;
+    assert_eq!(setup["effects"]["hooksInstalled"], true);
+    assert!(setup["sources"].as_array().is_some_and(|sources| sources
+        .iter()
+        .any(|source| { source["kind"] == "claude-code" && source["health"] == "healthy" })));
+    let settings = home.join(".claude/settings.json");
+    let hooks_before = std::fs::read(&settings)?;
+
+    let deselected = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "configure", "--no-claude-code"]),
+    )?;
+    assert!(deselected["sources"]
+        .as_array()
+        .is_some_and(|sources| sources.len() == 1 && sources[0]["kind"] == "git"));
+    assert_eq!(std::fs::read(&settings)?, hooks_before);
+
+    let selected = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "configure", "--claude-code"]),
+    )?;
+    assert!(selected["sources"].as_array().is_some_and(|sources| sources
+        .iter()
+        .any(|source| { source["kind"] == "claude-code" && source["health"] == "healthy" })));
+    let tested = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-03-08"]),
+    )?;
+    let claude = tested["sources"]
+        .as_array()
+        .and_then(|sources| {
+            sources
+                .iter()
+                .find(|source| source["kind"] == "claude-code")
+        })
+        .ok_or("tested Claude source")?;
+    assert_eq!(claude["health"], "healthy");
+    assert_eq!(claude["check"]["observations"], 0);
+    assert_eq!(std::fs::read(&settings)?, hooks_before);
+    Ok(())
+}
+
+#[test]
+fn sources_configure_rejects_invalid_settings_without_replacing_valid_sources(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("valid-repo");
+    let invalid_calendar = directory.path().join("customer-secret.ics");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    std::fs::write(
+        &invalid_calendar,
+        "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:private-customer@example.test\n",
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+    )?;
+    let before = std::fs::read(data_dir.join("config.json"))?;
+
+    let output = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args([
+            "--output",
+            "json",
+            "sources",
+            "configure",
+            "--ics",
+            invalid_calendar.to_string_lossy().as_ref(),
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["ok"], false);
+    assert!(error["error"]["message"]
+        .as_str()
+        .is_some_and(|value| value.contains("calendar source is invalid")));
+    let diagnostics = String::from_utf8(output.stderr)?;
+    assert!(!diagnostics.contains("customer-secret.ics"));
+    assert!(!diagnostics.contains("private-customer@example.test"));
+    assert_eq!(std::fs::read(data_dir.join("config.json"))?, before);
+    Ok(())
+}
+
+#[test]
+fn sources_test_is_bounded_redacted_and_does_not_persist_evidence_or_worklogs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let repo = directory.path().join("secret-client-repo");
+    let calendar = directory.path().join("executive-calendar.ics");
+    std::fs::create_dir_all(&repo)?;
+    isolated_git(&repo).args(["init", "-q"]).status()?;
+    std::fs::write(repo.join("work.txt"), "private work")?;
+    isolated_git(&repo).args(["add", "."]).status()?;
+    isolated_git(&repo)
+        .env("GIT_AUTHOR_DATE", "2026-03-08T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2026-03-08T12:00:00Z")
+        .args([
+            "-c",
+            "user.name=Private Person",
+            "-c",
+            "user.email=private.person@example.test",
+            "commit",
+            "-q",
+            "-m",
+            "SECRET-CUSTOMER launch plan",
+        ])
+        .status()?;
+    std::fs::write(
+        &calendar,
+        "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nUID:board@example.test\nDTSTART:20260308T130000Z\nDTEND:20260308T140000Z\nSUMMARY:SECRET-BOARD acquisition\nEND:VEVENT\nEND:VCALENDAR\n",
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("setup"),
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "sources",
+                "configure",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--ics",
+                calendar.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    let config_before = std::fs::read(data_dir.join("config.json"))?;
+
+    let tested = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-03-08"]),
+    )?;
+    assert_eq!(tested["schemaVersion"], 2);
+    assert_eq!(tested["selectedDate"], "2026-03-08");
+    assert_eq!(tested["redaction"]["applied"], true);
+    assert_eq!(tested["redaction"]["rawEvidenceIncluded"], false);
+    assert_eq!(tested["bounds"]["sourceLimit"], 64);
+    assert_eq!(tested["bounds"]["observationLimitPerSource"], 200);
+    assert_eq!(tested["bounds"]["configuredSources"], 2);
+    assert_eq!(tested["bounds"]["testedSources"], 2);
+    assert_eq!(tested["bounds"]["truncated"], false);
+    assert_eq!(tested["effects"]["configurationPersisted"], false);
+    assert_eq!(tested["effects"]["evidencePersisted"], false);
+    assert_eq!(tested["effects"]["worklogsGenerated"], 0);
+    assert_eq!(tested["networkAccess"], false);
+    assert_eq!(tested["liveMutationAllowed"], false);
+    let sources = tested["sources"].as_array().ok_or("tested sources")?;
+    assert_eq!(sources.len(), 2);
+    assert!(sources.iter().all(|source| {
+        source["health"] == "healthy"
+            && source["check"]["bounded"] == true
+            && source["check"]["observationLimit"] == 200
+            && source["check"]["observations"].as_u64().is_some()
+    }));
+    let diagnostics = serde_json::to_string(&tested)?;
+    for secret in [
+        "SECRET-CUSTOMER",
+        "SECRET-BOARD",
+        "Private Person",
+        "private.person@example.test",
+        "board@example.test",
+        "secret-client-repo",
+        "executive-calendar.ics",
+    ] {
+        assert!(!diagnostics.contains(secret), "leaked {secret}");
+    }
+    assert_eq!(std::fs::read(data_dir.join("config.json"))?, config_before);
+    assert!(!data_dir.join("journal.jsonl").exists());
+    assert!(!data_dir.join("companion.sqlite3").exists());
     Ok(())
 }
 

@@ -186,10 +186,22 @@ pub(crate) enum PublicSourcesOperation {
 
 #[derive(Debug, Args)]
 pub(crate) struct PublicSourceConfigurationArgs {
-    #[arg(long = "repo", value_name = "DIR")]
+    #[arg(long = "repo", value_name = "DIR", conflicts_with = "clear_repos")]
     pub(crate) repos: Vec<PathBuf>,
-    #[arg(long = "ics", value_name = "FILE")]
+    /// Remove every configured Git repository without changing other sources.
+    #[arg(long, conflicts_with = "repos")]
+    pub(crate) clear_repos: bool,
+    #[arg(long = "ics", value_name = "FILE", conflicts_with = "clear_ics")]
     pub(crate) ics_files: Vec<PathBuf>,
+    /// Remove every configured calendar without changing other sources.
+    #[arg(long, conflicts_with = "ics_files")]
+    pub(crate) clear_ics: bool,
+    /// Select the installed Claude Code lifecycle hook as an evidence source.
+    #[arg(long, conflicts_with = "no_claude_code")]
+    pub(crate) claude_code: bool,
+    /// Stop selecting Claude Code without removing its separately installed hooks.
+    #[arg(long, conflicts_with = "claude_code")]
+    pub(crate) no_claude_code: bool,
 }
 
 #[derive(Debug, Args)]
