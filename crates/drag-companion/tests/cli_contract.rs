@@ -300,6 +300,7 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
 fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
+    let directory_path = directory.path().canonicalize()?;
     let data_dir = directory.path().join("state");
     std::fs::create_dir(directory.path().join("not-a-repo"))?;
     std::fs::write(directory.path().join("broken.ics"), "BEGIN:VEVENT\n")?;
@@ -311,19 +312,11 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
     )?;
     assert_eq!(
         setup["sources"][0]["path"],
-        directory
-            .path()
-            .join("not-a-repo")
-            .to_string_lossy()
-            .as_ref()
+        directory_path.join("not-a-repo").to_string_lossy().as_ref()
     );
     assert_eq!(
         setup["sources"][1]["path"],
-        directory
-            .path()
-            .join("broken.ics")
-            .to_string_lossy()
-            .as_ref()
+        directory_path.join("broken.ics").to_string_lossy().as_ref()
     );
 
     let tested = json_output(
