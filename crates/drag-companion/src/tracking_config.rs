@@ -121,6 +121,7 @@ pub(crate) fn configured_sources(
 pub(crate) fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, CompanionError> {
     validate_tracking_environment()?;
     if let Some(path) = explicit {
+        finalize_migration_record(&path)?;
         return Ok(path);
     }
     let current = std::env::var_os("DRAG_TRACKING_DATA").map(PathBuf::from);
@@ -134,6 +135,7 @@ pub(crate) fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, Com
         }
     }
     if let Some(path) = current.or(legacy) {
+        finalize_migration_record(&path)?;
         return Ok(path);
     }
     let home = std::env::var_os("HOME")
@@ -142,7 +144,9 @@ pub(crate) fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, Com
         .unwrap_or_else(|| PathBuf::from("."));
     let target = home.join(".drag/tracking");
     finalize_migration_record(&target)?;
-    migrate_legacy_data_dir(&target, &PathBuf::from(".drag-companion"))?;
+    let legacy =
+        migration_source_path(&target)?.unwrap_or_else(|| PathBuf::from(".drag-companion"));
+    migrate_legacy_data_dir(&target, &legacy)?;
     Ok(target)
 }
 
@@ -163,6 +167,20 @@ pub(crate) fn migrate_legacy_data_dir(target: &Path, legacy: &Path) -> Result<()
             source,
         })?;
     }
+    let source = if legacy.is_absolute() {
+        legacy.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| CompanionError::Read {
+                path: legacy.to_path_buf(),
+                source,
+            })?
+            .join(legacy)
+    };
+    atomic_write(
+        &migration_source_record_path(target),
+        source.as_os_str().as_encoded_bytes(),
+    )?;
     atomic_write(
         &legacy.join("migration.json"),
         br#"{"schemaVersion":1,"source":".drag-companion","status":"inProgress","recoveryAction":"rerun drag tracking status"}"#,
@@ -199,6 +217,9 @@ fn finalize_migration_record(target: &Path) -> Result<(), CompanionError> {
     if in_progress {
         complete_migration_record(target)?;
     }
+    if target.exists() {
+        remove_migration_source_record(target)?;
+    }
     Ok(())
 }
 
@@ -206,7 +227,32 @@ fn complete_migration_record(target: &Path) -> Result<(), CompanionError> {
     atomic_write(
         &target.join("migration.json"),
         br#"{"schemaVersion":1,"source":".drag-companion","status":"completed","recoveryAction":"pause tracking, move the directory back to .drag-companion, and reinstall the previous release"}"#,
-    )
+    )?;
+    remove_migration_source_record(target)
+}
+
+fn migration_source_record_path(target: &Path) -> PathBuf {
+    target.with_extension("migration-source")
+}
+
+fn migration_source_path(target: &Path) -> Result<Option<PathBuf>, CompanionError> {
+    let path = migration_source_record_path(target);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = fs::read_to_string(&path).map_err(|source| CompanionError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(Some(PathBuf::from(source)))
+}
+
+fn remove_migration_source_record(target: &Path) -> Result<(), CompanionError> {
+    let path = migration_source_record_path(target);
+    if path.exists() {
+        fs::remove_file(&path).map_err(|source| CompanionError::Write { path, source })?;
+    }
+    Ok(())
 }
 
 fn validate_tracking_environment() -> Result<(), CompanionError> {

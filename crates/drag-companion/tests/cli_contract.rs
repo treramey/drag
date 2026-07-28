@@ -453,7 +453,7 @@ fn default_state_migration_resumes_after_interruption_and_preserves_recovery_sta
 
     let output = json_output(
         tracking()?
-            .current_dir(&working)
+            .current_dir(directory.path())
             .env("HOME", &home)
             .env_remove("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION")
             .env_remove("DRAG_TRACKING_DATA")
@@ -529,9 +529,69 @@ fn default_state_migration_finalizes_after_interruption_following_atomic_move(
             .current_dir(&working)
             .env("HOME", &home)
             .env_remove("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION")
-            .arg("status"),
+            .args([
+                "--data-dir",
+                home.join(".drag/tracking").to_string_lossy().as_ref(),
+                "status",
+            ]),
     )?;
     assert_eq!(output["configuration"]["migration"]["status"], "completed");
+    Ok(())
+}
+
+#[test]
+fn tracking_status_supplies_recovery_for_old_and_rejects_corrupt_migration_records(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    tracking()?
+        .args([
+            "--data-dir",
+            directory.path().to_string_lossy().as_ref(),
+            "status",
+        ])
+        .assert()
+        .success();
+    std::fs::write(
+        directory.path().join("migration.json"),
+        r#"{"schemaVersion":1,"source":".drag-companion","status":"completed"}"#,
+    )?;
+    let old = json_output(tracking()?.args([
+        "--data-dir",
+        directory.path().to_string_lossy().as_ref(),
+        "status",
+    ]))?;
+    assert!(old["configuration"]["migration"]["recoveryAction"]
+        .as_str()
+        .ok_or("recovery action")?
+        .contains("move the directory back"));
+
+    std::fs::write(directory.path().join("migration.json"), "not-json")?;
+    tracking()?
+        .args([
+            "--data-dir",
+            directory.path().to_string_lossy().as_ref(),
+            "status",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("migration record"));
+    Ok(())
+}
+
+#[test]
+fn legacy_retention_parse_error_names_the_legacy_variable() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    tracking()?
+        .args(["--data-dir", directory.path().to_string_lossy().as_ref()])
+        .env("DRAG_COMPANION_RETENTION_NOW", "not-a-timestamp")
+        .env_remove("DRAG_TRACKING_RETENTION_NOW")
+        .args(["internal", "retention", "enforce"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "DRAG_COMPANION_RETENTION_NOW must be RFC3339",
+        ));
     Ok(())
 }
 
