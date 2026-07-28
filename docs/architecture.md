@@ -172,8 +172,9 @@ The scheduler installs only files it owns. Linux installs a systemd user
 agent `email.trevors.drag-tracking.plist`. Both invoke the same scheduler-safe
 explicit-date command under `drag-tracking internal scheduler`, with the
 default 18:45 configured local time. systemd uses `Persistent=true`; launchd uses
-`RunAtLoad`, so startup/wake paths reconcile catch-up through companion state
-rather than granting host schedulers mutation authority.
+weekday calendar intervals plus `RunAtLoad`, so startup/wake paths reconcile
+catch-up through companion state rather than granting host schedulers mutation
+authority.
 
 Catch-up selects at most one day: the latest missed weekday newer than the last
 success and no older than seven days. DST, timezone changes, sleep/wake startup,
@@ -182,9 +183,11 @@ Duplicate triggers are suppressed by durable operation keys in
 `~/.drag/tracking/scheduler.json`.
 
 Install and uninstall are non-destructive. The installer refuses to overwrite a
-same-named file unless it contains `managed-by=drag-tracking`; migration also
-recognizes and replaces legacy owned files marked `managed-by=drag-companion`.
-Uninstall removes only owned files and preserves history, unrelated hooks,
+same-named file unless its first non-empty line is the
+`managed-by=drag-tracking` ownership marker; migration also recognizes and
+replaces legacy owned files marked `managed-by=drag-companion`. All new
+destinations pass ownership checks before legacy files are removed. Uninstall
+removes only owned files and preserves scheduler history, unrelated hooks,
 services, launch agents, and user configuration.
 
 Scheduler upgrades are atomic. State writes go through a temporary file, existing

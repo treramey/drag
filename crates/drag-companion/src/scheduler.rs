@@ -39,6 +39,25 @@ pub(crate) fn scheduler_status(data_dir: &Path) -> Result<Value, CompanionError>
     }))
 }
 
+pub(crate) fn scheduler_file_health(data_dir: &Path) -> Result<&'static str, CompanionError> {
+    let status = scheduler_status(data_dir)?;
+    let Some(files) = status["state"]
+        .get("installedFiles")
+        .and_then(Value::as_array)
+    else {
+        return Ok("not-installed");
+    };
+    if files.is_empty() {
+        return Ok("not-installed");
+    }
+    let healthy = files.iter().all(|file| {
+        file.as_str()
+            .map(Path::new)
+            .is_some_and(|path| path.is_file() && matches!(is_owned_scheduler_file(path), Ok(true)))
+    });
+    Ok(if healthy { "healthy" } else { "unhealthy" })
+}
+
 pub(crate) fn install_scheduler(
     data_dir: &Path,
     drag_bin: &Path,
@@ -57,9 +76,10 @@ pub(crate) fn install_scheduler_files(
     if args.platform == "launchd" && args.timezone != "local" {
         return Err(CompanionError::Proposal(
             "launchd calendar intervals use the system timezone; configure local or use systemd for an explicit IANA timezone"
-                .to_owned(),
+            .to_owned(),
         ));
     }
+    migrate_scheduler_state(data_dir)?;
     let mut state = scheduler_status(data_dir)?["state"].clone();
     let installed = if args.platform == "launchd" {
         vec![
@@ -200,6 +220,8 @@ pub(crate) fn uninstall_scheduler_files(
     data_dir: &Path,
     args: &SchedulerInstallArgs,
 ) -> Result<Value, CompanionError> {
+    migrate_scheduler_state(data_dir)?;
+    let mut state = scheduler_status(data_dir)?["state"].clone();
     let names = [
         "drag-tracking.service",
         "drag-tracking.timer",
@@ -223,15 +245,14 @@ pub(crate) fn uninstall_scheduler_files(
             removed.push(path);
         }
     }
-    write_scheduler_state(
-        data_dir,
-        serde_json::json!({
-            "schemaVersion": SCHEDULER_SCHEMA_VERSION,
-            "enabled": false,
-            "removedFiles": removed,
-            "operationKeys": scheduler_status(data_dir)?.get("state").and_then(|s| s.get("operationKeys")).cloned().unwrap_or_else(|| serde_json::json!([])),
-        }),
-    )?;
+    state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
+    state["enabled"] = serde_json::json!(false);
+    state["installedFiles"] = serde_json::json!([]);
+    state["removedFiles"] = serde_json::json!(removed);
+    if state.get("operationKeys").is_none() {
+        state["operationKeys"] = serde_json::json!([]);
+    }
+    write_scheduler_state(data_dir, state)?;
     Ok(
         serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": false, "removedFiles": removed }),
     )
@@ -406,7 +427,7 @@ pub(crate) fn render_launchd(
         ));
     }
     let (hour, minute) = at.split_once(':').unwrap_or(("18", "45"));
-    let weekdays = (1..=5)
+    let weekdays = (2..=6)
         .map(|weekday| format!("<dict><key>Weekday</key><integer>{weekday}</integer><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict>"))
         .collect::<String>();
     Ok(format!("<!-- managed-by=drag-tracking timezone=local -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-tracking</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{}</string></array><key>StartCalendarInterval</key><array>{weekdays}</array></dict></plist>\n", xml_escape(command)))
@@ -433,6 +454,15 @@ pub(crate) fn validate_time_and_timezone(at: &str, timezone: &str) -> Result<(),
     let (hour, minute) = at
         .split_once(':')
         .ok_or_else(|| CompanionError::Proposal("invalid scheduler time".to_owned()))?;
+    if hour.len() != 2
+        || minute.len() != 2
+        || !hour.bytes().all(|byte| byte.is_ascii_digit())
+        || !minute.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(CompanionError::Proposal(
+            "invalid scheduler time; expected HH:MM".to_owned(),
+        ));
+    }
     let hour: u32 = hour
         .parse()
         .map_err(|_| CompanionError::Proposal("invalid scheduler hour".to_owned()))?;
@@ -457,8 +487,18 @@ pub(crate) fn is_owned_scheduler_file(path: &Path) -> Result<bool, CompanionErro
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(content.contains("managed-by=drag-tracking")
-        || content.contains("managed-by=drag-companion"))
+    let Some(marker) = content.lines().find(|line| !line.trim().is_empty()) else {
+        return Ok(false);
+    };
+    let marker = marker.trim();
+    Ok(["drag-tracking", "drag-companion"]
+        .into_iter()
+        .any(|owner| {
+            marker == format!("# managed-by={owner}")
+                || marker == format!("<!-- managed-by={owner} -->")
+                || (marker.starts_with(&format!("<!-- managed-by={owner} "))
+                    && marker.ends_with("-->"))
+        }))
 }
 
 pub(crate) fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {

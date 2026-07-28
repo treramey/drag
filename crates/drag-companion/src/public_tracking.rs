@@ -377,18 +377,19 @@ pub(crate) fn show_schedule(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
+    validate_configured_schedule(&config)?;
+    let next_run = next_run_description(&config);
+    let health = scheduler_file_health(data_dir)?;
     let result = serde_json::json!({
         "schedule": config.schedule,
         "active": config.active,
-        "nextRun": next_run_description(&config),
+        "nextRun": next_run,
+        "health": health,
         "networkAccess": false,
         "liveMutationAllowed": false
     });
-    print_public(
-        output,
-        &result,
-        "Displayed the automatic tracking schedule.",
-    )
+    let human = schedule_human_report(&config, &next_run, health);
+    print_public(output, &result, &human)
 }
 
 pub(crate) fn update_schedule(
@@ -404,6 +405,7 @@ pub(crate) fn update_schedule(
     validate_time_and_timezone(&args.at, &timezone)?;
     config.schedule.at = args.at.clone();
     config.schedule.timezone = timezone.clone();
+    validate_configured_schedule(&config)?;
     let scheduler = if let Some(target_dir) = &config.scheduler_target {
         Some(install_scheduler_files(
             data_dir,
@@ -419,14 +421,20 @@ pub(crate) fn update_schedule(
         None
     };
     save_tracking_config(data_dir, &config)?;
+    let next_run = next_run_description(&config);
+    let health = scheduler_file_health(data_dir)?;
     let result = serde_json::json!({
         "status": "updated",
         "schedule": config.schedule,
+        "active": config.active,
+        "nextRun": next_run,
+        "health": health,
         "scheduler": scheduler,
         "networkAccess": false,
         "liveMutationAllowed": false
     });
-    print_public(output, &result, "Updated the automatic tracking schedule.")
+    let human = schedule_human_report(&config, &next_run, health);
+    print_public(output, &result, &human)
 }
 
 pub(crate) fn set_tracking_active(
@@ -435,10 +443,19 @@ pub(crate) fn set_tracking_active(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let mut config = require_config(data_dir)?;
-    if active && config.scheduler_target.is_none() {
-        return Err(CompanionError::Proposal(
-            "tracking cannot resume until owned scheduler files are installed".to_owned(),
-        ));
+    if active {
+        validate_configured_schedule(&config)?;
+        if config.scheduler_target.is_none() {
+            return Err(CompanionError::Proposal(
+                "tracking cannot resume until owned scheduler files are installed".to_owned(),
+            ));
+        }
+        if scheduler_file_health(data_dir)? != "healthy" {
+            return Err(CompanionError::Proposal(
+                "tracking cannot resume because tracking-owned scheduler files are missing or modified; reinstall the schedule before resuming"
+                    .to_owned(),
+            ));
+        }
     }
     config.active = active;
     let _ = set_scheduler_enabled_state(data_dir, active)?;
@@ -617,6 +634,24 @@ fn next_run_description(config: &TrackingConfig) -> Value {
     } else {
         Value::Null
     }
+}
+
+fn validate_configured_schedule(config: &TrackingConfig) -> Result<(), CompanionError> {
+    if !config.schedule.weekdays {
+        return Err(CompanionError::Proposal(
+            "tracking schedule must run on weekdays".to_owned(),
+        ));
+    }
+    validate_time_and_timezone(&config.schedule.at, &config.schedule.timezone)
+}
+
+fn schedule_human_report(config: &TrackingConfig, next_run: &Value, health: &str) -> String {
+    let active = if config.active { "yes" } else { "no" };
+    let next_run = next_run.as_str().unwrap_or("none while paused");
+    format!(
+        "Automatic tracking schedule\nWeekdays: Monday-Friday\nTime: {}\nTimezone: {}\nActive: {active}\nNext run: {next_run}\nHealth: {health}",
+        config.schedule.at, config.schedule.timezone
+    )
 }
 
 fn migration_status(data_dir: &Path) -> Result<Value, CompanionError> {

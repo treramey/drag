@@ -332,6 +332,76 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
     Ok(())
 }
 
+#[test]
+fn public_uninstall_removes_only_owned_hooks_and_preserves_tracking_history(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let data_dir = directory.path().join("state");
+    let settings_path = home.join(".claude/settings.json");
+    std::fs::create_dir_all(settings_path.parent().ok_or("settings parent")?)?;
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "theme": "dark",
+            "hooks": {
+                "SessionStart": [
+                    {"matcher": "project", "hooks": [{"type": "command", "command": "echo keep-start"}]},
+                    {"matcher": "documentation", "hooks": [{"type": "command", "command": "echo drag-tracking internal claude-hook capture"}]}
+                ],
+                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo keep-tool"}]}]
+            }
+        }))?,
+    )?;
+    json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--install-hooks"]),
+    )?;
+    let mut settings: Value = serde_json::from_str(&std::fs::read_to_string(&settings_path)?)?;
+    settings["hooks"]["SessionEnd"]
+        .as_array_mut()
+        .ok_or("SessionEnd hooks")?
+        .push(serde_json::json!({
+            "matcher": "*",
+            "hooks": [{"type": "command", "command": "drag-companion claude-hook capture"}]
+        }));
+    std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
+    std::fs::write(data_dir.join("journal.jsonl"), "preserved journal\n")?;
+    std::fs::create_dir_all(data_dir.join("reports"))?;
+    std::fs::write(data_dir.join("reports/2026-07-23.json"), "preserved report")?;
+
+    let uninstalled = json_output(
+        tracking()?
+            .env("HOME", &home)
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("uninstall"),
+    )?;
+    assert_eq!(uninstalled["hooksRemoved"], true);
+    assert_eq!(uninstalled["historyPreserved"], true);
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("journal.jsonl"))?,
+        "preserved journal\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(data_dir.join("reports/2026-07-23.json"))?,
+        "preserved report"
+    );
+    let settings = std::fs::read_to_string(&settings_path)?;
+    assert!(settings.contains("echo keep-start"));
+    assert!(settings.contains("echo keep-tool"));
+    assert!(settings.contains("echo drag-tracking internal claude-hook capture"));
+    assert_eq!(
+        settings
+            .matches("drag-tracking internal claude-hook capture")
+            .count(),
+        1
+    );
+    assert!(!settings.contains("drag-companion claude-hook capture"));
+    Ok(())
+}
+
 #[cfg(not(target_os = "windows"))]
 #[test]
 fn public_schedule_aliases_and_run_keep_one_intent_level_result(
@@ -350,6 +420,48 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
             ]),
     )?;
 
+    let shown = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "show"]),
+    )?;
+    assert_eq!(shown["schedule"]["weekdays"], true);
+    assert_eq!(shown["schedule"]["at"], "18:45");
+    assert_eq!(shown["schedule"]["timezone"], "local");
+    assert_eq!(shown["active"], true);
+    assert!(shown["nextRun"].is_string());
+    assert_eq!(shown["health"], "healthy");
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "human", "schedule", "show"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Weekdays: Monday-Friday"))
+        .stdout(predicate::str::contains("Time: 18:45"))
+        .stdout(predicate::str::contains("Timezone: local"))
+        .stdout(predicate::str::contains("Active: yes"))
+        .stdout(predicate::str::contains("Health: healthy"));
+    for invalid_args in [
+        vec!["schedule", "update", "--at", "24:00"],
+        vec!["schedule", "update", "--at", "1:05"],
+        vec!["schedule", "update", "--at", "01:5"],
+        vec![
+            "schedule",
+            "update",
+            "--at",
+            "18:45",
+            "--schedule-timezone",
+            "Mars/Olympus",
+        ],
+    ] {
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(invalid_args)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid scheduler"));
+    }
+
     let paused = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -363,11 +475,15 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
         data_dir.join("scheduler.json"),
         serde_json::to_vec_pretty(&scheduler_state)?,
     )?;
-    json_output(
+    let updated = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["schedule", "update", "--at", "17:30"]),
     )?;
+    assert_eq!(updated["schedule"]["at"], "17:30");
+    assert_eq!(updated["active"], false);
+    assert!(updated["nextRun"].is_null());
+    assert_eq!(updated["health"], "healthy");
     let scheduler_state: Value =
         serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
     assert_eq!(scheduler_state["enabled"], false);
@@ -382,6 +498,18 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
     )?;
     assert_eq!(resumed["status"], "active");
 
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("pause"),
+    )?;
+    let nested_resume = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "resume"]),
+    )?;
+    assert_eq!(resumed, nested_resume);
+
     let scheduled = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -395,6 +523,49 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
     assert!(run["sourceHealth"].is_array());
     assert!(run["evidenceBundle"].is_object());
     assert!(run["phases"].is_array());
+
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "pause"]),
+    )?;
+    let config_path = data_dir.join("config.json");
+    let valid_config = std::fs::read(&config_path)?;
+    let mut invalid_config: Value = serde_json::from_slice(&valid_config)?;
+    invalid_config["schedule"]["at"] = Value::String("7pm".to_owned());
+    std::fs::write(&config_path, serde_json::to_vec_pretty(&invalid_config)?)?;
+    for operation in [&["resume"][..], &["schedule", "resume"][..]] {
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(operation)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid scheduler time"));
+    }
+    std::fs::write(&config_path, valid_config)?;
+
+    let scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
+    let installed_file = scheduler_state["installedFiles"][0]
+        .as_str()
+        .ok_or("installed scheduler file")?;
+    std::fs::write(installed_file, "unrelated scheduler configuration")?;
+    let shown = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "show"]),
+    )?;
+    assert_eq!(shown["health"], "unhealthy");
+    for operation in [&["resume"][..], &["schedule", "resume"][..]] {
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(operation)
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "tracking-owned scheduler files are missing or modified",
+            ));
+    }
     Ok(())
 }
 
@@ -1086,6 +1257,7 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     let systemd = dir.path().join("systemd");
     let launchd = dir.path().join("launchd");
     std::fs::create_dir_all(&systemd)?;
+    std::fs::create_dir_all(&launchd)?;
     std::fs::write(systemd.join("unrelated.timer"), "keep me")?;
 
     let installed = json_output(
@@ -1119,6 +1291,36 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
         "keep me"
     );
 
+    let legacy_launchd = launchd.join("email.trevors.drag-companion.plist");
+    let unrelated_legacy_launchd = launchd.join("email.trevors.drag-companion.catch-up.plist");
+    let conflicting_launchd = launchd.join("email.trevors.drag-tracking.plist");
+    std::fs::write(
+        &legacy_launchd,
+        "<!-- managed-by=drag-companion -->\nlegacy agent",
+    )?;
+    std::fs::write(&unrelated_legacy_launchd, "unrelated legacy-named agent")?;
+    std::fs::write(
+        &conflicting_launchd,
+        "unrelated documentation: managed-by=drag-tracking is reserved",
+    )?;
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args([
+            "scheduler",
+            "install",
+            "--platform",
+            "launchd",
+            "--target-dir",
+        ])
+        .arg(&launchd)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "refusing to overwrite unrelated file",
+        ));
+    assert!(legacy_launchd.is_file());
+    std::fs::remove_file(&conflicting_launchd)?;
+
     json_output(
         companion()?
             .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -1131,6 +1333,11 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
             ])
             .arg(&launchd),
     )?;
+    assert!(!legacy_launchd.exists());
+    assert_eq!(
+        std::fs::read_to_string(&unrelated_legacy_launchd)?,
+        "unrelated legacy-named agent"
+    );
     let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-tracking.plist"))?;
     let catch_up_plist =
         std::fs::read_to_string(launchd.join("email.trevors.drag-tracking.catch-up.plist"))?;
@@ -1141,10 +1348,33 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     assert!(plist.contains("<integer>18</integer>"));
     assert!(plist.contains("<integer>45</integer>"));
     assert_eq!(plist.matches("<key>Weekday</key>").count(), 5);
-    assert!(plist.contains("<key>Weekday</key><integer>1</integer>"));
-    assert!(plist.contains("<key>Weekday</key><integer>5</integer>"));
+    assert!(plist.contains("<key>Weekday</key><integer>2</integer>"));
+    assert!(plist.contains("<key>Weekday</key><integer>6</integer>"));
+    assert!(!plist.contains("<key>Weekday</key><integer>1</integer>"));
+    assert!(!plist.contains("<key>Weekday</key><integer>7</integer>"));
     assert!(!plist.contains("RunAtLoad"));
     assert!(catch_up_plist.contains("RunAtLoad"));
+
+    json_output(
+        companion()?
+            .args(["--data-dir", data.to_string_lossy().as_ref()])
+            .args([
+                "scheduler",
+                "uninstall",
+                "--platform",
+                "launchd",
+                "--target-dir",
+            ])
+            .arg(&launchd),
+    )?;
+    assert!(!launchd.join("email.trevors.drag-tracking.plist").exists());
+    assert!(!launchd
+        .join("email.trevors.drag-tracking.catch-up.plist")
+        .exists());
+    assert_eq!(
+        std::fs::read_to_string(&unrelated_legacy_launchd)?,
+        "unrelated legacy-named agent"
+    );
 
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -1195,7 +1425,10 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
     let data = dir.path().join("data");
     let target = dir.path().join("systemd");
     std::fs::create_dir_all(&target)?;
-    std::fs::write(target.join("drag-tracking.timer"), "# unrelated timer")?;
+    std::fs::write(
+        target.join("drag-tracking.timer"),
+        "unrelated documentation: managed-by=drag-tracking is reserved",
+    )?;
     std::fs::write(
         target.join("drag-companion.timer"),
         "# managed-by=drag-companion\nlegacy schedule",
@@ -1218,7 +1451,7 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
         ));
     assert_eq!(
         std::fs::read_to_string(target.join("drag-tracking.timer"))?,
-        "# unrelated timer"
+        "unrelated documentation: managed-by=drag-tracking is reserved"
     );
     assert!(target.join("drag-companion.timer").exists());
 
@@ -1238,6 +1471,11 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
         .arg(&target)
         .assert()
         .success();
+    let state_path = data.join("scheduler.json");
+    let mut state: Value = serde_json::from_str(&std::fs::read_to_string(&state_path)?)?;
+    state["operationKeys"] = serde_json::json!(["scheduler.run.2026-07-23"]);
+    state["lastSuccessfulDate"] = serde_json::json!("2026-07-23");
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&state)?)?;
     std::fs::write(target.join("other.service"), "keep")?;
     json_output(
         companion()?
@@ -1256,6 +1494,13 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
         std::fs::read_to_string(target.join("other.service"))?,
         "keep"
     );
+    let state: Value = serde_json::from_str(&std::fs::read_to_string(&state_path)?)?;
+    assert_eq!(
+        state["operationKeys"],
+        serde_json::json!(["scheduler.run.2026-07-23"])
+    );
+    assert_eq!(state["lastSuccessfulDate"], "2026-07-23");
+    assert_eq!(state["enabled"], false);
     Ok(())
 }
 

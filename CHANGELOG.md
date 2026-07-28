@@ -72,6 +72,12 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Fixed
 
+- Tracking schedule lifecycle now reports validated schedule and scheduler
+  health details, preserves paused and duplicate-suppression state during
+  updates, validates owned resources before resume, migrates legacy scheduler
+  identities without destructive conflicts, renders weekday-only launchd
+  intervals, and preserves unrelated files, hooks, and tracking history during
+  uninstall.
 - Build human and structured list output from one shared immutable report model
   without changing existing output contracts.
 - Centralize CLI errors, output, schema, diagnostics, and HTTP policy

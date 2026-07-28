@@ -155,17 +155,16 @@ pub(crate) fn remove_claude_hooks(settings_path: &Path) -> Result<(), CompanionE
     if let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) {
         for event in ["SessionStart", "SessionEnd"] {
             if let Some(entries) = hooks.get_mut(event).and_then(Value::as_array_mut) {
-                for entry in entries.iter_mut() {
+                entries.retain_mut(|entry| {
+                    let owned = is_our_hook_entry(entry);
                     if let Some(commands) = entry.get_mut("hooks").and_then(Value::as_array_mut) {
                         commands.retain(|command| !is_our_command(command));
                     }
-                }
-                entries.retain(|entry| {
-                    entry
-                        .get("hooks")
-                        .and_then(Value::as_array)
-                        .is_none_or(|commands| !commands.is_empty())
-                        || !is_our_hook_entry(entry)
+                    !owned
+                        || entry
+                            .get("hooks")
+                            .and_then(Value::as_array)
+                            .is_some_and(|commands| !commands.is_empty())
                 });
             }
         }
@@ -910,7 +909,8 @@ pub(crate) fn is_our_command(command: &Value) -> bool {
         .get("command")
         .and_then(Value::as_str)
         .is_some_and(|command| {
-            command.contains(CLAUDE_HOOK_COMMAND) || command.contains(LEGACY_CLAUDE_HOOK_COMMAND)
+            let command = command.trim();
+            command == CLAUDE_HOOK_COMMAND || command == LEGACY_CLAUDE_HOOK_COMMAND
         })
 }
 

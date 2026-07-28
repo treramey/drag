@@ -87,6 +87,10 @@ drag tracking run today
 drag tracking review today
 drag tracking sources list
 drag tracking schedule show
+drag tracking schedule update --at 17:30 --schedule-timezone local
+drag tracking pause
+drag tracking resume
+drag tracking uninstall
 drag --output json tracking status
 ```
 
@@ -96,7 +100,10 @@ authorization plus every runtime rollout, duplicate, uncertainty, and kill
 switch gate. Scheduler files, Claude hooks, and automatic submission are
 authorized independently. Tracking state lives under `~/.drag/tracking`; the
 first run atomically migrates a legacy `.drag-companion` store when only that
-store exists.
+store exists. Schedule reports include the weekday time, timezone, active
+state, next run, and scheduler health. Updating a paused schedule keeps it
+paused, and uninstall removes only owned scheduler files and hooks while
+retaining tracking history.
 
 The deprecated `drag-companion` executable remains available as a compatibility
 shim for this release.
