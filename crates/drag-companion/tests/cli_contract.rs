@@ -1,7 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tempfile::tempdir;
 
 fn json_output(cmd: &mut assert_cmd::Command) -> Result<Value, Box<dyn std::error::Error>> {
@@ -310,13 +310,25 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["setup", "--repo", "not-a-repo", "--ics", "broken.ics"]),
     )?;
+    let configured_repo = PathBuf::from(
+        setup["sources"][0]["path"]
+            .as_str()
+            .ok_or("configured repository path")?,
+    );
+    let configured_calendar = PathBuf::from(
+        setup["sources"][1]["path"]
+            .as_str()
+            .ok_or("configured calendar path")?,
+    );
+    assert!(configured_repo.is_absolute());
+    assert!(configured_calendar.is_absolute());
     assert_eq!(
-        setup["sources"][0]["path"],
-        directory_path.join("not-a-repo").to_string_lossy().as_ref()
+        configured_repo.canonicalize()?,
+        directory_path.join("not-a-repo").canonicalize()?
     );
     assert_eq!(
-        setup["sources"][1]["path"],
-        directory_path.join("broken.ics").to_string_lossy().as_ref()
+        configured_calendar.canonicalize()?,
+        directory_path.join("broken.ics").canonicalize()?
     );
 
     let tested = json_output(
