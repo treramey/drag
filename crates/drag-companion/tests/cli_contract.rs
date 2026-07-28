@@ -216,6 +216,7 @@ fn tracking_json_failures_use_stderr_without_loading_credentials(
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_authorized(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -338,6 +339,7 @@ fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn public_schedule_aliases_and_run_keep_one_intent_level_result(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -876,6 +878,7 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destructively(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -965,6 +968,28 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+#[test]
+fn scheduler_install_is_rejected_without_writing_unusable_resources_on_windows(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data = dir.path().join("data");
+    let target = dir.path().join("scheduler");
+    companion()?
+        .args(["--data-dir", data.to_string_lossy().as_ref()])
+        .args(["scheduler", "install", "--target-dir"])
+        .arg(&target)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "scheduler installation is not supported on Windows",
+        ));
+    assert!(!target.exists());
+    assert!(!data.join("scheduler.json").exists());
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configuration(
 ) -> Result<(), Box<dyn std::error::Error>> {
