@@ -112,6 +112,18 @@ pub(crate) fn run(
                     for file in args.ics_files {
                         command.args(["--ics".as_ref(), file.as_os_str()]);
                     }
+                    if args.clear_repos {
+                        command.arg("--clear-repos");
+                    }
+                    if args.clear_ics {
+                        command.arg("--clear-ics");
+                    }
+                    if args.claude_code {
+                        command.arg("--claude-code");
+                    }
+                    if args.no_claude_code {
+                        command.arg("--no-claude-code");
+                    }
                 }
                 TrackingSourcesCommand::Test(args) => {
                     command.arg("test");

@@ -53,6 +53,12 @@ pub(crate) fn setup_tracking(
         install_claude_hooks(&default_claude_settings_path())?;
         config.hooks_installed = true;
     }
+    if config.hooks_installed {
+        config
+            .sources
+            .retain(|source| source.kind != TrackingSourceKind::ClaudeCode);
+        config.sources.push(claude_code_source()?);
+    }
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
@@ -163,14 +169,14 @@ pub(crate) fn run_tracking_for_date(
         repos: config
             .sources
             .iter()
-            .filter(|source| source.enabled && source.kind == "git")
+            .filter(|source| source.enabled && source.kind == TrackingSourceKind::Git)
             .map(|source| source.path.clone())
             .collect(),
         date: Some(date),
         ics_files: config
             .sources
             .iter()
-            .filter(|source| source.enabled && source.kind == "calendar")
+            .filter(|source| source.enabled && source.kind == TrackingSourceKind::Calendar)
             .map(|source| source.path.clone())
             .collect(),
     };
@@ -312,12 +318,17 @@ pub(crate) fn list_sources(
 ) -> Result<(), CompanionError> {
     let config = load_tracking_config(data_dir)?.unwrap_or_default();
     let result = serde_json::json!({
+        "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
         "supported": [
             {"kind": "git", "description": "local Git commit metadata"},
             {"kind": "calendar", "description": "local RFC 5545 ICS events"},
             {"kind": "claude-code", "description": "local session lifecycle metadata"}
         ],
         "configured": source_statuses(&config),
+        "effects": {
+            "localSourceDataRead": true,
+            "configurationPersisted": false
+        },
         "networkAccess": false,
         "liveMutationAllowed": false
     });
@@ -334,11 +345,41 @@ pub(crate) fn configure_sources(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let mut config = require_config(data_dir)?;
-    config.sources = configured_sources(args.repos, args.ics_files)?;
+    let update_git = args.clear_repos || !args.repos.is_empty();
+    let update_calendars = args.clear_ics || !args.ics_files.is_empty();
+    let update_claude = args.claude_code || args.no_claude_code;
+    if !update_git && !update_calendars && !update_claude {
+        return Err(CompanionError::Proposal(
+            "select a source update; pass --repo, --ics, --claude-code, or a clear option"
+                .to_owned(),
+        ));
+    }
+
+    let mut selected = configured_sources(args.repos, args.ics_files)?;
+    if args.claude_code {
+        selected.push(claude_code_source()?);
+    }
+    validate_source_configuration(&selected)?;
+    config.sources.retain(|source| {
+        !(update_git && source.kind == TrackingSourceKind::Git
+            || update_calendars && source.kind == TrackingSourceKind::Calendar
+            || update_claude && source.kind == TrackingSourceKind::ClaudeCode)
+    });
+    config.sources.extend(selected);
+    if config.sources.len() > SOURCE_TEST_SOURCE_LIMIT {
+        return Err(CompanionError::Proposal(format!(
+            "source configuration is limited to {SOURCE_TEST_SOURCE_LIMIT} entries"
+        )));
+    }
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
+        "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
         "status": "configured",
         "sources": source_statuses(&config),
+        "effects": {
+            "localSourceDataRead": true,
+            "configurationPersisted": true
+        },
         "networkAccess": false,
         "liveMutationAllowed": false
     });
@@ -356,12 +397,32 @@ pub(crate) fn test_sources(
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
     let date = select_public_date(args.when.as_deref(), &config.schedule.timezone)?;
+    let sources = tested_source_statuses(&config, date);
     let result = serde_json::json!({
+        "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
         "status": "tested",
         "selectedDate": date,
-        "sources": tested_source_statuses(&config, date),
+        "sources": sources,
         "redacted": true,
+        "redaction": {
+            "applied": true,
+            "rawEvidenceIncluded": false,
+            "localPathsIncluded": false
+        },
+        "bounds": {
+            "sourceLimit": SOURCE_TEST_SOURCE_LIMIT,
+            "observationLimitPerSource": SOURCE_TEST_OBSERVATION_LIMIT,
+            "configuredSources": config.sources.len(),
+            "testedSources": sources.len(),
+            "truncated": config.sources.len() > sources.len()
+        },
         "worklogsGenerated": 0,
+        "effects": {
+            "localSourceDataRead": true,
+            "configurationPersisted": false,
+            "evidencePersisted": false,
+            "worklogsGenerated": 0
+        },
         "networkAccess": false,
         "liveMutationAllowed": false
     });
@@ -508,55 +569,6 @@ fn require_config(data_dir: &Path) -> Result<TrackingConfig, CompanionError> {
             "automatic tracking is not configured; run tracking setup first".to_owned(),
         )
     })
-}
-
-fn source_statuses(config: &TrackingConfig) -> Vec<Value> {
-    config
-        .sources
-        .iter()
-        .map(|source| {
-            let available = source.path.exists();
-            serde_json::json!({
-                "kind": source.kind,
-                "path": source.path,
-                "enabled": source.enabled,
-                "available": available,
-                "health": if available { "healthy" } else { "unavailable" },
-                "reason": if available {
-                    Value::Null
-                } else {
-                    Value::String("configured path does not exist or is not accessible".to_owned())
-                }
-            })
-        })
-        .collect()
-}
-
-fn tested_source_statuses(config: &TrackingConfig, date: NaiveDate) -> Vec<Value> {
-    config
-        .sources
-        .iter()
-        .map(|source| {
-            let result = if !source.enabled {
-                Ok(())
-            } else if source.kind == "git" {
-                scan_git_repo(&source.path).map(|_| ())
-            } else if source.kind == "calendar" {
-                scan_ics_file(&source.path, date).map(|_| ()).map_err(|errors| errors.join("; "))
-            } else {
-                Err(format!("unsupported source kind {}", source.kind))
-            };
-            let healthy = result.is_ok();
-            serde_json::json!({
-                "kind": source.kind,
-                "path": source.path,
-                "enabled": source.enabled,
-                "available": healthy,
-                "health": if !source.enabled { "disabled" } else if healthy { "healthy" } else { "unhealthy" },
-                "reason": result.err()
-            })
-        })
-        .collect()
 }
 
 fn select_public_date(raw: Option<&str>, timezone: &str) -> Result<NaiveDate, CompanionError> {

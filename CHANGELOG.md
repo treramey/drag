@@ -7,6 +7,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
+- Validated, independently selected Git, calendar, and Claude Code evidence
+  sources with versioned health reports and bounded, redacted, non-mutating
+  source tests.
 - First-class `drag tracking` setup, status, run, review, source, schedule,
   pause, resume, and safe uninstall workflows delegated to the separately
   packaged `drag-tracking` process, with explicit effect authorization,

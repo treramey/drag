@@ -18,9 +18,27 @@ pub(crate) struct TrackingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TrackingSource {
-    pub(crate) kind: String,
+    pub(crate) kind: TrackingSourceKind,
     pub(crate) path: PathBuf,
     pub(crate) enabled: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum TrackingSourceKind {
+    Git,
+    Calendar,
+    ClaudeCode,
+}
+
+impl TrackingSourceKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Calendar => "calendar",
+            Self::ClaudeCode => "claude-code",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,14 +125,14 @@ pub(crate) fn configured_sources(
         .into_iter()
         .map(|path| {
             Ok(TrackingSource {
-                kind: "git".to_owned(),
+                kind: TrackingSourceKind::Git,
                 path: absolute_source_path(path)?,
                 enabled: true,
             })
         })
         .chain(ics_files.into_iter().map(|path| {
             Ok(TrackingSource {
-                kind: "calendar".to_owned(),
+                kind: TrackingSourceKind::Calendar,
                 path: absolute_source_path(path)?,
                 enabled: true,
             })
@@ -128,6 +146,14 @@ fn absolute_source_path(path: PathBuf) -> Result<PathBuf, CompanionError> {
             "could not make configured source path {} absolute: {error}",
             path.display()
         ))
+    })
+}
+
+pub(crate) fn claude_code_source() -> Result<TrackingSource, CompanionError> {
+    Ok(TrackingSource {
+        kind: TrackingSourceKind::ClaudeCode,
+        path: absolute_source_path(default_claude_settings_path())?,
+        enabled: true,
     })
 }
 

@@ -268,7 +268,15 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
     command
         .args(["--output", "json", "--config"])
         .arg(&selected_config)
-        .args(["tracking", "status"])
+        .args([
+            "tracking",
+            "sources",
+            "configure",
+            "--repo",
+            "/tmp/repo",
+            "--clear-ics",
+            "--claude-code",
+        ])
         .env("DRAG_CONFIG", directory.path().join("wrong-config.json"))
         .env("PATH", "")
         .stdin(std::process::Stdio::piped())
@@ -287,7 +295,7 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
     assert_eq!(
         String::from_utf8(output.stdout)?,
         format!(
-            "arguments:--output json --drag-bin {} status\nconfig:{}\ntracking stdin\n",
+            "arguments:--output json --drag-bin {} sources configure --repo /tmp/repo --clear-ics --claude-code\nconfig:{}\ntracking stdin\n",
             drag.display(),
             selected_config.display()
         )
@@ -1226,6 +1234,14 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert_eq!(
         contract["commands"]["delete"]["aliases"],
         serde_json::json!(["d"])
+    );
+    assert_eq!(
+        contract["commands"]["tracking"]["sideEffects"]["sourcesTest"],
+        serde_json::json!(["runBoundedRedactedLocalChecks"])
+    );
+    assert_eq!(
+        contract["commands"]["tracking"]["networkAccess"]["sources"],
+        serde_json::json!({"local": "read", "jira": "none", "tempo": "none"})
     );
     let log_arguments = contract["commands"]["log"]["arguments"]
         .as_array()

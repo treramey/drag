@@ -105,7 +105,16 @@ pub(crate) fn contract() -> Contract {
             command("pause", false, vec!["disable scheduled tracking while preserving history"], vec![]),
             command("resume", false, vec!["validate configuration and enable scheduled tracking"], vec![]),
             command("uninstall", false, vec!["remove only tracking-owned scheduler and hook files"], vec![]),
-            command("sources", false, vec!["persist explicitly selected local evidence sources"], vec!["list", "configure", "test"]),
+            command(
+                "sources",
+                false,
+                vec![
+                    "inspect supported and configured local evidence sources",
+                    "persist validated explicitly selected source settings",
+                    "run bounded redacted collector checks without persisting evidence or worklogs",
+                ],
+                vec!["list", "configure", "test"],
+            ),
             command("schedule", false, vec!["persist and install an explicitly configured weekday schedule"], vec!["show", "update", "pause", "resume"]),
             command("internal", false, vec![], vec!["diagnostics", "recovery", "replay"]),
             command("collect", false, vec!["capture fake observations"], vec![]),
