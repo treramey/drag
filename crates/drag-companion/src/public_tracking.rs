@@ -206,8 +206,8 @@ pub(crate) fn run_tracking(
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
     let date = select_public_date(args.when.as_deref(), &config.schedule.timezone)?;
-    let result = run_tracking_for_date(data_dir, drag_bin, date)?;
-    let status = result["status"].as_str().unwrap_or("unknown");
+    let result = run_tracking_for_date(data_dir, drag_bin, &config, date)?;
+    let status = result["status"].as_str().unwrap_or("failed");
     print_public(
         output,
         &result,
@@ -221,154 +221,161 @@ pub(crate) fn run_tracking(
 pub(crate) fn run_tracking_for_date(
     data_dir: &Path,
     drag_bin: &Path,
+    config: &TrackingConfig,
     date: NaiveDate,
 ) -> Result<Value, CompanionError> {
-    let config = require_config(data_dir)?;
-    let collect = CollectArgs {
-        repos: config
-            .sources
-            .iter()
-            .filter(|source| source.enabled && source.kind == TrackingSourceKind::Git)
-            .map(|source| source.path.clone())
-            .collect(),
-        date: Some(date),
-        ics_files: config
-            .sources
-            .iter()
-            .filter(|source| source.enabled && source.kind == TrackingSourceKind::Calendar)
-            .map(|source| source.path.clone())
-            .collect(),
-    };
-    let collected = collect_activity(data_dir, &collect)?;
-    if !collected.failures.is_empty() || !collected.calendar.failures.is_empty() {
-        let failures = collected
-            .failures
-            .iter()
-            .chain(collected.calendar.failures.iter())
-            .map(|failure| {
-                serde_json::json!({
-                    "source": minimized_reference(&failure.repository),
-                    "error": redact(&failure.error)
+    let mut progress = TrackingRunProgress::new(data_dir, config, date);
+    let outcome = (|| -> Result<(), CompanionError> {
+        let collect = CollectArgs {
+            repos: config
+                .sources
+                .iter()
+                .filter(|source| source.enabled && source.kind == TrackingSourceKind::Git)
+                .map(|source| source.path.clone())
+                .collect(),
+            date: Some(date),
+            ics_files: config
+                .sources
+                .iter()
+                .filter(|source| source.enabled && source.kind == TrackingSourceKind::Calendar)
+                .map(|source| source.path.clone())
+                .collect(),
+        };
+        let collected = collect_activity(data_dir, &collect)?;
+        progress.observations = collected.git.commits.len() + collected.calendar.events.len();
+        let collection_failures = collected.failures.len() + collected.calendar.failures.len();
+        if collection_failures > 0 {
+            progress.collection_failures = collected
+                .failures
+                .iter()
+                .chain(collected.calendar.failures.iter())
+                .map(|failure| {
+                    serde_json::json!({
+                        "source": minimized_reference(&failure.repository),
+                        "error": redact(&failure.error)
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        return Ok(serde_json::json!({
-            "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
-            "selectedDate": date,
-            "status": "source-failed",
-            "sourceHealth": source_statuses(&config),
-            "collectionFailures": failures,
-            "observations": collected.git.commits.len() + collected.calendar.events.len(),
-            "proposals": 0,
-            "accepted": 0,
-            "rejected": 0,
-            "submitted": 0,
-            "skipped": 0,
-            "networkAccess": false,
-            "liveMutationAllowed": false,
-            "warnings": ["one or more enabled evidence sources failed; audit and submission were skipped"],
-            "nextSafeAction": "repair or disable the failed source, then rerun tracking",
-            "phases": []
-        }));
-    }
-    let imported = if journal_path(data_dir).exists() {
-        import_journal(data_dir)?
-    } else {
-        let mut conn = Connection::open(store_path(data_dir))?;
-        migrate(&mut conn)?;
-        0
-    };
-    let bundle = build_bundle(data_dir, date)?;
-    let proposal = if let Some(fixture) = &config.provider_fixture {
-        Some(propose_from_fixture(data_dir, date, fixture)?)
-    } else {
-        None
-    };
-    if !bundle.evidence.is_empty()
-        && proposal.is_none()
-        && proposal_counts(data_dir, date)?.proposals == 0
-    {
-        return Ok(serde_json::json!({
-            "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
-            "selectedDate": date,
-            "status": "proposal-provider-required",
-            "sourceHealth": source_statuses(&config),
-            "observations": collected.git.commits.len() + collected.calendar.events.len(),
-            "importedEvidence": imported,
-            "evidenceBundle": {
-                "items": bundle.evidence.len(),
-                "contradictions": bundle.contradictions.len()
-            },
-            "proposals": 0,
-            "accepted": 0,
-            "rejected": 0,
-            "submitted": 0,
-            "skipped": 0,
-            "networkAccess": false,
-            "liveMutationAllowed": false,
-            "warnings": ["evidence was collected but no proposal provider is configured"],
-            "nextSafeAction": "configure an offline provider fixture with tracking setup --provider-fixture FILE",
-            "phases": []
-        }));
-    }
-    let before_audit = proposal_counts(data_dir, date)?;
-    let approved_review =
-        config.submission.mode == SubmissionMode::Review && approval_matches(data_dir, date)?;
-    let audit = if before_audit.proposals > 0 {
-        Some(audit_drag_day(
+                .collect();
+            progress.warnings.push(format!(
+                "{collection_failures} configured source collection(s) failed; inspect tracking sources test"
+            ));
+            return Ok(());
+        }
+        progress.imported_evidence = if journal_path(data_dir).exists() {
+            import_journal(data_dir)?
+        } else {
+            let mut conn = Connection::open(store_path(data_dir))?;
+            migrate(&mut conn)?;
+            0
+        };
+        let bundle = build_bundle(data_dir, date)?;
+        progress.bundle_items = bundle.evidence.len();
+        progress.bundle_contradictions = bundle.contradictions.len();
+        if proposal_counts(data_dir, date)?.proposals == 0 {
+            if let Some(fixture) = &config.provider_fixture {
+                propose_from_fixture(data_dir, date, fixture)?;
+            } else if !bundle.evidence.is_empty() {
+                progress.warnings.push(
+                    "proposal provider is not configured; configure an offline provider fixture with tracking setup --provider-fixture FILE".to_owned(),
+                );
+            }
+        }
+        let before_audit = proposal_counts(data_dir, date)?;
+        let approved_review =
+            config.submission.mode == SubmissionMode::Review && approval_matches(data_dir, date)?;
+        if before_audit.proposals > 0 {
+            progress.network_access = true;
+            let audit = audit_drag_day(
+                data_dir,
+                drag_bin,
+                date,
+                config.submission.mode == SubmissionMode::Automatic || approved_review,
+            )?;
+            progress.existing_worklogs = audit.existing_worklogs.len();
+        } else if config.submission.mode != SubmissionMode::Automatic {
+            progress.network_access = true;
+            let read = read_drag_day(drag_bin, date)?;
+            progress.existing_worklogs = read.worklogs.len();
+        }
+        progress.counts = proposal_counts(data_dir, date)?;
+
+        let execution_authorized = match config.submission.mode {
+            SubmissionMode::Automatic => config.submission.automatic_submission_authorized,
+            SubmissionMode::Review => approved_review,
+            SubmissionMode::Draft => false,
+        };
+        let run = coordinated_run_with_submission(
             data_dir,
             drag_bin,
             date,
-            config.submission.mode == SubmissionMode::Automatic || approved_review,
-        )?)
-    } else {
-        None
-    };
-    let run = coordinated_run(data_dir, drag_bin, date, true)?;
-    let execution = if config.submission.mode == SubmissionMode::Automatic
-        && config.submission.automatic_submission_authorized
-        || approved_review
-    {
-        Some(execute_drag_worklogs(data_dir, drag_bin, date, true)?)
-    } else {
-        None
-    };
-    let counts = proposal_counts(data_dir, date)?;
-    let status = execution
-        .as_ref()
-        .map(|value| value.status)
-        .filter(|status| *status != "executed")
-        .unwrap_or(run.status);
-    let warnings = match status {
-        "gated" => vec!["submission was blocked by runtime safety gates"],
-        "uncertain" => vec!["submission outcome is uncertain; reconcile before retrying"],
-        _ => Vec::new(),
-    };
-    let result = serde_json::json!({
-        "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
-        "selectedDate": date,
-        "status": status,
-        "resumed": run.resumed,
-        "sourceHealth": source_statuses(&config),
-        "observations": collected.git.commits.len() + collected.calendar.events.len(),
-        "importedEvidence": imported,
-        "evidenceBundle": {
-            "items": bundle.evidence.len(),
-            "contradictions": bundle.contradictions.len()
-        },
-        "proposals": counts.proposals,
-        "accepted": counts.accepted,
-        "rejected": counts.rejected,
-        "submitted": execution.as_ref().map_or(0, |value| value.submitted),
-        "skipped": execution.as_ref().map_or(0, |value| value.skipped),
-        "networkAccess": audit.is_some()
-            || execution.as_ref().is_some_and(|value| value.network_access),
-        "liveMutationAllowed": execution.as_ref().is_some_and(|value| value.live_mutation_allowed),
-        "warnings": warnings,
-        "nextSafeAction": next_safe_action(status),
-        "phases": run.phases
-    });
-    Ok(result)
+            progress.resumed,
+            execution_authorized,
+        )?;
+        progress.phases = serde_json::to_value(run.phases).map_err(CompanionError::Serialize)?;
+        if run.status != "completed" {
+            progress.terminal_status = Some(run.status);
+        }
+
+        if execution_authorized {
+            progress.mutation_attempted = true;
+            let execution = execute_drag_worklogs(data_dir, drag_bin, date, true)?;
+            if execution.status != "executed" {
+                progress.terminal_status = Some(execution.status);
+                progress.warnings.push(match execution.status {
+                    "gated" => "submission was blocked by runtime safety gates".to_owned(),
+                    "uncertain" => {
+                        "submission outcome is uncertain; reconcile before retrying".to_owned()
+                    }
+                    status => format!("submission ended with status {status}"),
+                });
+            }
+            progress.submitted = execution.submitted;
+            progress.skipped = execution.skipped;
+            progress.network_access |= execution.network_access;
+            progress.live_mutation_allowed = execution.live_mutation_allowed;
+        }
+        progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
+        Ok(())
+    })();
+
+    match outcome {
+        Ok(()) => {
+            let status = if let Some(status) = progress.terminal_status {
+                status
+            } else if !progress.collection_failures.is_empty() {
+                "source-failed"
+            } else if progress.warnings.is_empty() {
+                "completed"
+            } else {
+                "partial"
+            };
+            let result = progress.result(status, None);
+            persist_tracking_run(data_dir, date, &result)?;
+            Ok(result)
+        }
+        Err(error) => {
+            progress.counts = proposal_counts(data_dir, date).unwrap_or_default();
+            if let Ok((submitted, skipped, mutation_attempted)) =
+                persisted_execution_progress(data_dir, date)
+            {
+                progress.submitted = submitted;
+                progress.skipped = skipped;
+                progress.mutation_attempted |= mutation_attempted;
+                progress.live_mutation_allowed |= mutation_attempted;
+                progress.network_access |= mutation_attempted;
+            }
+            let failure = serde_json::json!({
+                "kind": tracking_failure_kind(&error),
+                "message": error.to_string()
+            });
+            let result = progress.result("failed", Some(failure));
+            persist_tracking_run(data_dir, date, &result)?;
+            Err(CompanionError::TrackingRun {
+                message: error.to_string(),
+                details: Box::new(result),
+            })
+        }
+    }
 }
 
 pub(crate) fn review_tracking(
@@ -827,10 +834,127 @@ fn print_public(
     }
 }
 
+#[derive(Default)]
 struct ProposalCounts {
     proposals: u64,
     accepted: u64,
     rejected: u64,
+}
+
+struct TrackingRunProgress {
+    date: NaiveDate,
+    resumed: bool,
+    source_health: Vec<Value>,
+    collection_failures: Vec<Value>,
+    terminal_status: Option<&'static str>,
+    observations: usize,
+    imported_evidence: usize,
+    bundle_items: usize,
+    bundle_contradictions: usize,
+    existing_worklogs: usize,
+    counts: ProposalCounts,
+    submitted: usize,
+    skipped: usize,
+    network_access: bool,
+    mutation_attempted: bool,
+    live_mutation_allowed: bool,
+    warnings: Vec<String>,
+    phases: Value,
+    retention: Option<Value>,
+}
+
+impl TrackingRunProgress {
+    fn new(data_dir: &Path, config: &TrackingConfig, date: NaiveDate) -> Self {
+        Self {
+            date,
+            resumed: run_path(data_dir, date).exists(),
+            source_health: source_statuses(config),
+            collection_failures: Vec::new(),
+            terminal_status: None,
+            observations: 0,
+            imported_evidence: 0,
+            bundle_items: 0,
+            bundle_contradictions: 0,
+            existing_worklogs: 0,
+            counts: ProposalCounts::default(),
+            submitted: 0,
+            skipped: 0,
+            network_access: false,
+            mutation_attempted: false,
+            live_mutation_allowed: false,
+            warnings: Vec::new(),
+            phases: Value::Array(Vec::new()),
+            retention: None,
+        }
+    }
+
+    fn result(&self, status: &str, failure: Option<Value>) -> Value {
+        serde_json::json!({
+            "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
+            "selectedDate": self.date,
+            "status": status,
+            "resumed": self.resumed,
+            "resumable": true,
+            "sourceHealth": self.source_health,
+            "collectionFailures": self.collection_failures,
+            "observations": self.observations,
+            "importedEvidence": self.imported_evidence,
+            "evidenceBundle": {
+                "items": self.bundle_items,
+                "contradictions": self.bundle_contradictions
+            },
+            "existingWorklogs": self.existing_worklogs,
+            "proposals": self.counts.proposals,
+            "accepted": self.counts.accepted,
+            "rejected": self.counts.rejected,
+            "submitted": self.submitted,
+            "skipped": self.skipped,
+            "networkAccess": self.network_access,
+            "liveMutationAllowed": self.live_mutation_allowed,
+            "effects": {
+                "networkAccess": self.network_access,
+                "mutationAttempted": self.mutation_attempted,
+                "liveMutationAllowed": self.live_mutation_allowed,
+                "retentionEnforced": self.retention.is_some(),
+                "reportPersisted": true
+            },
+            "warnings": self.warnings,
+            "failure": failure,
+            "nextSafeAction": next_safe_action(status),
+            "phases": self.phases,
+            "retention": self.retention
+        })
+    }
+}
+
+fn persist_tracking_run(
+    data_dir: &Path,
+    date: NaiveDate,
+    result: &Value,
+) -> Result<(), CompanionError> {
+    let path = run_path(data_dir, date);
+    let parent = path.parent().unwrap_or(data_dir);
+    fs::create_dir_all(parent).map_err(|source| CompanionError::CreateDir {
+        path: parent.to_path_buf(),
+        source,
+    })?;
+    let body = serde_json::to_vec_pretty(result).map_err(CompanionError::Serialize)?;
+    atomic_write(&path, &body)
+}
+
+fn tracking_failure_kind(error: &CompanionError) -> &'static str {
+    match error {
+        CompanionError::DragReconcile { kind, .. } => match kind {
+            ReconcileErrorKind::IncompleteRead => "incompleteRead",
+            ReconcileErrorKind::SchemaIncompatibility => "schemaIncompatibility",
+            ReconcileErrorKind::DefiniteFailure => "definiteFailure",
+            ReconcileErrorKind::TransportAmbiguity => "transportAmbiguity",
+        },
+        CompanionError::RunOwned { .. } => "runOwned",
+        CompanionError::InvalidJournal { .. } => "invalidEvidence",
+        CompanionError::Proposal(_) => "invalidWorkflowState",
+        _ => "localFailure",
+    }
 }
 
 fn proposal_counts(data_dir: &Path, date: NaiveDate) -> Result<ProposalCounts, CompanionError> {

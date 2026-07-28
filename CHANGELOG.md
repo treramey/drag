@@ -15,8 +15,9 @@ This project follows [Semantic Versioning](https://semver.org/) and
 - First-class `drag tracking` setup, status, run, review, source, schedule,
   pause, resume, and safe uninstall workflows delegated to the separately
   packaged `drag-tracking` process, with explicit effect authorization,
-  digest-bound review approval, state migration, versioned compatibility
-  checks, host scheduler activation, recoverable setup effects, and a one-release
+  resumable consolidated draft runs, digest-bound review approval, state
+  migration, versioned compatibility checks, host scheduler activation,
+  recoverable setup effects, and a one-release
   `drag-companion` compatibility shim.
 - Portable Agent Skill recipes for coding-session logging, read-only daily and
   weekly audits, and explicitly authorized create-first worklog correction.

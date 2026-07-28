@@ -64,10 +64,11 @@ pub(crate) fn enforce_retention(
     let raw_cutoff = (now - Duration::days(i64::from(config.raw_days))).date_naive();
     let normalized_cutoff = (now - Duration::days(i64::from(config.normalized_days))).date_naive();
     let report_cutoff = (now - Duration::days(i64::from(config.report_ledger_days))).date_naive();
-    let journal = compact_journal(data_dir, raw_cutoff)?;
     let mut conn = Connection::open(store_path(data_dir))?;
     migrate(&mut conn)?;
     migrate_run_coordination(&conn)?;
+    let protected_dates = protected_retention_dates(&conn)?;
+    let journal = compact_journal(data_dir, raw_cutoff, &protected_dates)?;
     let store = compact_store(&mut conn, raw_cutoff, normalized_cutoff, report_cutoff)?;
     let runs = compact_run_files(data_dir, report_cutoff)?;
     Ok(serde_json::json!({
@@ -80,7 +81,7 @@ pub(crate) fn enforce_retention(
             "reportsAndLedgerDays": config.report_ledger_days
         },
         "classes": {
-            "raw": {"expired": journal.expired + store.raw_redacted, "journalRemoved": journal.expired, "storeRedacted": store.raw_redacted, "protected": journal.protected},
+            "raw": {"expired": journal.expired + store.raw_redacted, "journalRemoved": journal.expired, "storeRedacted": store.raw_redacted, "protected": journal.protected + store.raw_protected},
             "normalized": {"expired": store.normalized_deleted, "protected": store.normalized_protected},
             "reportsAndLedger": {"expired": store.report_ledger_deleted + runs.deleted, "protected": store.report_ledger_protected, "runFilesDeleted": runs.deleted}
         },
@@ -102,6 +103,7 @@ pub(crate) struct JournalCompaction {
 pub(crate) fn compact_journal(
     data_dir: &Path,
     raw_cutoff: NaiveDate,
+    protected_dates: &std::collections::BTreeSet<NaiveDate>,
 ) -> Result<JournalCompaction, CompanionError> {
     let _journal_lock = acquire_journal_lock(data_dir)?;
     let recovered_temp_files = cleanup_stale_journal_temps(data_dir)?;
@@ -121,7 +123,7 @@ pub(crate) fn compact_journal(
     let mut retained_lines = Vec::new();
     let mut retained = 0;
     let mut expired = 0;
-    let protected = 0;
+    let mut protected = 0;
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|source| CompanionError::Read {
             path: path.clone(),
@@ -133,12 +135,17 @@ pub(crate) fn compact_journal(
         let event_date = serde_json::from_str::<JournalEvent>(&line)
             .ok()
             .map(|event| event.timestamp_semantics.explicit_date);
-        if event_date.is_some_and(|date| date < raw_cutoff) {
-            expired += 1;
-        } else {
-            retained += 1;
-            retained_lines.push(line);
+        if let Some(date) = event_date {
+            if date < raw_cutoff && !protected_dates.contains(&date) {
+                expired += 1;
+                continue;
+            }
+            if date < raw_cutoff {
+                protected += 1;
+            }
         }
+        retained += 1;
+        retained_lines.push(line);
     }
     if expired > 0 {
         let mut body = retained_lines.join("\n").into_bytes();
@@ -185,6 +192,7 @@ pub(crate) fn cleanup_stale_journal_temps(data_dir: &Path) -> Result<u64, Compan
 
 pub(crate) struct StoreCompaction {
     pub(crate) raw_redacted: u64,
+    pub(crate) raw_protected: u64,
     pub(crate) normalized_deleted: u64,
     pub(crate) normalized_protected: u64,
     pub(crate) report_ledger_deleted: u64,
@@ -199,10 +207,18 @@ pub(crate) fn compact_store(
 ) -> Result<StoreCompaction, CompanionError> {
     let protected_dates = protected_retention_dates(conn)?;
     let tx = conn.transaction()?;
-    let raw_redacted = tx.execute(
-        "UPDATE evidence_events SET payload_json = ?1, privacy_redacted = 1 WHERE explicit_date < ?2 AND privacy_redacted = 0",
-        params![serde_json::json!({"retention":"redacted","class":"rawEvidence"}).to_string(), raw_cutoff.to_string()],
-    )? as u64;
+    let mut raw_redacted = 0;
+    let mut raw_protected = 0;
+    for date in dates_before(&tx, "evidence_events", "explicit_date", raw_cutoff)? {
+        if protected_dates.contains(&date) {
+            raw_protected += count_date_rows(&tx, "evidence_events", "explicit_date", date)?;
+            continue;
+        }
+        raw_redacted += tx.execute(
+            "UPDATE evidence_events SET payload_json = ?1, privacy_redacted = 1 WHERE explicit_date = ?2 AND privacy_redacted = 0",
+            params![serde_json::json!({"retention":"redacted","class":"rawEvidence"}).to_string(), date.to_string()],
+        )? as u64;
+    }
 
     let mut normalized_deleted = 0;
     let mut normalized_protected = 0;
@@ -265,6 +281,7 @@ pub(crate) fn compact_store(
     tx.commit()?;
     Ok(StoreCompaction {
         raw_redacted,
+        raw_protected,
         normalized_deleted,
         normalized_protected,
         report_ledger_deleted,
@@ -279,7 +296,7 @@ pub(crate) fn protected_retention_dates(
     collect_protected_dates(
         conn,
         &mut dates,
-        "SELECT explicit_date FROM daily_bundles WHERE state IN ('proposed','approved','submitting','uncertain')",
+        "SELECT b.explicit_date FROM daily_bundles b WHERE b.state IN ('approved','submitting','uncertain') OR (b.state = 'proposed' AND NOT EXISTS (SELECT 1 FROM proposals p WHERE p.bundle_id = b.id))",
     )?;
     collect_protected_dates(
         conn,
@@ -642,6 +659,8 @@ pub(crate) fn terminal_report_status(data_dir: &Path, date: NaiveDate) -> Option
         Some("blocked") => Some("blocked"),
         Some("failed") => Some("failed"),
         Some("uncertain") => Some("uncertain"),
+        Some("source-failed") => Some("source-failed"),
+        Some("gated") => Some("gated"),
         _ => Some("unknown"),
     }
 }

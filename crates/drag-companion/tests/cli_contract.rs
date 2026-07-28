@@ -780,6 +780,15 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
     let directory = tempdir()?;
     let data_dir = directory.path().join("state");
     let scheduler_dir = directory.path().join("systemd");
+    let drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-07-24",
+            "total": 0,
+            "worklogs": []
+        })],
+    )?;
     json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -828,15 +837,175 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
     let run = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
             .args(["run", "2026-07-24"]),
     )?;
     assert_eq!(run["selectedDate"], "2026-07-24");
     assert_eq!(run["status"], "completed");
-    assert_eq!(run["networkAccess"], false);
+    assert_eq!(run["resumed"], false);
+    assert_eq!(run["networkAccess"], true);
     assert_eq!(run["liveMutationAllowed"], false);
     assert!(run["sourceHealth"].is_array());
     assert!(run["evidenceBundle"].is_object());
+    assert_eq!(run["retention"]["status"], "retention-enforced");
+    assert_eq!(run["effects"]["reportPersisted"], true);
     assert!(run["phases"].is_array());
+
+    let rerun = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-07-24"]),
+    )?;
+    assert_eq!(rerun["status"], "completed");
+    assert_eq!(rerun["resumed"], true);
+    assert!(rerun["phases"]
+        .as_array()
+        .ok_or("run phases")?
+        .iter()
+        .all(|phase| phase["attempt"] == 1));
+    Ok(())
+}
+
+#[test]
+fn public_run_persists_an_actionable_failure_and_resumes_after_an_incomplete_drag_read(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("setup"),
+    )?;
+    let incomplete_drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-03-08",
+            "partial": true,
+            "worklogs": []
+        })],
+    )?;
+
+    let failed = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--drag-bin", incomplete_drag.to_string_lossy().as_ref()])
+        .args(["--output", "json", "run", "2026-03-08"])
+        .output()?;
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(failed.stdout.is_empty());
+    let failure: Value = serde_json::from_slice(&failed.stderr)?;
+    assert_eq!(failure["error"]["code"], "tracking_run_failed");
+    assert_eq!(failure["error"]["details"]["selectedDate"], "2026-03-08");
+    assert_eq!(failure["error"]["details"]["status"], "failed");
+    assert_eq!(failure["error"]["details"]["resumable"], true);
+    assert_eq!(
+        failure["error"]["details"]["failure"]["kind"],
+        "incompleteRead"
+    );
+    assert!(failure["error"]["details"]["nextSafeAction"].is_string());
+    let persisted: Value =
+        serde_json::from_slice(&std::fs::read(data_dir.join("runs/2026-03-08.json"))?)?;
+    assert_eq!(persisted["status"], "failed");
+
+    let complete_drag = bash_executable(
+        &directory,
+        "complete-drag",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"2026-03-08\",\"total\":0,\"worklogs\":[]}}'\n",
+    )?;
+    let resumed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", complete_drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"]),
+    )?;
+    assert_eq!(resumed["status"], "completed");
+    assert_eq!(resumed["resumed"], true);
+    Ok(())
+}
+
+#[test]
+fn public_run_accepts_drag_relative_date_selectors() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("setup"),
+    )?;
+    let drag = bash_executable(
+        &directory,
+        "relative-date-drag",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\ndate=\"${@: -1}\"\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"%s\",\"total\":0,\"worklogs\":[]}}' \"$date\"\n",
+    )?;
+
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "today-2"]),
+    )?;
+    let selected = run["selectedDate"].as_str().ok_or("selected date")?;
+    chrono::NaiveDate::parse_from_str(selected, "%Y-%m-%d")?;
+    assert_ne!(selected, "today-2");
+    Ok(())
+}
+
+#[test]
+fn draft_public_run_applies_policy_and_retention_without_mutation_under_live_rollout(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let fixture = write_provider_fixture(&directory, "valid.json", valid_provider_response())?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--mode",
+                "draft",
+                "--provider-fixture",
+                fixture.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    seed_general_autonomy_rollout(data_dir.to_str().ok_or("data dir")?)?;
+    let drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-03-08",
+            "total": 0,
+            "worklogs": []
+        })],
+    )?;
+
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env(
+                "DRAG_TRACKING_TEMPO_WORK_ATTRIBUTES",
+                r#"{"_Account_":"RD"}"#,
+            )
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+    assert_eq!(run["proposals"], 1);
+    assert_eq!(run["accepted"], 0);
+    assert_eq!(run["rejected"], 1);
+    assert_eq!(run["submitted"], 0);
+    assert_eq!(run["effects"]["mutationAttempted"], false);
+    assert_eq!(run["liveMutationAllowed"], false);
+    assert_eq!(run["retention"]["trigger"], "lifecycle");
+    assert!(run["phases"]
+        .as_array()
+        .ok_or("draft phases")?
+        .iter()
+        .all(|phase| phase["phase"] != "submitting"));
+    let commands = std::fs::read_to_string(directory.path().join("commands.log"))?;
+    assert!(commands.contains(" list 2026-03-08"));
+    assert!(!commands.contains(" log "));
     Ok(())
 }
 
@@ -932,6 +1101,64 @@ fn public_run_gates_audit_when_an_enabled_source_fails() -> Result<(), Box<dyn s
         .is_some_and(|items| items.len() == 1));
     assert_eq!(run["networkAccess"], false);
     assert_eq!(run["submitted"], 0);
+    Ok(())
+}
+
+#[test]
+fn retention_preserves_raw_evidence_for_pending_proposals() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&directory, "valid.json", valid_provider_response())?;
+    json_output(companion()?.args([
+        "--data-dir",
+        data_dir.to_string_lossy().as_ref(),
+        "propose",
+        "--date",
+        "2026-03-08",
+        "--fixture",
+        fixture.to_string_lossy().as_ref(),
+    ]))?;
+    let journal_event = serde_json::json!({
+        "schemaVersion": 1,
+        "eventId": "evidence.git.abc123",
+        "eventType": "evidence.captured",
+        "observedAt": "2026-03-08T09:00:00-04:00",
+        "source": {"kind": "fixture", "adapter": "fixture", "reference": "repo#abc123"},
+        "collector": {"name": "fixture", "version": "test"},
+        "timestampSemantics": {"observedAtSource": "fixture", "timezone": "America/New_York", "explicitDate": "2026-03-08"},
+        "privacy": {"classification": "local-fixture", "redacted": false},
+        "retention": {"policy": "age-based", "retainUntil": null},
+        "supersedes": null,
+        "payload": {"summary": "Implemented proposal adapter"},
+        "integrityHash": "sha256:test"
+    });
+    std::fs::write(data_dir.join("journal.jsonl"), format!("{journal_event}\n"))?;
+
+    let result = json_output(
+        companion()?
+            .args([
+                "--data-dir",
+                data_dir.to_string_lossy().as_ref(),
+                "retention",
+                "enforce",
+            ])
+            .env("DRAG_COMPANION_RETENTION_NOW", "2027-03-08T00:00:00Z")
+            .env("DRAG_TRACKING_RETENTION_RAW_DAYS", "1"),
+    )?;
+    assert!(result["classes"]["raw"]["protected"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(result["classes"]["raw"]["expired"], 0);
+    let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
+    assert!(journal.contains("evidence.git.abc123"));
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let payload: String = conn.query_row(
+        "SELECT payload_json FROM evidence_events WHERE event_id = 'evidence.git.abc123'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(payload.contains("implement proposal adapter"));
+    assert!(!payload.contains("\"retention\":\"redacted\""));
     Ok(())
 }
 
@@ -1444,7 +1671,8 @@ fn retention_enforce_expires_overrides_protects_recovery_and_preserves_privacy(
     assert!(!output_text.contains("SECRET"));
     let json: Value = serde_json::from_slice(&output)?;
     assert_eq!(json["retention"]["rawEvidenceDays"], 1);
-    assert_eq!(json["classes"]["raw"]["storeRedacted"], 3);
+    assert_eq!(json["classes"]["raw"]["storeRedacted"], 2);
+    assert_eq!(json["classes"]["raw"]["protected"], 1);
     assert_eq!(json["classes"]["normalized"]["protected"], 2);
     assert_eq!(json["classes"]["reportsAndLedger"]["protected"], 1);
     assert_eq!(json["journal"]["crashSafe"], "atomic-tempfile-rename");
@@ -1752,6 +1980,64 @@ fn scheduler_install_is_rejected_without_writing_unusable_resources_on_windows(
         ));
     assert!(!target.exists());
     assert!(!data.join("scheduler.json").exists());
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn configured_scheduler_runs_the_complete_workflow_with_only_an_explicit_iso_date(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("systemd");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--mode",
+                "draft",
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    let scheduler_state_path = data_dir.join("scheduler.json");
+    let mut scheduler_state: Value =
+        serde_json::from_slice(&std::fs::read(&scheduler_state_path)?)?;
+    scheduler_state["enabled"] = Value::Bool(true);
+    std::fs::write(
+        &scheduler_state_path,
+        serde_json::to_vec_pretty(&scheduler_state)?,
+    )?;
+    let drag = bash_executable(
+        &directory,
+        "scheduler-drag",
+        "#!/usr/bin/env bash\nset -euo pipefail\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\ndate=\"${@: -1}\"\nprintf '{\"ok\":true,\"data\":{\"schemaVersion\":1,\"selectedDate\":\"%s\",\"total\":0,\"worklogs\":[]}}' \"$date\"\n",
+    )?;
+
+    let scheduled = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["internal", "scheduler", "run", "--date", "2026-07-24"]),
+    )?;
+    assert_eq!(scheduled["status"], "ran");
+    assert_eq!(scheduled["result"]["selectedDate"], "2026-07-24");
+    assert_eq!(scheduled["result"]["status"], "completed");
+    assert_eq!(scheduled["result"]["networkAccess"], true);
+    assert_eq!(
+        scheduled["result"]["retention"]["status"],
+        "retention-enforced"
+    );
+    assert_eq!(scheduled["mutationAllowed"], false);
+
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["internal", "scheduler", "run", "--date", "yesterday"])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("date must use YYYY-MM-DD"));
     Ok(())
 }
 
