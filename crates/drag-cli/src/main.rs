@@ -18,6 +18,7 @@ mod setup;
 mod setup_tui;
 mod tempo_openapi;
 mod terminal;
+mod tracking;
 mod transport;
 mod tui_theme;
 mod update;
@@ -61,6 +62,7 @@ async fn main() -> ExitCode {
             print!("{output}");
             ExitCode::SUCCESS
         }
+        Ok(RunResult::Delegated(exit_code)) => ExitCode::from(exit_code),
         Err(error) => {
             emit_error(&error, mode);
             ExitCode::from(error.exit_code())
@@ -72,6 +74,7 @@ enum RunResult {
     Rendered(Rendered),
     Streamed,
     Plain(String),
+    Delegated(u8),
 }
 
 async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> {
@@ -82,6 +85,9 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
     }
     if let Command::GenerateSkills(args) = &cli.command {
         return generate_skills::run(args).await.map(RunResult::Rendered);
+    }
+    if let Command::Tracking(args) = cli.command {
+        return tracking::run(args, mode).map(RunResult::Delegated);
     }
     let timezone = default_timezone(cli.timezone.as_deref())?;
     let path = cli.config.unwrap_or(config::config_path()?);
@@ -111,6 +117,11 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
         Command::GenerateSkills(_) => {
             return Err(CliError::InvalidInput(
                 "skill generation dispatch failed".to_owned(),
+            ));
+        }
+        Command::Tracking(_) => {
+            return Err(CliError::Invariant(
+                "tracking command was not delegated".to_owned(),
             ));
         }
     };

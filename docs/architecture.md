@@ -137,16 +137,22 @@ filesystem, process, prompt, and HTTP behavior in `drag-cli`. Update
 `drag schema`, tests, README examples, and `CHANGELOG.md` when a public
 contract changes.
 
-## Companion process boundary
+## Tracking process boundary
 
-`drag-companion` is a sibling workspace binary rather than a module inside
-`drag` or `drag-cli`. The companion owns end-of-day capture state and scheduler
-lifecycle descriptions, while Drag remains a separate structured process
-boundary. When the companion needs Drag behavior, it must invoke the public
+`drag-tracking` is a sibling workspace binary rather than a module inside
+`drag` or `drag-cli`. It owns end-of-day capture state and scheduler lifecycle
+descriptions, while Drag remains a separate structured process boundary.
+`drag tracking status` verifies the adjacent or discoverable tracking machine
+contract, then delegates without a shell while inheriting standard streams and
+exit status. When tracking needs Drag behavior, it must invoke the public
 `drag` CLI and consume the stable `drag schema` contract instead of linking into
 `drag-cli` internals. This keeps side effects auditable, preserves Drag's CLI and
-schema as the integration seam, and prevents a model or companion workflow from
+schema as the integration seam, and prevents a model or tracking workflow from
 receiving shell access or direct Tempo mutation authority.
+
+`drag-companion` is a compatibility shim for the transition. It delegates to
+`drag-tracking`, warns only for explicitly human output, and leaves structured
+stdout unchanged.
 
 The v1 companion defaults to capture-only fake adapters. Its machine-readable
 contract reports no network access and no live mutation path. Unsupported
@@ -155,7 +161,7 @@ deferred until separate tickets define their adapters and safety invariants.
 
 ### Scheduler package and recovery
 
-`drag-companion` is packaged as its own binary and advertises an independent
+`drag-tracking` is packaged as its own binary and advertises an independent
 machine contract. Package startup and `scheduler status` report the required
 Drag machine contract version before any scheduler work is attempted.
 

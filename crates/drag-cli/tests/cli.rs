@@ -197,6 +197,120 @@ fn reports_version() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn tracking_status_is_discoverable_from_standard_help() -> Result<(), Box<dyn std::error::Error>> {
+    let root = Command::cargo_bin("drag")?.arg("--help").output()?;
+    assert!(root.status.success());
+    assert!(String::from_utf8(root.stdout)?.contains("tracking"));
+
+    let tracking = Command::cargo_bin("drag")?
+        .args(["tracking", "--help"])
+        .output()?;
+    assert!(tracking.status.success());
+    let stdout = String::from_utf8(tracking.stdout)?;
+    assert!(stdout.contains("status"));
+    assert!(stdout.contains("automatic time tracking"));
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copied_drag_with_tracking(
+    directory: &TempDir,
+    tracking_script: Option<&str>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let source = Command::cargo_bin("drag")?.get_program().to_owned();
+    let drag = directory.path().join("drag");
+    fs::copy(source, &drag)?;
+    let mut permissions = fs::metadata(&drag)?.permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&drag, permissions)?;
+
+    if let Some(script) = tracking_script {
+        let tracking = directory.path().join("drag-tracking");
+        fs::write(&tracking, script)?;
+        let mut permissions = fs::metadata(&tracking)?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(tracking, permissions)?;
+    }
+    Ok(drag)
+}
+
+#[cfg(unix)]
+#[test]
+fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(
+        &directory,
+        Some(
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":1,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
+        ),
+    )?;
+
+    let mut command = std::process::Command::new(drag);
+    command
+        .args(["--output", "json", "tracking", "status"])
+        .env("PATH", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .ok_or("tracking stdin was not piped")?
+        .write_all(b"tracking stdin\n")?;
+    let output = child.wait_with_output()?;
+
+    assert_eq!(output.status.code(), Some(23));
+    assert_eq!(
+        String::from_utf8(output.stdout)?,
+        "arguments:--output json status\ntracking stdin\n"
+    );
+    assert_eq!(String::from_utf8(output.stderr)?, "tracking stderr\n");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn tracking_delegation_reports_missing_and_incompatible_processes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let missing_directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(&missing_directory, None)?;
+    let missing = std::process::Command::new(drag)
+        .args(["--output", "json", "tracking", "status"])
+        .env("PATH", "")
+        .output()?;
+    assert_eq!(missing.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&missing.stderr)?;
+    assert_eq!(error["error"]["code"], "tracking_unavailable");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("missing tracking error message")?
+        .contains("reinstall"));
+
+    let incompatible_directory = TempDir::new()?;
+    let drag = copied_drag_with_tracking(
+        &incompatible_directory,
+        Some("#!/bin/sh\nprintf '{\"schemaVersion\":999,\"binary\":\"drag-tracking\"}'\n"),
+    )?;
+    let incompatible = std::process::Command::new(drag)
+        .args(["--output", "json", "tracking", "status"])
+        .env("PATH", "")
+        .output()?;
+    assert_eq!(incompatible.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&incompatible.stderr)?;
+    assert_eq!(error["error"]["code"], "tracking_incompatible");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("incompatible tracking error message")?
+        .contains("expected contract version 1"));
+    Ok(())
+}
+
+#[test]
 fn local_skill_generation_is_configuration_free_deterministic_and_safe(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = TempDir::new()?;
@@ -1031,7 +1145,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 10);
+    assert_eq!(contract["schemaVersion"], 11);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");

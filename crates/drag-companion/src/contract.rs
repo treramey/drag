@@ -3,6 +3,7 @@ use crate::*;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Contract {
+    pub(crate) schema_version: u32,
     pub(crate) binary: &'static str,
     pub(crate) default_mode: &'static str,
     pub(crate) config_dir: &'static str,
@@ -62,7 +63,8 @@ pub(crate) struct RunResult {
 
 pub(crate) fn contract() -> Contract {
     Contract {
-        binary: "drag-companion",
+        schema_version: TRACKING_MACHINE_CONTRACT_VERSION,
+        binary: "drag-tracking",
         default_mode: DEFAULT_MODE,
         config_dir: "$DRAG_COMPANION_CONFIG or .drag-companion/config.json",
         data_dir: "$DRAG_COMPANION_DATA or .drag-companion",

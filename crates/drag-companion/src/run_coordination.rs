@@ -14,7 +14,17 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
     };
 
     match cli.command {
-        Command::Status => print_json(&status_payload(&data_dir)?),
+        Command::Status => {
+            let status = status_payload(&data_dir)?;
+            match cli.output {
+                Some(TrackingOutputMode::Human) => print_tracking_status(&status),
+                Some(TrackingOutputMode::Json) => print_json(&serde_json::json!({
+                    "ok": true,
+                    "data": public_tracking_status(&status)
+                })),
+                None => print_json(&status),
+            }
+        }
         Command::Collect(args) => {
             let result = collect_activity(&data_dir, &args)?;
             print_json(&result)

@@ -13,6 +13,10 @@ fn companion() -> Result<Command, Box<dyn std::error::Error>> {
     Ok(Command::cargo_bin("drag-companion")?)
 }
 
+fn tracking() -> Result<Command, Box<dyn std::error::Error>> {
+    Ok(Command::cargo_bin("drag-tracking")?)
+}
+
 fn bash_executable(
     dir: &tempfile::TempDir,
     name: &str,
@@ -87,6 +91,120 @@ fn git_fixtures_clear_inherited_repository_environment() {
     ] {
         assert!(cleared.iter().any(|name| name == required));
     }
+}
+
+#[test]
+fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("state");
+    let output = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "status"])
+        .env("TEMPO_TOKEN", "must-not-be-loaded")
+        .env("ATLASSIAN_TOKEN", "must-not-be-loaded")
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let envelope: Value = serde_json::from_slice(&output)?;
+    assert_eq!(envelope["ok"], true);
+    let status = &envelope["data"];
+    assert_eq!(status["schemaVersion"], 1);
+    assert_eq!(status["configuration"]["configured"], false);
+    assert_eq!(status["activity"]["state"], "idle");
+    assert_eq!(status["scheduler"]["healthy"], true);
+    assert_eq!(status["submission"]["mode"], "draft");
+    assert_eq!(status["submission"]["effectiveMutationPermission"], false);
+    assert!(status["latestRun"].is_null());
+    assert_eq!(status["networkAccess"], false);
+    assert_eq!(status["liveMutationAllowed"], false);
+    assert!(status["pendingAction"].is_string());
+
+    let contract = json_output(tracking()?.arg("contract"))?;
+    assert_eq!(contract["binary"], "drag-tracking");
+    assert_eq!(contract["schemaVersion"], 1);
+
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["reconcile", "--date", "2026-07-24"])
+        .assert()
+        .success();
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "human", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Configuration:"))
+        .stdout(predicate::str::contains("Activity:"))
+        .stdout(predicate::str::contains("Scheduler:"))
+        .stdout(predicate::str::contains("Submission mode: draft"))
+        .stdout(predicate::str::contains(
+            "Effective mutation permission: disabled",
+        ))
+        .stdout(predicate::str::contains("Latest run: 2026-07-24"))
+        .stdout(predicate::str::contains("Pending action:"));
+    Ok(())
+}
+
+#[test]
+fn tracking_json_failures_use_stderr_without_loading_credentials(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    std::fs::create_dir_all(&data_dir)?;
+    std::fs::write(data_dir.join("scheduler.json"), "{not-json")?;
+    let output = tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "status"])
+        .env_remove("TEMPO_TOKEN")
+        .env_remove("TEMPO_ACCOUNT_ID")
+        .env_remove("ATLASSIAN_EMAIL")
+        .env_remove("ATLASSIAN_TOKEN")
+        .env_remove("ATLASSIAN_HOST")
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(error["ok"], false);
+    assert_eq!(error["error"]["code"], "tracking_error");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("tracking error message")?
+        .contains("scheduler state schema"));
+    Ok(())
+}
+
+#[test]
+fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let structured = companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "status"])
+        .assert()
+        .success()
+        .stderr(predicate::str::is_empty())
+        .get_output()
+        .stdout
+        .clone();
+    let structured: Value = serde_json::from_slice(&structured)?;
+    assert_eq!(structured["ok"], true);
+    assert_eq!(structured["data"]["schemaVersion"], 1);
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "human", "status"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Automatic time tracking"))
+        .stderr(predicate::str::contains("drag-companion` is deprecated"))
+        .stderr(predicate::str::contains("use `drag tracking`"));
+
+    companion()?.arg("not-a-command").assert().code(2);
+    Ok(())
 }
 
 #[test]
@@ -732,9 +850,9 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
             .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
             .args(["scheduler", "status"]),
     )?;
-    assert_eq!(status["dragMachineContract"]["requiredVersion"], 10);
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 11);
     assert_eq!(status["dragMachineContract"]["compatible"], true);
-    assert_eq!(status["package"]["name"], "drag-companion");
+    assert_eq!(status["package"]["name"], "drag-tracking");
     assert_eq!(status["package"]["independent"], true);
     Ok(())
 }
@@ -1057,7 +1175,8 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         .clone();
     let contract: Value = serde_json::from_slice(&output)?;
 
-    assert_eq!(contract["binary"], "drag-companion");
+    assert_eq!(contract["binary"], "drag-tracking");
+    assert_eq!(contract["schemaVersion"], 1);
     assert_eq!(contract["defaultMode"], "capture-only");
     assert_eq!(contract["adapters"]["collector"], "fake");
     assert_eq!(contract["adapters"]["mutator"], "disabled");
@@ -2463,7 +2582,7 @@ set -euo pipefail
 log="{}/commands.log"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":10,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":11,"name":"drag"}}}}'
   exit 0
 fi
 	if [[ "$*" == *" log "* ]]; then
@@ -2563,7 +2682,7 @@ log="{0}/commands.log"
 state="{0}/remote.jsonl"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":10,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":11,"name":"drag"}}}}'
   exit 0
 fi
 if [[ "$*" == *" list "* ]]; then
@@ -3576,7 +3695,7 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
     let drag = bash_executable(
         &dir,
         "bad-drag",
-        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":10}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":11}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
     )?;
     companion()?
         .args([

@@ -84,6 +84,10 @@ pub(crate) enum CliError {
     Io(#[from] io::Error),
     #[error("I/O failed: {0}")]
     OpenApiCache(io::Error),
+    #[error("{0}")]
+    TrackingUnavailable(String),
+    #[error("{0}")]
+    TrackingIncompatible(String),
 }
 
 impl CliError {
@@ -100,6 +104,8 @@ impl CliError {
             Self::Url(_) => "invalid_url",
             Self::Json(_) => "invalid_json",
             Self::Io(_) | Self::OpenApiCache(_) => "io_error",
+            Self::TrackingUnavailable(_) => "tracking_unavailable",
+            Self::TrackingIncompatible(_) => "tracking_incompatible",
         }
     }
 
@@ -119,6 +125,7 @@ impl CliError {
             | Self::Http(_)
             | Self::Io(_)
             | Self::OpenApiCache(_) => EXIT_FAILURE,
+            Self::TrackingUnavailable(_) | Self::TrackingIncompatible(_) => EXIT_FAILURE,
         }
     }
 

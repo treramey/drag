@@ -34,6 +34,7 @@ To build from this repository:
 
 ```bash
 cargo install --path crates/drag-cli
+cargo install --path crates/drag-companion
 ```
 
 ## Quick start
@@ -69,10 +70,23 @@ drag delete 123456 --dry-run
 | `drag delete` | `drag d` | Delete one or more worklogs |
 | `drag setup` | | Connect and verify Jira and Tempo |
 | `drag doctor` | | Check configuration and connections |
+| `drag tracking status` | | Check automatic tracking configuration, activity, health, and authorization |
 | `drag tempo` | | Call the Tempo API from generated commands |
 | `drag schema` | | Inspect Drag or Tempo schemas |
 
 Run `drag <command> --help` for every option.
+
+Automatic tracking is a Drag capability backed by a separately packaged,
+versioned `drag-tracking` process. Inspect its local status without loading Jira
+or Tempo credentials:
+
+```bash
+drag tracking status
+drag --output json tracking status
+```
+
+The deprecated `drag-companion` executable remains available as a compatibility
+shim for this release.
 
 When `drag list` opens an interactive terminal report, use Left/Right Arrow or
 `h`/`l` to change days, Up/Down Arrow or `k`/`j` to move between worklogs, and

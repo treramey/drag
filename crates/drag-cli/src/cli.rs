@@ -85,6 +85,8 @@ pub enum Command {
     ///
     /// Add --remote to run opt-in, read-only Jira and Tempo connection checks.
     Doctor(DoctorArgs),
+    /// Manage automatic time tracking.
+    Tracking(TrackingArgs),
     /// Resolve Jira and Tempo metadata needed to build a worklog payload without mutation.
     Resolve(ResolveArgs),
     /// Call Tempo operations generated from the official OpenAPI document.
@@ -93,6 +95,19 @@ pub enum Command {
     Schema(SchemaArgs),
     /// Generate portable AI agent skills from Drag and Tempo metadata.
     GenerateSkills(GenerateSkillsArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(about = "Manage automatic time tracking")]
+pub struct TrackingArgs {
+    #[command(subcommand)]
+    pub command: TrackingCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrackingCommand {
+    /// Show tracking configuration, activity, health, and authorization.
+    Status,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

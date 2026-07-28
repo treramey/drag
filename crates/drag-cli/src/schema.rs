@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 10;
+const SCHEMA_VERSION: u64 = 11;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -140,6 +140,7 @@ enum CommandIdentity {
     Delete,
     Setup,
     Doctor,
+    Tracking,
     Tempo,
     Resolve,
     Schema,
@@ -155,6 +156,7 @@ impl CommandIdentity {
             "delete" => Some(Self::Delete),
             "setup" => Some(Self::Setup),
             "doctor" => Some(Self::Doctor),
+            "tracking" | "tracking status" => Some(Self::Tracking),
             "resolve" => Some(Self::Resolve),
             "tempo" => Some(Self::Tempo),
             "schema" => Some(Self::Schema),
@@ -461,6 +463,7 @@ fn command_skill_policy(identity: CommandIdentity) -> Option<CommandSkillPolicy>
         }),
         CommandIdentity::Setup
         | CommandIdentity::Doctor
+        | CommandIdentity::Tracking
         | CommandIdentity::Tempo
         | CommandIdentity::Schema
         | CommandIdentity::GenerateSkills
@@ -577,6 +580,53 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             error_codes: [remote_errors, vec!["remote_check_failed"]].concat(),
             side_effects: json!({"default": []}),
             network_access: json!({"default": {}, "remote": {"jira": "read", "tempo": "read"}}),
+            dry_run: unsupported_dry_run(),
+        },
+        CommandIdentity::Tracking => CommandSemantics {
+            success: object_schema(
+                &[
+                    "schemaVersion",
+                    "status",
+                    "configuration",
+                    "activity",
+                    "scheduler",
+                    "submission",
+                    "latestRun",
+                    "pendingAction",
+                    "networkAccess",
+                    "liveMutationAllowed",
+                ],
+                json!({
+                    "schemaVersion": {"const": 1},
+                    "status": {"type": "string"},
+                    "configuration": object_schema(
+                        &["configured", "dataDirectory"],
+                        json!({"configured": {"type": "boolean"}, "dataDirectory": {"type": "string"}}),
+                    ),
+                    "activity": object_schema(
+                        &["state", "activeRuns"],
+                        json!({"state": {"type": "string", "enum": ["idle", "running"]}, "activeRuns": {"type": "integer", "minimum": 0}}),
+                    ),
+                    "scheduler": object_schema(
+                        &["installed", "active", "healthy", "killSwitchActive"],
+                        json!({"installed": {"type": "boolean"}, "active": {"type": "boolean"}, "healthy": {"type": "boolean"}, "killSwitchActive": {"type": "boolean"}}),
+                    ),
+                    "submission": object_schema(
+                        &["mode", "automaticSubmissionAuthorized", "effectiveMutationPermission"],
+                        json!({"mode": {"type": "string", "enum": ["draft", "review", "automatic"]}, "automaticSubmissionAuthorized": {"type": "boolean"}, "effectiveMutationPermission": {"type": "boolean"}}),
+                    ),
+                    "latestRun": {"anyOf": [object_schema(
+                        &["selectedDate", "status", "startedAt", "finishedAt"],
+                        json!({"selectedDate": {"type": "string", "format": "date"}, "status": {"type": "string"}, "startedAt": {"type": "string"}, "finishedAt": nullable_schema(json!({"type": "string"}))}),
+                    ), {"type": "null"}]},
+                    "pendingAction": {"type": "string"},
+                    "networkAccess": {"const": false},
+                    "liveMutationAllowed": {"type": "boolean"},
+                }),
+            ),
+            error_codes: vec!["usage", "tracking_unavailable", "tracking_incompatible"],
+            side_effects: json!({"status": ["initializeLocalTrackingStateIfMissing"]}),
+            network_access: json!({"status": {}}),
             dry_run: unsupported_dry_run(),
         },
         CommandIdentity::Resolve => CommandSemantics {
@@ -820,6 +870,13 @@ fn command_behavior_contract(identity: CommandIdentity) -> Value {
         CommandIdentity::Doctor => json!({
             "remote": "opt-in read-only Jira and Tempo checks",
             "remoteStatuses": ["connected", "notConfigured", "failed"]
+        }),
+        CommandIdentity::Tracking => json!({
+            "processBoundary": "drag-tracking executable",
+            "contractVersion": 1,
+            "discovery": ["adjacentExecutable", "PATH"],
+            "delegation": "noShellWithInheritedStandardStreamsAndExitStatus",
+            "status": "localOnlyWithoutDragCredentialLoading"
         }),
         CommandIdentity::Resolve => json!({
             "boundary": "readOnlyJiraTempoResolution",
@@ -1203,6 +1260,7 @@ fn command_failure_details(identity: CommandIdentity) -> Value {
         | CommandIdentity::List
         | CommandIdentity::Delete
         | CommandIdentity::Setup
+        | CommandIdentity::Tracking
         | CommandIdentity::Resolve
         | CommandIdentity::Tempo
         | CommandIdentity::Schema
@@ -1273,7 +1331,9 @@ fn error_contract() -> Value {
             "remote_check_failed": {
                 "exitCodes": [1, 2],
                 "selection": "most severe failed remote check"
-            }
+            },
+            "tracking_unavailable": 1,
+            "tracking_incompatible": 1
         }
     })
 }

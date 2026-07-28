@@ -8,7 +8,10 @@ const { getPlatform } = require("./platform");
 
 const platform = getPlatform();
 const invoked = process.env.DRAG_NPM_BINARY || path.basename(process.argv[1]).replace(/\.cmd$/i, "");
-const selected = invoked === "drag-companion" ? platform.companionBinary : platform.binary;
+const selected = {
+  "drag-tracking": platform.trackingBinary,
+  "drag-companion": platform.companionBinary
+}[invoked] || platform.binary;
 const binary = path.join(__dirname, "bin", selected);
 if (!fs.existsSync(binary)) {
   const install = spawnSync(process.execPath, [path.join(__dirname, "install.js")], { stdio: "inherit" });

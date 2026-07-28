@@ -2,12 +2,16 @@ use crate::*;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "drag-companion",
+    name = "drag-tracking",
     version,
-    about = "Safe capture-only companion for explicit-date Drag reconciliation",
+    about = "Automatic time tracking for Drag",
     propagate_version = true
 )]
 pub(crate) struct Cli {
+    /// Output format for public tracking commands.
+    #[arg(long, global = true, value_enum)]
+    pub(crate) output: Option<TrackingOutputMode>,
+
     /// Directory for companion state. Defaults to .drag-companion in the current directory.
     #[arg(long, global = true, value_name = "DIR")]
     pub(crate) data_dir: Option<PathBuf>,
@@ -18,6 +22,12 @@ pub(crate) struct Cli {
 
     #[command(subcommand)]
     pub(crate) command: Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum TrackingOutputMode {
+    Human,
+    Json,
 }
 
 #[derive(Debug, Subcommand)]
@@ -339,6 +349,12 @@ pub(crate) fn parse_date(raw: &str) -> Result<NaiveDate, String> {
 pub(crate) fn print_json<T: Serialize>(value: &T) -> Result<(), CompanionError> {
     let body = serde_json::to_string_pretty(value).map_err(CompanionError::Serialize)?;
     println!("{body}");
+    Ok(())
+}
+
+pub(crate) fn print_error_json<T: Serialize>(value: &T) -> Result<(), CompanionError> {
+    let body = serde_json::to_string(value).map_err(CompanionError::Serialize)?;
+    eprintln!("{body}");
     Ok(())
 }
 

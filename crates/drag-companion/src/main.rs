@@ -9,7 +9,7 @@ use chrono::{
     Timelike, Utc,
 };
 use chrono_tz::Tz;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,8 @@ const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
 const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
 const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
 const SCHEDULER_SCHEMA_VERSION: u32 = 2;
-const DRAG_MACHINE_CONTRACT_VERSION: u32 = 10;
+const DRAG_MACHINE_CONTRACT_VERSION: u32 = 11;
+const TRACKING_MACHINE_CONTRACT_VERSION: u32 = 1;
 const TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES";
 const DEFAULT_SCHEDULE_TIME: &str = "18:45";
 const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
@@ -71,8 +72,17 @@ pub(crate) use run_coordination::*;
 pub(crate) use scheduler::*;
 
 fn main() {
-    if let Err(error) = run(Cli::parse()) {
-        eprintln!("{error}");
+    let cli = Cli::parse();
+    let output = cli.output;
+    if let Err(error) = run(cli) {
+        if output == Some(TrackingOutputMode::Json) {
+            let _ = print_error_json(&serde_json::json!({
+                "ok": false,
+                "error": {"code": "tracking_error", "message": error.to_string()}
+            }));
+        } else {
+            eprintln!("{error}");
+        }
         std::process::exit(1);
     }
 }

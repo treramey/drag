@@ -29,7 +29,7 @@ pub(crate) fn scheduler_status(data_dir: &Path) -> Result<Value, CompanionError>
         "mode": DEFAULT_MODE,
         "shadowModeForced": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
         "dragMachineContract": { "requiredVersion": DRAG_MACHINE_CONTRACT_VERSION, "compatible": true },
-        "package": { "name": "drag-companion", "independent": true },
+        "package": { "name": "drag-tracking", "independent": true },
         "state": state,
     }))
 }
