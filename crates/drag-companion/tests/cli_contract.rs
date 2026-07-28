@@ -328,7 +328,11 @@ fn interrupted_setup_records_scheduler_ownership_for_safe_cleanup(
         config["schedulerTarget"],
         scheduler.to_string_lossy().as_ref()
     );
-    assert!(scheduler.join("drag-tracking.timer").exists());
+    #[cfg(target_os = "macos")]
+    let scheduler_file = scheduler.join("email.trevors.drag-tracking.plist");
+    #[cfg(not(target_os = "macos"))]
+    let scheduler_file = scheduler.join("drag-tracking.timer");
+    assert!(scheduler_file.exists());
     let removed = json_output(
         tracking()?
             .env("HOME", &home)
@@ -336,7 +340,7 @@ fn interrupted_setup_records_scheduler_ownership_for_safe_cleanup(
             .arg("uninstall"),
     )?;
     assert_eq!(removed["status"], "uninstalled");
-    assert!(!scheduler.join("drag-tracking.timer").exists());
+    assert!(!scheduler_file.exists());
     assert_eq!(std::fs::read_to_string(settings)?, "[]");
     Ok(())
 }
