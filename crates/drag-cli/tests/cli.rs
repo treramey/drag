@@ -259,13 +259,17 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
     let drag = copied_drag_with_tracking(
         &directory,
         Some(
-            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nprintf 'config:%s\\n' \"$DRAG_CONFIG\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
         ),
     )?;
+    let selected_config = directory.path().join("selected-config.json");
 
-    let mut command = std::process::Command::new(drag);
+    let mut command = std::process::Command::new(&drag);
     command
-        .args(["--output", "json", "tracking", "status"])
+        .args(["--output", "json", "--config"])
+        .arg(&selected_config)
+        .args(["tracking", "status"])
+        .env("DRAG_CONFIG", directory.path().join("wrong-config.json"))
         .env("PATH", "")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -282,7 +286,11 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
     assert_eq!(output.status.code(), Some(23));
     assert_eq!(
         String::from_utf8(output.stdout)?,
-        "arguments:--output json status\ntracking stdin\n"
+        format!(
+            "arguments:--output json --drag-bin {} status\nconfig:{}\ntracking stdin\n",
+            drag.display(),
+            selected_config.display()
+        )
     );
     assert_eq!(String::from_utf8(output.stderr)?, "tracking stderr\n");
     Ok(())

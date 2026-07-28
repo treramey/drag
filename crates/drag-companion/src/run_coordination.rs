@@ -1,6 +1,9 @@
 use crate::*;
 
 pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
+    if matches!(&cli.command, Command::Contract) {
+        return print_json(&contract());
+    }
     let drag_bin = cli.drag_bin.clone();
     let data_dir = resolve_data_dir(cli.data_dir.clone())?;
     let output = cli.output;
@@ -117,7 +120,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
                 )
             }
         },
-        Command::Contract => print_json(&contract()),
+        Command::Contract => unreachable!("contract commands return before state resolution"),
     }
 }
 

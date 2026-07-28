@@ -473,7 +473,7 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
     let leases = stmt.query_map([now], |row| Ok(serde_json::json!({"tempoAccount": row.get::<_, String>(0)?, "localDate": row.get::<_, String>(1)?, "ownerId": row.get::<_, String>(2)?, "heartbeatAt": row.get::<_, String>(3)?, "expiresAtMs": row.get::<_, i64>(4)?})))?.collect::<Result<Vec<_>, _>>()?;
     let latest_run = conn
         .query_row(
-            "SELECT local_date, state, started_at, finished_at FROM coordinated_runs ORDER BY local_date DESC, started_at DESC LIMIT 1",
+            "SELECT local_date, state, started_at, finished_at FROM coordinated_runs ORDER BY started_at DESC, local_date DESC LIMIT 1",
             [],
             |row| {
                 Ok(serde_json::json!({
@@ -491,6 +491,17 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
         .get("installedFiles")
         .and_then(Value::as_array)
         .is_some_and(|files| !files.is_empty());
+    let scheduler_healthy = scheduler_state
+        .get("installedFiles")
+        .and_then(Value::as_array)
+        .is_none_or(|files| {
+            files.iter().all(|file| {
+                file.as_str().is_some_and(|path| {
+                    let path = Path::new(path);
+                    path.exists() && is_owned_scheduler_file(path).unwrap_or(false)
+                })
+            })
+        });
     let scheduler_active = scheduler_state
         .get("enabled")
         .and_then(Value::as_bool)
@@ -500,6 +511,8 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
         "run `drag tracking setup` to configure automatic time tracking"
     } else if !scheduler_installed {
         "install the tracking schedule with `drag tracking setup`"
+    } else if !scheduler_healthy {
+        "repair the missing or modified tracking scheduler files"
     } else if !scheduler_active {
         "resume the tracking schedule when automatic tracking should run"
     } else {
@@ -519,7 +532,7 @@ pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
         "scheduler": {
             "installed": scheduler_installed,
             "active": scheduler_active,
-            "healthy": true,
+            "healthy": scheduler_healthy,
             "killSwitchActive": scheduler["killSwitchActive"],
         },
         "submission": {
@@ -657,6 +670,7 @@ pub(crate) fn created_ids(data_dir: &Path, date: NaiveDate) -> Result<Vec<String
 pub(crate) fn next_safe_action(status: &str) -> &'static str {
     match status {
         "completed" => "review the report and keep the ledger for idempotency",
+        "gated" => "inspect the runtime gates before authorizing any submission",
         "partial" => {
             "inspect skips and failures, then run audit or preview before any authorized execute"
         }

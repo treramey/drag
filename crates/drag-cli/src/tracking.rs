@@ -11,13 +11,25 @@ use crate::{CliError, ResolvedOutputMode};
 
 const TRACKING_CONTRACT_VERSION: u64 = 2;
 
-pub(crate) fn run(args: TrackingArgs, mode: ResolvedOutputMode) -> Result<u8, CliError> {
+pub(crate) fn run(
+    args: TrackingArgs,
+    mode: ResolvedOutputMode,
+    config_path: &std::path::Path,
+) -> Result<u8, CliError> {
     let executable = tracking_executable();
     verify_contract(&executable)?;
+    let drag_executable = std::env::current_exe().map_err(|error| {
+        tracking_unavailable(format!(
+            "could not locate the invoking Drag executable: {error}"
+        ))
+    })?;
 
     let mut command = Command::new(&executable);
     command
         .args(["--output", output_name(mode)])
+        .arg("--drag-bin")
+        .arg(drag_executable)
+        .env("DRAG_CONFIG", config_path)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());

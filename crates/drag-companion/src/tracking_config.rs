@@ -102,20 +102,33 @@ pub(crate) fn save_tracking_config(
 pub(crate) fn configured_sources(
     repos: Vec<PathBuf>,
     ics_files: Vec<PathBuf>,
-) -> Vec<TrackingSource> {
+) -> Result<Vec<TrackingSource>, CompanionError> {
     repos
         .into_iter()
-        .map(|path| TrackingSource {
-            kind: "git".to_owned(),
-            path,
-            enabled: true,
+        .map(|path| {
+            Ok(TrackingSource {
+                kind: "git".to_owned(),
+                path: absolute_source_path(path)?,
+                enabled: true,
+            })
         })
-        .chain(ics_files.into_iter().map(|path| TrackingSource {
-            kind: "calendar".to_owned(),
-            path,
-            enabled: true,
+        .chain(ics_files.into_iter().map(|path| {
+            Ok(TrackingSource {
+                kind: "calendar".to_owned(),
+                path: absolute_source_path(path)?,
+                enabled: true,
+            })
         }))
         .collect()
+}
+
+fn absolute_source_path(path: PathBuf) -> Result<PathBuf, CompanionError> {
+    std::path::absolute(&path).map_err(|error| {
+        CompanionError::Proposal(format!(
+            "could not make configured source path {} absolute: {error}",
+            path.display()
+        ))
+    })
 }
 
 pub(crate) fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, CompanionError> {

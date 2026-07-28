@@ -26,7 +26,7 @@ pub(crate) fn setup_tracking(
     let mut config = load_tracking_config(data_dir)?.unwrap_or_default();
     config.installed = true;
     config.active = args.scheduler_target.is_some();
-    config.sources = configured_sources(args.repos, args.ics_files);
+    config.sources = configured_sources(args.repos, args.ics_files)?;
     config.schedule = TrackingSchedule {
         weekdays: true,
         at: args.at.clone(),
@@ -107,7 +107,9 @@ pub(crate) fn tracking_status(
         status["sources"] = Value::Array(source_statuses(&config));
         status["timezone"] = Value::String(config.schedule.timezone.clone());
         status["pendingAction"] = Value::String(
-            if !config.active {
+            if status["scheduler"]["healthy"] == Value::Bool(false) {
+                "repair the missing or modified tracking scheduler files"
+            } else if !config.active {
                 "resume tracking after validating the configured schedule and sources"
             } else if status["scheduler"]["killSwitchActive"] == Value::Bool(true) {
                 "remove the tracking kill switch only after reviewing recovery state"
@@ -139,6 +141,24 @@ pub(crate) fn run_tracking(
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
     let date = select_public_date(args.when.as_deref(), &config.schedule.timezone)?;
+    let result = run_tracking_for_date(data_dir, drag_bin, date)?;
+    let status = result["status"].as_str().unwrap_or("unknown");
+    print_public(
+        output,
+        &result,
+        &format!(
+            "Tracking run for {date}: {status}. Next safe action: {}.",
+            next_safe_action(status)
+        ),
+    )
+}
+
+pub(crate) fn run_tracking_for_date(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+) -> Result<Value, CompanionError> {
+    let config = require_config(data_dir)?;
     let collect = CollectArgs {
         repos: config
             .sources
@@ -186,10 +206,20 @@ pub(crate) fn run_tracking(
         None
     };
     let counts = proposal_counts(data_dir, date)?;
+    let status = execution
+        .as_ref()
+        .map(|value| value.status)
+        .filter(|status| *status != "executed")
+        .unwrap_or(run.status);
+    let warnings = match status {
+        "gated" => vec!["submission was blocked by runtime safety gates"],
+        "uncertain" => vec!["submission outcome is uncertain; reconcile before retrying"],
+        _ => Vec::new(),
+    };
     let result = serde_json::json!({
         "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
         "selectedDate": date,
-        "status": run.status,
+        "status": status,
         "resumed": run.resumed,
         "sourceHealth": source_statuses(&config),
         "observations": collected.git.commits.len() + collected.calendar.events.len(),
@@ -206,19 +236,11 @@ pub(crate) fn run_tracking(
         "networkAccess": audit.is_some()
             || execution.as_ref().is_some_and(|value| value.network_access),
         "liveMutationAllowed": execution.as_ref().is_some_and(|value| value.live_mutation_allowed),
-        "warnings": [],
-        "nextSafeAction": next_safe_action(run.status),
+        "warnings": warnings,
+        "nextSafeAction": next_safe_action(status),
         "phases": run.phases
     });
-    print_public(
-        output,
-        &result,
-        &format!(
-            "Tracking run for {date}: {}. Next safe action: {}.",
-            run.status,
-            next_safe_action(run.status)
-        ),
-    )
+    Ok(result)
 }
 
 pub(crate) fn review_tracking(
@@ -312,7 +334,7 @@ pub(crate) fn configure_sources(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let mut config = require_config(data_dir)?;
-    config.sources = configured_sources(args.repos, args.ics_files);
+    config.sources = configured_sources(args.repos, args.ics_files)?;
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "status": "configured",
@@ -337,7 +359,7 @@ pub(crate) fn test_sources(
     let result = serde_json::json!({
         "status": "tested",
         "selectedDate": date,
-        "sources": source_statuses(&config),
+        "sources": tested_source_statuses(&config, date),
         "redacted": true,
         "worklogsGenerated": 0,
         "networkAccess": false,
@@ -505,6 +527,33 @@ fn source_statuses(config: &TrackingConfig) -> Vec<Value> {
                 } else {
                     Value::String("configured path does not exist or is not accessible".to_owned())
                 }
+            })
+        })
+        .collect()
+}
+
+fn tested_source_statuses(config: &TrackingConfig, date: NaiveDate) -> Vec<Value> {
+    config
+        .sources
+        .iter()
+        .map(|source| {
+            let result = if !source.enabled {
+                Ok(())
+            } else if source.kind == "git" {
+                scan_git_repo(&source.path).map(|_| ())
+            } else if source.kind == "calendar" {
+                scan_ics_file(&source.path, date).map(|_| ()).map_err(|errors| errors.join("; "))
+            } else {
+                Err(format!("unsupported source kind {}", source.kind))
+            };
+            let healthy = result.is_ok();
+            serde_json::json!({
+                "kind": source.kind,
+                "path": source.path,
+                "enabled": source.enabled,
+                "available": healthy,
+                "health": if !source.enabled { "disabled" } else if healthy { "healthy" } else { "unhealthy" },
+                "reason": result.err()
             })
         })
         .collect()

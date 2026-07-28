@@ -86,11 +86,11 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
     if let Command::GenerateSkills(args) = &cli.command {
         return generate_skills::run(args).await.map(RunResult::Rendered);
     }
+    let path = cli.config.unwrap_or(config::config_path()?);
     if let Command::Tracking(args) = cli.command {
-        return tracking::run(args, mode).map(RunResult::Delegated);
+        return tracking::run(args, mode, &path).map(RunResult::Delegated);
     }
     let timezone = default_timezone(cli.timezone.as_deref())?;
-    let path = cli.config.unwrap_or(config::config_path()?);
     let debug = request_debug_enabled(cli.debug, mode);
     let app = App::new(path.clone(), timezone, debug);
     let rendered = match cli.command {

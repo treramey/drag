@@ -145,6 +145,46 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
         ))
         .stdout(predicate::str::contains("Latest run: 2026-07-24"))
         .stdout(predicate::str::contains("Pending action:"));
+
+    let connection = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    connection.execute(
+        "UPDATE coordinated_runs SET started_at = '2026-07-24T10:00:00Z' WHERE local_date = '2026-07-24'",
+        [],
+    )?;
+    connection.execute(
+        "INSERT INTO coordinated_runs (tempo_account, local_date, state, started_at, finished_at) VALUES ('default', '2026-07-22', 'completed', '2026-07-25T10:00:00Z', '2026-07-25T10:01:00Z')",
+        [],
+    )?;
+    let status = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("status"),
+    )?;
+    assert_eq!(status["latestRun"]["selectedDate"], "2026-07-22");
+    Ok(())
+}
+
+#[test]
+fn contract_probe_does_not_resolve_or_migrate_tracking_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let legacy = directory.path().join(".drag-companion");
+    let home = directory.path().join("home");
+    std::fs::create_dir(&legacy)?;
+    std::fs::write(legacy.join("state.json"), "legacy")?;
+    std::fs::create_dir(&home)?;
+
+    let contract = json_output(
+        tracking()?
+            .current_dir(directory.path())
+            .env("HOME", &home)
+            .env_remove("DRAG_TRACKING_DATA")
+            .env_remove("DRAG_COMPANION_DATA")
+            .arg("contract"),
+    )?;
+    assert_eq!(contract["schemaVersion"], 2);
+    assert!(legacy.exists());
+    assert!(!home.join(".drag/tracking").exists());
     Ok(())
 }
 
@@ -232,6 +272,17 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     assert_eq!(status["submission"]["mode"], "review");
     assert_eq!(status["scheduler"]["active"], true);
     assert_eq!(status["sources"][0]["health"], "healthy");
+    std::fs::remove_file(&installed_files[0])?;
+    let unhealthy = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("status"),
+    )?;
+    assert_eq!(unhealthy["scheduler"]["healthy"], false);
+    assert!(unhealthy["pendingAction"]
+        .as_str()
+        .ok_or("pending action")?
+        .contains("repair"));
 
     let uninstalled = json_output(
         tracking()?
@@ -241,6 +292,49 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
     assert_eq!(uninstalled["historyPreserved"], true);
     assert!(installed_files.iter().all(|path| !path.exists()));
     assert!(data_dir.join("companion.sqlite3").exists());
+    Ok(())
+}
+
+#[test]
+fn public_source_configuration_stabilizes_paths_and_tests_collector_inputs(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    std::fs::create_dir(directory.path().join("not-a-repo"))?;
+    std::fs::write(directory.path().join("broken.ics"), "BEGIN:VEVENT\n")?;
+    let setup = json_output(
+        tracking()?
+            .current_dir(directory.path())
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--repo", "not-a-repo", "--ics", "broken.ics"]),
+    )?;
+    assert_eq!(
+        setup["sources"][0]["path"],
+        directory
+            .path()
+            .join("not-a-repo")
+            .to_string_lossy()
+            .as_ref()
+    );
+    assert_eq!(
+        setup["sources"][1]["path"],
+        directory
+            .path()
+            .join("broken.ics")
+            .to_string_lossy()
+            .as_ref()
+    );
+
+    let tested = json_output(
+        tracking()?
+            .current_dir(directory.path().join("not-a-repo"))
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["sources", "test", "2026-07-24"]),
+    )?;
+    assert_eq!(tested["sources"][0]["health"], "unhealthy");
+    assert_eq!(tested["sources"][1]["health"], "unhealthy");
+    assert!(tested["sources"][0]["reason"].is_string());
+    assert!(tested["sources"][1]["reason"].is_string());
     Ok(())
 }
 
@@ -267,6 +361,25 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
             .args(["schedule", "pause"]),
     )?;
     assert_eq!(paused["status"], "paused");
+    let mut scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
+    scheduler_state["operationKeys"] = serde_json::json!(["keep-this-operation-key"]);
+    std::fs::write(
+        data_dir.join("scheduler.json"),
+        serde_json::to_vec_pretty(&scheduler_state)?,
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "update", "--at", "17:30"]),
+    )?;
+    let scheduler_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("scheduler.json"))?)?;
+    assert_eq!(scheduler_state["enabled"], false);
+    assert_eq!(
+        scheduler_state["operationKeys"],
+        serde_json::json!(["keep-this-operation-key"])
+    );
     let resumed = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -274,16 +387,47 @@ fn public_schedule_aliases_and_run_keep_one_intent_level_result(
     )?;
     assert_eq!(resumed["status"], "active");
 
+    let scheduled = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["internal", "scheduler", "run", "--date", "2026-07-24"]),
+    )?;
+    let run = &scheduled["result"];
+    assert_eq!(run["selectedDate"], "2026-07-24");
+    assert_eq!(run["status"], "completed");
+    assert_eq!(run["networkAccess"], false);
+    assert_eq!(run["liveMutationAllowed"], false);
+    assert!(run["sourceHealth"].is_array());
+    assert!(run["evidenceBundle"].is_object());
+    assert!(run["phases"].is_array());
+    Ok(())
+}
+
+#[test]
+fn public_automatic_run_surfaces_runtime_submission_gates() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "automatic", "--authorize-automatic"]),
+    )?;
     let run = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["run", "2026-07-24"]),
     )?;
-    assert_eq!(run["selectedDate"], "2026-07-24");
-    assert_eq!(run["status"], "completed");
-    assert_eq!(run["networkAccess"], false);
+    assert_eq!(run["status"], "gated");
+    assert_eq!(run["submitted"], 0);
     assert_eq!(run["liveMutationAllowed"], false);
-    assert!(run["phases"].is_array());
+    assert!(run["warnings"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
+    assert!(run["nextSafeAction"]
+        .as_str()
+        .ok_or("next safe action")?
+        .contains("runtime gates"));
     Ok(())
 }
 
@@ -737,6 +881,7 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let data = dir.path().join("data & state");
+    let drag_config = dir.path().join("selected config.json");
     let systemd = dir.path().join("systemd");
     let launchd = dir.path().join("launchd");
     std::fs::create_dir_all(&systemd)?;
@@ -744,6 +889,7 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
 
     let installed = json_output(
         companion()?
+            .env("DRAG_CONFIG", &drag_config)
             .args(["--data-dir", data.to_string_lossy().as_ref()])
             .args([
                 "scheduler",
@@ -763,6 +909,8 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     assert!(service.contains("date +%%F"));
     assert!(catch_up_service.contains("scheduler catch-up"));
     assert!(service.contains("data & state'"));
+    assert!(service.contains("DRAG_CONFIG="));
+    assert!(service.contains("selected config.json"));
     assert!(timer.contains("18:45:00"));
     assert!(timer.contains("Persistent=true"));
     assert_eq!(
@@ -791,6 +939,9 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     assert!(plist.contains("data &amp; state"));
     assert!(plist.contains("<integer>18</integer>"));
     assert!(plist.contains("<integer>45</integer>"));
+    assert_eq!(plist.matches("<key>Weekday</key>").count(), 5);
+    assert!(plist.contains("<key>Weekday</key><integer>1</integer>"));
+    assert!(plist.contains("<key>Weekday</key><integer>5</integer>"));
     assert!(!plist.contains("RunAtLoad"));
     assert!(catch_up_plist.contains("RunAtLoad"));
 
@@ -822,6 +973,10 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
     let target = dir.path().join("systemd");
     std::fs::create_dir_all(&target)?;
     std::fs::write(target.join("drag-tracking.timer"), "# unrelated timer")?;
+    std::fs::write(
+        target.join("drag-companion.timer"),
+        "# managed-by=drag-companion\nlegacy schedule",
+    )?;
 
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -842,6 +997,7 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
         std::fs::read_to_string(target.join("drag-tracking.timer"))?,
         "# unrelated timer"
     );
+    assert!(target.join("drag-companion.timer").exists());
 
     std::fs::write(
         target.join("drag-tracking.timer"),

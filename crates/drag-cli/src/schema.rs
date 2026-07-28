@@ -588,7 +588,12 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
         },
         CommandIdentity::Tracking => CommandSemantics {
             success: tracking_success_schema(),
-            error_codes: vec!["usage", "tracking_unavailable", "tracking_incompatible"],
+            error_codes: vec![
+                "usage",
+                "tracking_error",
+                "tracking_unavailable",
+                "tracking_incompatible",
+            ],
             side_effects: json!({
                 "status": ["initializeLocalTrackingStateIfMissing"],
                 "setup": ["persistTrackingConfiguration", "explicitlyAuthorizedSchedulerOrHookInstallation"],
@@ -1146,7 +1151,7 @@ fn setup_success_schema() -> Value {
             },
             {
                 "type": "object",
-                "required": ["configured", "path", "source", "connection"],
+                "required": ["configured", "path", "source", "connection", "automaticTracking"],
                 "properties": {
                     "configured": {"const": true},
                     "path": {"type": "string"},
@@ -1157,6 +1162,16 @@ fn setup_success_schema() -> Value {
                         "properties": {
                             "jira": {"type": "object", "required": ["status", "hostname", "email"], "properties": {"status": {"const": "connected"}, "hostname": {"type": "string"}, "email": {"type": "string"}}, "additionalProperties": false},
                             "tempo": {"type": "object", "required": ["status"], "properties": {"status": {"const": "connected"}}, "additionalProperties": false}
+                        },
+                        "additionalProperties": false
+                    },
+                    "automaticTracking": {
+                        "type": "object",
+                        "required": ["configured", "optional", "nextCommand"],
+                        "properties": {
+                            "configured": {"const": false},
+                            "optional": {"const": true},
+                            "nextCommand": {"const": "drag tracking setup"}
                         },
                         "additionalProperties": false
                     }
@@ -1369,7 +1384,8 @@ fn error_contract() -> Value {
                 "selection": "most severe failed remote check"
             },
             "tracking_unavailable": 1,
-            "tracking_incompatible": 1
+            "tracking_incompatible": 1,
+            "tracking_error": 1
         }
     })
 }
