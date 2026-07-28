@@ -280,8 +280,6 @@ pub(crate) fn run_tracking_for_date(
                 );
             }
         }
-        progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
-
         let before_audit = proposal_counts(data_dir, date)?;
         let approved_review =
             config.submission.mode == SubmissionMode::Review && approval_matches(data_dir, date)?;
@@ -299,6 +297,7 @@ pub(crate) fn run_tracking_for_date(
             let read = read_drag_day(drag_bin, date)?;
             progress.existing_worklogs = read.worklogs.len();
         }
+        progress.counts = proposal_counts(data_dir, date)?;
 
         let execution_authorized = match config.submission.mode {
             SubmissionMode::Automatic => config.submission.automatic_submission_authorized,
@@ -312,12 +311,10 @@ pub(crate) fn run_tracking_for_date(
             progress.resumed,
             execution_authorized,
         )?;
-        let phases = run
-            .phases
-            .into_iter()
-            .filter(|phase| execution_authorized || phase.phase != "submitting")
-            .collect::<Vec<_>>();
-        progress.phases = serde_json::to_value(phases).map_err(CompanionError::Serialize)?;
+        progress.phases = serde_json::to_value(run.phases).map_err(CompanionError::Serialize)?;
+        if run.status != "completed" {
+            progress.terminal_status = Some(run.status);
+        }
 
         if execution_authorized {
             progress.mutation_attempted = true;
@@ -337,7 +334,7 @@ pub(crate) fn run_tracking_for_date(
             progress.network_access |= execution.network_access;
             progress.live_mutation_allowed = execution.live_mutation_allowed;
         }
-        progress.counts = proposal_counts(data_dir, date)?;
+        progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
         Ok(())
     })();
 
@@ -358,6 +355,15 @@ pub(crate) fn run_tracking_for_date(
         }
         Err(error) => {
             progress.counts = proposal_counts(data_dir, date).unwrap_or_default();
+            if let Ok((submitted, skipped, mutation_attempted)) =
+                persisted_execution_progress(data_dir, date)
+            {
+                progress.submitted = submitted;
+                progress.skipped = skipped;
+                progress.mutation_attempted |= mutation_attempted;
+                progress.live_mutation_allowed |= mutation_attempted;
+                progress.network_access |= mutation_attempted;
+            }
             let failure = serde_json::json!({
                 "kind": tracking_failure_kind(&error),
                 "message": error.to_string()

@@ -296,7 +296,7 @@ pub(crate) fn protected_retention_dates(
     collect_protected_dates(
         conn,
         &mut dates,
-        "SELECT explicit_date FROM daily_bundles WHERE state IN ('proposed','approved','submitting','uncertain')",
+        "SELECT b.explicit_date FROM daily_bundles b WHERE b.state IN ('approved','submitting','uncertain') OR (b.state = 'proposed' AND NOT EXISTS (SELECT 1 FROM proposals p WHERE p.bundle_id = b.id))",
     )?;
     collect_protected_dates(
         conn,
@@ -659,6 +659,8 @@ pub(crate) fn terminal_report_status(data_dir: &Path, date: NaiveDate) -> Option
         Some("blocked") => Some("blocked"),
         Some("failed") => Some("failed"),
         Some("uncertain") => Some("uncertain"),
+        Some("source-failed") => Some("source-failed"),
+        Some("gated") => Some("gated"),
         _ => Some("unknown"),
     }
 }

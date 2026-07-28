@@ -169,6 +169,29 @@ pub(crate) fn uncertain_execute_result(date: NaiveDate) -> ExecuteResult {
     }
 }
 
+pub(crate) fn persisted_execution_progress(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<(usize, usize, bool), CompanionError> {
+    let conn = Connection::open(store_path(data_dir))?;
+    let submitted = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND state = 'confirmed'",
+        [date.to_string()],
+        |row| row.get::<_, usize>(0),
+    )?;
+    let skipped = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND state = 'skipped'",
+        [date.to_string()],
+        |row| row.get::<_, usize>(0),
+    )?;
+    let mutation_attempted = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mutation_operations WHERE local_date = ?1)",
+        [date.to_string()],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok((submitted, skipped, mutation_attempted))
+}
+
 pub(crate) fn unverifiable_after_live_spawn(error: &CompanionError) -> bool {
     matches!(
         error,
