@@ -2,4 +2,5 @@
 "@treramey/drag": minor
 ---
 
-Add validated, redacted, and non-mutating tracking evidence source management.
+Add validated, redacted, and bounded tracking evidence source management, with
+date-scoped collection, failure-gated complete runs, and proposal-stage wiring.

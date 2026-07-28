@@ -183,7 +183,7 @@ pub(crate) fn collect_activity(
     let mut calendar_failures = Vec::new();
 
     for repo in &args.repos {
-        match scan_git_repo(repo) {
+        match scan_git_repo_for_date(repo, args.date) {
             Ok(repo_commits) => {
                 for commit in repo_commits {
                     append_journal_event(data_dir, &git_commit_event(&commit)?)?;
@@ -200,7 +200,8 @@ pub(crate) fn collect_activity(
     if let Some(date) = args.date {
         for path in &args.ics_files {
             match scan_ics_file(path, date) {
-                Ok(events) => {
+                Ok(mut events) => {
+                    events.truncate(SOURCE_TEST_OBSERVATION_LIMIT);
                     for event in events {
                         append_journal_event(data_dir, &calendar_event(&event)?)?;
                         calendar_events.push(event);
@@ -238,6 +239,10 @@ pub(crate) fn scan_ics_file(
     path: &Path,
     date: NaiveDate,
 ) -> Result<Vec<CalendarEvidence>, Vec<String>> {
+    let metadata = fs::metadata(path).map_err(|error| vec![error.to_string()])?;
+    if metadata.len() > MAX_SOURCE_SETTINGS_BYTES {
+        return Err(vec!["calendar exceeds the 1 MiB safety limit".to_owned()]);
+    }
     let body = fs::read_to_string(path).map_err(|error| vec![error.to_string()])?;
     let lines = unfold_ics_lines(&body);
     let mut events = Vec::new();
@@ -270,6 +275,7 @@ pub(crate) fn scan_ics_file(
     if !errors.is_empty() {
         Err(errors)
     } else {
+        events.truncate(SOURCE_TEST_OBSERVATION_LIMIT + 1);
         Ok(events)
     }
 }
@@ -699,7 +705,10 @@ pub(crate) fn calendar_event(calendar: &CalendarEvidence) -> Result<JournalEvent
     Ok(event)
 }
 
-pub(crate) fn scan_git_repo(repo: &Path) -> Result<Vec<GitCommitEvidence>, String> {
+pub(crate) fn scan_git_repo_for_date(
+    repo: &Path,
+    date: Option<NaiveDate>,
+) -> Result<Vec<GitCommitEvidence>, String> {
     if !repo.exists() {
         return Err("repository path does not exist".to_owned());
     }
@@ -715,16 +724,28 @@ pub(crate) fn scan_git_repo(repo: &Path) -> Result<Vec<GitCommitEvidence>, Strin
     .ok()
     .filter(|value| !value.is_empty())
     .unwrap_or_else(|| "HEAD".to_owned());
-    let output = git_stdout(
-        repo,
-        [
-            "log",
-            "--all",
-            "--max-count=200",
-            "--date=iso-strict",
-            "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%aI%x1f%cI%x1f%s%x1e",
-        ],
-    )?;
+    let mut command = ProcessCommand::new("git");
+    clear_git_repository_environment(&mut command);
+    command.arg("-C").arg(repo).args([
+        "log",
+        "--all",
+        "--max-count=200",
+        "--date=iso-strict",
+        "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%aI%x1f%cI%x1f%s%x1e",
+    ]);
+    if let Some(date) = date {
+        let next = date
+            .succ_opt()
+            .ok_or_else(|| "tracking date is out of range".to_owned())?;
+        command
+            .arg(format!("--since={date}T00:00:00"))
+            .arg(format!("--until={next}T00:00:00"));
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+    }
+    let output = String::from_utf8_lossy(&output.stdout);
     let mut commits = Vec::new();
     for record in output
         .split('\u{1e}')

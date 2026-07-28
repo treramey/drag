@@ -160,6 +160,10 @@ under `drag-tracking internal` for diagnostics, tests, replay, and recovery.
 Draft mode cannot mutate. Review approval is bound to an immutable proposal-set
 digest. Automatic execution additionally requires explicit authorization and
 all durable rollout, duplicate, uncertainty, and kill-switch gates.
+The public run imports collected evidence, invokes its configured constrained
+proposal adapter, audits the resulting proposals, and only then enters the
+coordinated execution path. Failed enabled sources and missing proposal
+configuration are explicit pre-audit gates.
 
 ### Scheduler package and recovery
 
@@ -174,6 +178,10 @@ explicit-date command under `drag-tracking internal scheduler`, with the
 default 18:45 configured local time. systemd uses `Persistent=true`; launchd uses
 `RunAtLoad`, so startup/wake paths reconcile catch-up through companion state
 rather than granting host schedulers mutation authority.
+When the target is the platform user scheduler directory, installation and
+pause/resume also register, enable, or disable the host scheduler. Custom
+targets are files-only installations and remain explicitly inactive until
+reinstalled at the host-owned location.
 
 Catch-up selects at most one day: the latest missed weekday newer than the last
 success and no older than seven days. DST, timezone changes, sleep/wake startup,

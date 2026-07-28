@@ -82,6 +82,8 @@ schedule, and a submission policy, then inspect or run it through Drag:
 
 ```bash
 drag tracking setup --mode draft
+# Configure the offline proposal adapter when collected evidence should become proposals:
+drag tracking setup --provider-fixture ./provider.json
 drag tracking status
 drag tracking run today
 drag tracking review today
@@ -107,6 +109,11 @@ selected with `sources configure --claude-code` after its separately authorized
 hooks are installed. Source tests cap observations, return redacted references
 instead of paths or evidence content, and never persist evidence or generate or
 submit worklogs.
+
+Complete runs stop before audit when an enabled source fails. Evidence-bearing
+runs also stop before audit until a schema-valid proposal provider fixture is
+configured. Re-running setup preserves source and scheduler settings that were
+not supplied again.
 
 The deprecated `drag-companion` executable remains available as a compatibility
 shim for this release.

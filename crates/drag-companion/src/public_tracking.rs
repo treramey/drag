@@ -6,13 +6,24 @@ pub(crate) fn setup_tracking(
     args: PublicSetupArgs,
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
-    validate_time_and_timezone(&args.at, &args.schedule_timezone)?;
-    if args.authorize_automatic && args.mode != SubmissionMode::Automatic {
+    let previous = load_tracking_config(data_dir)?;
+    let mut config = previous.clone().unwrap_or_default();
+    let mode = args.mode.unwrap_or(config.submission.mode);
+    let at = args.at.unwrap_or_else(|| config.schedule.at.clone());
+    let timezone = args
+        .schedule_timezone
+        .unwrap_or_else(|| config.schedule.timezone.clone());
+    validate_time_and_timezone(&at, &timezone)?;
+    if args.authorize_automatic && mode != SubmissionMode::Automatic {
         return Err(CompanionError::Proposal(
             "--authorize-automatic requires --mode automatic".to_owned(),
         ));
     }
-    if args.mode == SubmissionMode::Automatic && !args.authorize_automatic {
+    if mode == SubmissionMode::Automatic
+        && !args.authorize_automatic
+        && !(config.submission.mode == SubmissionMode::Automatic
+            && config.submission.automatic_submission_authorized)
+    {
         return Err(CompanionError::Proposal(
             "automatic mode requires separate --authorize-automatic consent".to_owned(),
         ));
@@ -23,34 +34,56 @@ pub(crate) fn setup_tracking(
         ));
     }
 
-    let mut config = load_tracking_config(data_dir)?.unwrap_or_default();
-    let sources = configured_sources(args.repos, args.ics_files)?;
-    validate_source_configuration(&sources)?;
-    config.installed = true;
-    config.sources = sources;
-    let schedule_was_explicit =
-        args.at != DEFAULT_SCHEDULE_TIME || args.schedule_timezone != DEFAULT_SCHEDULE_TIMEZONE;
-    if config.scheduler_target.is_none() || schedule_was_explicit {
-        config.schedule = TrackingSchedule {
-            weekdays: true,
-            at: args.at.clone(),
-            timezone: args.schedule_timezone.clone(),
-        };
+    let update_repos = !args.repos.is_empty();
+    let update_calendars = !args.ics_files.is_empty();
+    let selected = configured_sources(args.repos, args.ics_files)?;
+    if update_repos {
+        config
+            .sources
+            .retain(|source| source.kind != TrackingSourceKind::Git);
     }
-    config.submission = TrackingSubmission {
-        mode: args.mode,
-        automatic_submission_authorized: args.authorize_automatic,
+    if update_calendars {
+        config
+            .sources
+            .retain(|source| source.kind != TrackingSourceKind::Calendar);
+    }
+    config.sources.extend(selected);
+    validate_source_configuration(&config.sources)?;
+    config.schedule = TrackingSchedule {
+        weekdays: true,
+        at: at.clone(),
+        timezone: timezone.clone(),
     };
+    config.submission = TrackingSubmission {
+        mode,
+        automatic_submission_authorized: if mode == SubmissionMode::Automatic {
+            args.authorize_automatic || config.submission.automatic_submission_authorized
+        } else {
+            false
+        },
+    };
+    if let Some(path) = args.provider_fixture {
+        let path = stable_source_path(path)?;
+        validate_provider_fixture(&path)?;
+        config.provider_fixture = Some(path);
+    }
+
+    // Persist recoverable ownership before touching scheduler or hook files. An
+    // interrupted setup remains explicitly uninstalled and can be safely rerun.
+    config.installed = false;
+    config.active = false;
+    if let Some(target) = args.scheduler_target.as_ref() {
+        config.scheduler_target = Some(target.clone());
+    }
+    save_tracking_config(data_dir, &config)?;
 
     let scheduler = if let Some(target_dir) = args.scheduler_target {
-        let target_dir = absolute_path(&target_dir)?;
         let install = SchedulerInstallArgs {
             platform: default_scheduler_platform().to_owned(),
             target_dir: target_dir.clone(),
-            at: args.at,
-            timezone: args.schedule_timezone,
+            at,
+            timezone,
         };
-        config.scheduler_target = Some(target_dir);
         Some(install_scheduler_files(data_dir, drag_bin, &install)?)
     } else {
         None
@@ -58,6 +91,7 @@ pub(crate) fn setup_tracking(
     if args.install_hooks {
         install_claude_hooks(&default_claude_settings_path())?;
         config.hooks_installed = true;
+        save_tracking_config(data_dir, &config)?;
     }
     if config.hooks_installed {
         config
@@ -65,11 +99,17 @@ pub(crate) fn setup_tracking(
             .retain(|source| source.kind != TrackingSourceKind::ClaudeCode);
         config.sources.push(claude_code_source()?);
     }
-    validate_tracking_configuration(&config)?;
-    let scheduler_state = scheduler_status(data_dir)?;
-    config.active = config.scheduler_target.is_some()
-        && scheduler_state["enabled"].as_bool().unwrap_or(false)
-        && scheduler_files_healthy(&scheduler_state["state"]);
+    validate_source_configuration(&config.sources)?;
+    config.installed = true;
+    config.active = if let Some(scheduler) = &scheduler {
+        scheduler["active"].as_bool().unwrap_or(false)
+    } else if config.scheduler_target.is_some() {
+        scheduler_status(data_dir)?["enabled"]
+            .as_bool()
+            .unwrap_or(false)
+    } else {
+        false
+    };
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
@@ -96,7 +136,13 @@ pub(crate) fn setup_tracking(
         "scheduler": scheduler,
         "networkAccess": false,
         "liveMutationAllowed": false,
-        "nextSafeAction": if config.active { "inspect tracking status before the first scheduled run" } else { "resume tracking after installing its scheduler" }
+        "nextSafeAction": if config.active {
+            "inspect tracking status before the first scheduled run"
+        } else if scheduler.is_some() {
+            "reinstall scheduler files in the platform user scheduler directory, then resume tracking"
+        } else {
+            "install the tracking scheduler, then resume tracking"
+        }
     });
     print_public(
         output,
@@ -110,10 +156,10 @@ pub(crate) fn tracking_status(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let mut status = status_payload(data_dir)?;
-    if let Some(config) = load_tracking_config(data_dir)? {
+    if let Some(mut config) = load_tracking_config(data_dir)? {
         status["configuration"]["configured"] = Value::Bool(config.installed);
         status["configuration"]["migration"] = migration_status(data_dir)?;
-        status["scheduler"]["active"] = Value::Bool(config.active);
+        config.active = status["scheduler"]["active"].as_bool().unwrap_or(false);
         status["scheduler"]["nextRun"] = next_run_description(&config);
         status["submission"]["mode"] =
             serde_json::to_value(config.submission.mode).map_err(CompanionError::Serialize)?;
@@ -124,7 +170,9 @@ pub(crate) fn tracking_status(
         status["sources"] = Value::Array(source_statuses(&config));
         status["timezone"] = Value::String(config.schedule.timezone.clone());
         status["pendingAction"] = Value::String(
-            if status["scheduler"]["healthy"] == Value::Bool(false) {
+            if !config.installed {
+                "rerun tracking setup to complete or recover the interrupted installation"
+            } else if status["scheduler"]["healthy"] == Value::Bool(false) {
                 "repair the missing or modified tracking scheduler files"
             } else if !config.active {
                 "resume tracking after validating the configured schedule and sources"
@@ -192,6 +240,37 @@ pub(crate) fn run_tracking_for_date(
             .collect(),
     };
     let collected = collect_activity(data_dir, &collect)?;
+    if !collected.failures.is_empty() || !collected.calendar.failures.is_empty() {
+        let failures = collected
+            .failures
+            .iter()
+            .chain(collected.calendar.failures.iter())
+            .map(|failure| {
+                serde_json::json!({
+                    "source": minimized_reference(&failure.repository),
+                    "error": redact(&failure.error)
+                })
+            })
+            .collect::<Vec<_>>();
+        return Ok(serde_json::json!({
+            "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
+            "selectedDate": date,
+            "status": "source-failed",
+            "sourceHealth": source_statuses(&config),
+            "collectionFailures": failures,
+            "observations": collected.git.commits.len() + collected.calendar.events.len(),
+            "proposals": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "submitted": 0,
+            "skipped": 0,
+            "networkAccess": false,
+            "liveMutationAllowed": false,
+            "warnings": ["one or more enabled evidence sources failed; audit and submission were skipped"],
+            "nextSafeAction": "repair or disable the failed source, then rerun tracking",
+            "phases": []
+        }));
+    }
     let imported = if journal_path(data_dir).exists() {
         import_journal(data_dir)?
     } else {
@@ -200,7 +279,38 @@ pub(crate) fn run_tracking_for_date(
         0
     };
     let bundle = build_bundle(data_dir, date)?;
-    let run = coordinated_run(data_dir, drag_bin, date, true)?;
+    let proposal = if let Some(fixture) = &config.provider_fixture {
+        Some(propose_from_fixture(data_dir, date, fixture)?)
+    } else {
+        None
+    };
+    if !bundle.evidence.is_empty()
+        && proposal.is_none()
+        && proposal_counts(data_dir, date)?.proposals == 0
+    {
+        return Ok(serde_json::json!({
+            "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
+            "selectedDate": date,
+            "status": "proposal-provider-required",
+            "sourceHealth": source_statuses(&config),
+            "observations": collected.git.commits.len() + collected.calendar.events.len(),
+            "importedEvidence": imported,
+            "evidenceBundle": {
+                "items": bundle.evidence.len(),
+                "contradictions": bundle.contradictions.len()
+            },
+            "proposals": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "submitted": 0,
+            "skipped": 0,
+            "networkAccess": false,
+            "liveMutationAllowed": false,
+            "warnings": ["evidence was collected but no proposal provider is configured"],
+            "nextSafeAction": "configure an offline provider fixture with tracking setup --provider-fixture FILE",
+            "phases": []
+        }));
+    }
     let before_audit = proposal_counts(data_dir, date)?;
     let approved_review =
         config.submission.mode == SubmissionMode::Review && approval_matches(data_dir, date)?;
@@ -214,6 +324,7 @@ pub(crate) fn run_tracking_for_date(
     } else {
         None
     };
+    let run = coordinated_run(data_dir, drag_bin, date, true)?;
     let execution = if config.submission.mode == SubmissionMode::Automatic
         && config.submission.automatic_submission_authorized
         || approved_review
@@ -449,17 +560,10 @@ pub(crate) fn show_schedule(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
-    validate_schedule(&config.schedule)?;
-    let status = scheduler_status(data_dir)?;
     let result = serde_json::json!({
         "schedule": config.schedule,
         "active": config.active,
         "nextRun": next_run_description(&config),
-        "health": {
-            "installed": scheduler_files_installed(&status["state"]),
-            "healthy": scheduler_files_healthy(&status["state"]),
-            "killSwitchActive": status["killSwitchActive"]
-        },
         "networkAccess": false,
         "liveMutationAllowed": false
     });
@@ -498,17 +602,9 @@ pub(crate) fn update_schedule(
         None
     };
     save_tracking_config(data_dir, &config)?;
-    let status = scheduler_status(data_dir)?;
     let result = serde_json::json!({
         "status": "updated",
         "schedule": config.schedule,
-        "active": config.active,
-        "nextRun": next_run_description(&config),
-        "health": {
-            "installed": scheduler_files_installed(&status["state"]),
-            "healthy": scheduler_files_healthy(&status["state"]),
-            "killSwitchActive": status["killSwitchActive"]
-        },
         "scheduler": scheduler,
         "networkAccess": false,
         "liveMutationAllowed": false
@@ -522,25 +618,31 @@ pub(crate) fn set_tracking_active(
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
     let mut config = require_config(data_dir)?;
-    if active {
-        validate_tracking_configuration(&config)?;
-        if config.scheduler_target.is_none() {
-            return Err(CompanionError::Proposal(
-                "tracking cannot resume until owned scheduler files are installed".to_owned(),
-            ));
-        }
-        let status = status_payload(data_dir)?;
-        if status["scheduler"]["installed"] != Value::Bool(true)
-            || status["scheduler"]["healthy"] != Value::Bool(true)
-        {
-            return Err(CompanionError::Proposal(
-                "tracking cannot resume until owned scheduler files are installed and healthy"
-                    .to_owned(),
-            ));
-        }
+    if active && config.scheduler_target.is_none() {
+        return Err(CompanionError::Proposal(
+            "tracking cannot resume until owned scheduler files are installed".to_owned(),
+        ));
     }
-    config.active = active;
-    let _ = set_scheduler_enabled_state(data_dir, active)?;
+    if active {
+        validate_source_configuration(&config.sources)?;
+    }
+    let scheduler = if config.scheduler_target.is_some() {
+        Some(set_scheduler_enabled_state(data_dir, active)?)
+    } else {
+        None
+    };
+    if active
+        && scheduler
+            .as_ref()
+            .is_none_or(|value| value["status"] != "enabled")
+    {
+        return Err(CompanionError::Proposal(
+            "host scheduler activation was not completed; reinstall scheduler files in the platform user scheduler directory before resuming".to_owned(),
+        ));
+    }
+    config.active = scheduler
+        .as_ref()
+        .is_some_and(|value| value["status"] == Value::String("enabled".to_owned()));
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "status": if active { "active" } else { "paused" },
@@ -565,7 +667,8 @@ pub(crate) fn uninstall_tracking(
 ) -> Result<(), CompanionError> {
     let mut config = load_tracking_config(data_dir)?.ok_or_else(|| {
         CompanionError::Proposal(
-            "automatic tracking is not configured; run tracking setup first".to_owned(),
+            "automatic tracking is not configured; there are no tracked installation effects to remove"
+                .to_owned(),
         )
     })?;
     let scheduler = if let Some(target_dir) = &config.scheduler_target {
@@ -586,9 +689,10 @@ pub(crate) fn uninstall_tracking(
     }
     config.installed = false;
     config.active = false;
+    config.submission.mode = SubmissionMode::Draft;
+    config.submission.automatic_submission_authorized = false;
     config.hooks_installed = false;
     config.scheduler_target = None;
-    config.submission.automatic_submission_authorized = false;
     save_tracking_config(data_dir, &config)?;
     let result = serde_json::json!({
         "status": "uninstalled",
@@ -607,28 +711,18 @@ pub(crate) fn uninstall_tracking(
 }
 
 fn require_config(data_dir: &Path) -> Result<TrackingConfig, CompanionError> {
-    load_tracking_config(data_dir)?
-        .filter(|config| config.installed)
-        .ok_or_else(|| {
-            CompanionError::Proposal(
-                "automatic tracking is not configured; run tracking setup first".to_owned(),
-            )
-        })
-}
-
-fn validate_tracking_configuration(config: &TrackingConfig) -> Result<(), CompanionError> {
-    validate_schedule(&config.schedule)?;
-    validate_source_configuration(&config.sources)
-}
-
-fn validate_schedule(schedule: &TrackingSchedule) -> Result<(), CompanionError> {
-    validate_time_and_timezone(&schedule.at, &schedule.timezone)?;
-    if !schedule.weekdays {
+    let config = load_tracking_config(data_dir)?.ok_or_else(|| {
+        CompanionError::Proposal(
+            "automatic tracking is not configured; run tracking setup first".to_owned(),
+        )
+    })?;
+    if !config.installed {
         return Err(CompanionError::Proposal(
-            "tracking schedule must run on weekdays".to_owned(),
+            "automatic tracking is uninstalled or setup is incomplete; run tracking setup first"
+                .to_owned(),
         ));
     }
-    Ok(())
+    Ok(config)
 }
 
 fn select_public_date(raw: Option<&str>, timezone: &str) -> Result<NaiveDate, CompanionError> {

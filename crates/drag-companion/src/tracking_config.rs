@@ -13,6 +13,8 @@ pub(crate) struct TrackingConfig {
     pub(crate) submission: TrackingSubmission,
     pub(crate) scheduler_target: Option<PathBuf>,
     pub(crate) hooks_installed: bool,
+    #[serde(default)]
+    pub(crate) provider_fixture: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,7 @@ impl Default for TrackingConfig {
             },
             scheduler_target: None,
             hooks_installed: false,
+            provider_fixture: None,
         }
     }
 }
@@ -126,24 +129,30 @@ pub(crate) fn configured_sources(
         .map(|path| {
             Ok(TrackingSource {
                 kind: TrackingSourceKind::Git,
-                path: absolute_source_path(path)?,
+                path: stable_source_path(path)?,
                 enabled: true,
             })
         })
         .chain(ics_files.into_iter().map(|path| {
             Ok(TrackingSource {
                 kind: TrackingSourceKind::Calendar,
-                path: absolute_source_path(path)?,
+                path: stable_source_path(path)?,
                 enabled: true,
             })
         }))
         .collect()
 }
 
-fn absolute_source_path(path: PathBuf) -> Result<PathBuf, CompanionError> {
-    std::path::absolute(&path).map_err(|error| {
+pub(crate) fn stable_source_path(path: PathBuf) -> Result<PathBuf, CompanionError> {
+    let absolute = std::path::absolute(&path).map_err(|error| {
         CompanionError::Proposal(format!(
             "could not make configured source path {} absolute: {error}",
+            path.display()
+        ))
+    })?;
+    absolute.canonicalize().map_err(|error| {
+        CompanionError::Proposal(format!(
+            "could not canonicalize configured source path {}: {error}",
             path.display()
         ))
     })
@@ -152,7 +161,7 @@ fn absolute_source_path(path: PathBuf) -> Result<PathBuf, CompanionError> {
 pub(crate) fn claude_code_source() -> Result<TrackingSource, CompanionError> {
     Ok(TrackingSource {
         kind: TrackingSourceKind::ClaudeCode,
-        path: absolute_source_path(default_claude_settings_path())?,
+        path: stable_source_path(default_claude_settings_path())?,
         enabled: true,
     })
 }
@@ -231,10 +240,44 @@ pub(crate) fn migrate_legacy_data_dir(target: &Path, legacy: &Path) -> Result<()
             "tracking state migration interrupted; rerun drag tracking status to resume".to_owned(),
         ));
     }
-    fs::rename(legacy, target).map_err(|source| CompanionError::Write {
-        path: target.to_path_buf(),
-        source,
-    })?;
+    match fs::rename(legacy, target) {
+        Ok(()) => {}
+        Err(error) if is_cross_device_error(&error) => {
+            let staging = target.with_extension(format!("migration-{}", std::process::id()));
+            if staging.exists() {
+                fs::remove_dir_all(&staging).map_err(|source| CompanionError::Write {
+                    path: staging.clone(),
+                    source,
+                })?;
+            }
+            if let Err(copy_error) = copy_directory_durable(legacy, &staging) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(copy_error);
+            }
+            fs::rename(&staging, target).map_err(|source| CompanionError::Write {
+                path: target.to_path_buf(),
+                source,
+            })?;
+            if let Some(parent) = target.parent() {
+                File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|source| CompanionError::Write {
+                        path: parent.to_path_buf(),
+                        source,
+                    })?;
+            }
+            fs::remove_dir_all(legacy).map_err(|source| CompanionError::Write {
+                path: legacy.to_path_buf(),
+                source,
+            })?;
+        }
+        Err(source) => {
+            return Err(CompanionError::Write {
+                path: target.to_path_buf(),
+                source,
+            });
+        }
+    }
     if std::env::var_os("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION").as_deref()
         == Some(std::ffi::OsStr::new("after-move"))
     {
@@ -243,6 +286,65 @@ pub(crate) fn migrate_legacy_data_dir(target: &Path, legacy: &Path) -> Result<()
         ));
     }
     complete_migration_record(target)
+}
+
+#[cfg(unix)]
+fn is_cross_device_error(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(18)
+}
+
+#[cfg(not(unix))]
+fn is_cross_device_error(_error: &std::io::Error) -> bool {
+    false
+}
+
+fn copy_directory_durable(source: &Path, target: &Path) -> Result<(), CompanionError> {
+    fs::create_dir(target).map_err(|source_error| CompanionError::CreateDir {
+        path: target.to_path_buf(),
+        source: source_error,
+    })?;
+    for entry in fs::read_dir(source).map_err(|source_error| CompanionError::Read {
+        path: source.to_path_buf(),
+        source: source_error,
+    })? {
+        let entry = entry.map_err(|source_error| CompanionError::Read {
+            path: source.to_path_buf(),
+            source: source_error,
+        })?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|source_error| CompanionError::Read {
+                path: from.clone(),
+                source: source_error,
+            })?;
+        if file_type.is_dir() {
+            copy_directory_durable(&from, &to)?;
+        } else if file_type.is_file() {
+            fs::copy(&from, &to).map_err(|source_error| CompanionError::Write {
+                path: to.clone(),
+                source: source_error,
+            })?;
+            File::open(&to)
+                .and_then(|file| file.sync_all())
+                .map_err(|source_error| CompanionError::Write {
+                    path: to,
+                    source: source_error,
+                })?;
+        } else {
+            return Err(CompanionError::Proposal(format!(
+                "legacy tracking state contains unsupported file type: {}",
+                from.display()
+            )));
+        }
+    }
+    File::open(target)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|source_error| CompanionError::Write {
+            path: target.to_path_buf(),
+            source: source_error,
+        })
 }
 
 fn finalize_migration_record(target: &Path) -> Result<(), CompanionError> {

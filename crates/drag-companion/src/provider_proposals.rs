@@ -187,6 +187,16 @@ pub(crate) fn propose_from_fixture(
     Ok(result)
 }
 
+pub(crate) fn validate_provider_fixture(path: &Path) -> Result<(), CompanionError> {
+    let raw = fs::read_to_string(path).map_err(|source| CompanionError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_str::<ProviderFixture>(&raw)
+        .map_err(|error| CompanionError::Proposal(format!("invalid fixture: {error}")))?;
+    Ok(())
+}
+
 pub(crate) fn provider_request(bundle: &EvidenceBundle) -> Result<Vec<u8>, CompanionError> {
     let body = serde_json::json!({
         "schemaVersion": PROPOSAL_SCHEMA_VERSION,
