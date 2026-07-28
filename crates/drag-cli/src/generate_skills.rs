@@ -14,7 +14,7 @@ use crate::recipe_registry::{Recipe, RECIPES};
 use crate::tempo_openapi::{self, SkillCatalog, SkillOperation, TEMPO_OPENAPI_URL};
 use crate::{schema, CliError, Rendered};
 
-const LOCAL_SKILLS: [(&str, &str); 4] = [
+const LOCAL_SKILLS: [(&str, &str); 5] = [
     (
         "drag",
         "Operate Tempo Cloud worklogs with Drag. Use when an agent needs to configure Drag, choose a command, inspect its contract, or follow shared automation and safety rules.",
@@ -30,6 +30,10 @@ const LOCAL_SKILLS: [(&str, &str); 4] = [
     (
         "drag-delete",
         "Delete Tempo Cloud worklogs with Drag. Use when the user explicitly asks to preview or delete one or more worklogs by numeric ID.",
+    ),
+    (
+        "drag-tracking",
+        "Operate Drag automatic time tracking. Use when the user asks to configure approved local sources, inspect tracking health, run or review a day, manage the schedule, or change submission policy.",
     ),
 ];
 
@@ -142,6 +146,7 @@ fn render_local_skills() -> Result<Vec<SkillFiles>, CliError> {
         ("log", LOCAL_SKILLS[1].1),
         ("list", LOCAL_SKILLS[2].1),
         ("delete", LOCAL_SKILLS[3].1),
+        ("tracking", LOCAL_SKILLS[4].1),
     ] {
         let command = commands.get(name).ok_or_else(|| {
             CliError::InvalidInput(format!("Drag schema has no '{name}' command"))
@@ -150,6 +155,7 @@ fn render_local_skills() -> Result<Vec<SkillFiles>, CliError> {
             "log" => "drag-log",
             "list" => "drag-list",
             "delete" => "drag-delete",
+            "tracking" => "drag-tracking",
             _ => return Err(CliError::InvalidInput("unknown generated skill".to_owned())),
         };
         skills.push(SkillFiles {
@@ -179,6 +185,7 @@ fn render_shared_skill(commands: &serde_json::Map<String, Value>) -> String {
         ("drag-log", "log"),
         ("drag-list", "list"),
         ("drag-delete", "delete"),
+        ("drag-tracking", "tracking"),
     ] {
         let description = commands
             .get(command)

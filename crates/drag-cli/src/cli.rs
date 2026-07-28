@@ -106,8 +106,139 @@ pub struct TrackingArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum TrackingCommand {
+    /// Configure sources, schedule, and submission policy.
+    Setup(TrackingSetupArgs),
     /// Show tracking configuration, activity, health, and authorization.
     Status,
+    /// Run the complete tracking workflow for a date.
+    Run(TrackingDateArgs),
+    /// Inspect proposals or approve an immutable proposal set.
+    Review(TrackingReviewArgs),
+    /// Pause scheduled tracking without deleting history.
+    Pause,
+    /// Resume scheduled tracking after validating configuration.
+    Resume,
+    /// Remove tracking-owned scheduler and hook files while preserving history.
+    Uninstall,
+    /// Discover, configure, or test local evidence sources.
+    Sources(TrackingSourcesArgs),
+    /// Inspect or update the tracking schedule.
+    Schedule(TrackingScheduleArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingSetupArgs {
+    /// Submission policy: draft, review, or automatic.
+    #[arg(long, value_enum, default_value_t = TrackingSubmissionMode::Draft)]
+    pub mode: TrackingSubmissionMode,
+    /// Explicitly authorize automatic worklog submission.
+    #[arg(long)]
+    pub authorize_automatic: bool,
+    /// Confirm installation of owned host scheduler files.
+    #[arg(long)]
+    pub install_scheduler: bool,
+    /// Confirm installation of owned Claude Code lifecycle hooks.
+    #[arg(long)]
+    pub install_hooks: bool,
+    /// Scheduler unit or launch-agent directory.
+    #[arg(long, value_name = "DIR", requires = "install_scheduler")]
+    pub scheduler_target: Option<PathBuf>,
+    /// Local weekday run time in HH:MM.
+    #[arg(long, default_value = "18:45")]
+    pub at: String,
+    /// IANA timezone or `local`.
+    #[arg(long, default_value = "local")]
+    pub schedule_timezone: String,
+    /// Local Git repository to observe. Repeat for multiple repositories.
+    #[arg(long = "repo", value_name = "DIR")]
+    pub repos: Vec<PathBuf>,
+    /// Local ICS calendar file to observe. Repeat for multiple files.
+    #[arg(long = "ics", value_name = "FILE")]
+    pub ics_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TrackingSubmissionMode {
+    Draft,
+    Review,
+    Automatic,
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingDateArgs {
+    /// Date selector. Defaults to today and accepts Drag date syntax.
+    pub when: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingReviewArgs {
+    /// Date selector. Defaults to today and accepts Drag date syntax.
+    pub when: Option<String>,
+    /// Approve the current immutable proposal set for review-mode submission.
+    #[arg(long)]
+    pub approve: bool,
+    #[command(subcommand)]
+    pub operation: Option<TrackingReviewCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrackingReviewCommand {
+    /// Approve the current immutable proposal set.
+    Approve(TrackingDateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingSourcesArgs {
+    #[command(subcommand)]
+    pub operation: TrackingSourcesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrackingSourcesCommand {
+    /// List supported and configured local evidence sources.
+    List,
+    /// Replace the configured local evidence sources.
+    Configure(TrackingSourceConfigurationArgs),
+    /// Perform a bounded, non-mutating test of configured sources.
+    Test(TrackingDateArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingSourceConfigurationArgs {
+    /// Local Git repository to observe. Repeat for multiple repositories.
+    #[arg(long = "repo", value_name = "DIR")]
+    pub repos: Vec<PathBuf>,
+    /// Local ICS calendar file to observe. Repeat for multiple files.
+    #[arg(long = "ics", value_name = "FILE")]
+    pub ics_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingScheduleArgs {
+    #[command(subcommand)]
+    pub operation: TrackingScheduleCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TrackingScheduleCommand {
+    /// Show the configured schedule and next run.
+    Show,
+    /// Update the configured schedule and owned scheduler files.
+    Update(TrackingScheduleUpdateArgs),
+    /// Pause scheduled tracking.
+    Pause,
+    /// Resume scheduled tracking after validation.
+    Resume,
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingScheduleUpdateArgs {
+    /// Local weekday run time in HH:MM.
+    #[arg(long)]
+    pub at: String,
+    /// IANA timezone or `local`.
+    #[arg(long)]
+    pub schedule_timezone: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

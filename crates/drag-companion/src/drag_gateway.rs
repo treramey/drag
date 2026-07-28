@@ -467,7 +467,17 @@ pub(crate) fn proposal_tempo_account(
 
 pub(crate) fn configured_tempo_work_attributes(
 ) -> Result<std::collections::BTreeMap<String, String>, CompanionError> {
-    let Some(raw) = std::env::var_os(TEMPO_WORK_ATTRIBUTES_ENV) else {
+    let current = std::env::var_os(TEMPO_WORK_ATTRIBUTES_ENV);
+    let legacy = std::env::var_os(LEGACY_TEMPO_WORK_ATTRIBUTES_ENV);
+    if current.is_some() && legacy.is_some() && current != legacy {
+        return Err(reconcile_error(
+            ReconcileErrorKind::SchemaIncompatibility,
+            format!(
+                "{TEMPO_WORK_ATTRIBUTES_ENV} and deprecated {LEGACY_TEMPO_WORK_ATTRIBUTES_ENV} conflict"
+            ),
+        ));
+    }
+    let Some(raw) = current.or(legacy) else {
         return Ok(std::collections::BTreeMap::new());
     };
     let raw = raw.into_string().map_err(|_| {

@@ -207,7 +207,22 @@ fn tracking_status_is_discoverable_from_standard_help() -> Result<(), Box<dyn st
         .output()?;
     assert!(tracking.status.success());
     let stdout = String::from_utf8(tracking.stdout)?;
-    assert!(stdout.contains("status"));
+    for command in [
+        "setup",
+        "status",
+        "run",
+        "review",
+        "pause",
+        "resume",
+        "uninstall",
+        "sources",
+        "schedule",
+    ] {
+        assert!(
+            stdout.contains(command),
+            "missing tracking command {command}"
+        );
+    }
     assert!(stdout.contains("automatic time tracking"));
     Ok(())
 }
@@ -244,7 +259,7 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
     let drag = copied_drag_with_tracking(
         &directory,
         Some(
-            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":1,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
         ),
     )?;
 
@@ -306,7 +321,7 @@ fn tracking_delegation_reports_missing_and_incompatible_processes(
     assert!(error["error"]["message"]
         .as_str()
         .ok_or("incompatible tracking error message")?
-        .contains("expected contract version 1"));
+        .contains("expected contract version 2"));
     Ok(())
 }
 
@@ -336,7 +351,7 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     );
     let body: Value = serde_json::from_slice(&first.stdout)?;
     assert_eq!(body["data"]["scope"], "local");
-    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(8));
+    assert_eq!(body["data"]["skills"].as_array().map(Vec::len), Some(9));
 
     let log_path = directory.path().join("skills/drag-log/SKILL.md");
     let delete_path = directory.path().join("skills/drag-delete/SKILL.md");
@@ -345,6 +360,10 @@ fn local_skill_generation_is_configuration_free_deterministic_and_safe(
     assert!(first_log.contains("--dry-run"));
     let delete = fs::read_to_string(delete_path)?;
     assert!(delete.contains("permanently removes Tempo worklogs"));
+    let tracking = fs::read_to_string(directory.path().join("skills/drag-tracking/SKILL.md"))?;
+    assert!(tracking.contains("drag tracking setup"));
+    assert!(tracking.contains("drag tracking review"));
+    assert!(tracking.contains("Never invoke the hidden `drag-tracking internal`"));
     let index = fs::read_to_string(directory.path().join("docs/skills.md"))?;
     assert!(!index.contains("drag-tempo"));
     for recipe in [
@@ -1145,7 +1164,7 @@ fn schema_documents_safety_contracts() -> Result<(), Box<dyn std::error::Error>>
     assert!(output.status.success());
     let body: Value = serde_json::from_slice(&output.stdout)?;
     let contract = &body["data"];
-    assert_eq!(contract["schemaVersion"], 11);
+    assert_eq!(contract["schemaVersion"], 12);
     assert_eq!(contract["cliVersion"], env!("CARGO_PKG_VERSION"));
     assert_eq!(contract["output"]["successStream"], "stdout");
     assert_eq!(contract["output"]["errorStream"], "stderr");

@@ -30,14 +30,16 @@ const PROPOSAL_ADAPTER: &str = "provider-fixture";
 const MAX_BUNDLE_BYTES: usize = 128 * 1024;
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 64 * 1024;
 const MAX_PROVIDER_ATTEMPTS: u32 = 2;
-const CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
+const CLAUDE_HOOK_COMMAND: &str = "drag-tracking internal claude-hook capture";
+const LEGACY_CLAUDE_HOOK_COMMAND: &str = "drag-companion claude-hook capture";
 const RAW_EVIDENCE_RETENTION_DAYS: u32 = 30;
 const NORMALIZED_EVIDENCE_RETENTION_DAYS: u32 = 90;
 const REPORT_LEDGER_RETENTION_DAYS: u32 = 365;
 const SCHEDULER_SCHEMA_VERSION: u32 = 2;
-const DRAG_MACHINE_CONTRACT_VERSION: u32 = 11;
-const TRACKING_MACHINE_CONTRACT_VERSION: u32 = 1;
-const TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES";
+const DRAG_MACHINE_CONTRACT_VERSION: u32 = 12;
+const TRACKING_MACHINE_CONTRACT_VERSION: u32 = 2;
+const TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_TRACKING_TEMPO_WORK_ATTRIBUTES";
+const LEGACY_TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIBUTES";
 const DEFAULT_SCHEDULE_TIME: &str = "18:45";
 const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
 
@@ -51,10 +53,12 @@ mod execution;
 mod operator_retention;
 mod persistence_journal;
 mod provider_proposals;
+mod public_tracking;
 mod replay;
 mod rollout;
 mod run_coordination;
 mod scheduler;
+mod tracking_config;
 
 pub(crate) use cli_contract::*;
 pub(crate) use collectors::*;
@@ -66,10 +70,12 @@ pub(crate) use execution::*;
 pub(crate) use operator_retention::*;
 pub(crate) use persistence_journal::*;
 pub(crate) use provider_proposals::*;
+pub(crate) use public_tracking::*;
 pub(crate) use replay::*;
 pub(crate) use rollout::*;
 pub(crate) use run_coordination::*;
 pub(crate) use scheduler::*;
+pub(crate) use tracking_config::*;
 
 fn main() {
     let cli = Cli::parse();

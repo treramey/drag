@@ -13,7 +13,8 @@ pub(crate) struct ExecuteResult {
 }
 
 pub(crate) fn live_rollout_enabled() -> bool {
-    std::env::var("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT")
+    std::env::var("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT")
+        .or_else(|_| std::env::var("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT"))
         .ok()
         .as_deref()
         == Some("1")
@@ -29,7 +30,7 @@ pub(crate) fn execute_drag_worklogs(
         || !live_rollout_enabled()
         || !persisted_live_mutation_allowed(data_dir)?
         || scheduler_kill_switch_path(data_dir).exists()
-        || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some()
+        || tracking_kill_switch_active()
     {
         return Ok(ExecuteResult {
             status: "gated",

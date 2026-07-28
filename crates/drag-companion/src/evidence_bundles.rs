@@ -107,14 +107,15 @@ pub(crate) struct BundleContradiction {
 
 pub(crate) fn retention_config() -> Value {
     serde_json::json!({
-        "rawEvidenceDays": retention_days("DRAG_COMPANION_RETENTION_RAW_DAYS", RAW_EVIDENCE_RETENTION_DAYS),
-        "normalizedEvidenceDays": retention_days("DRAG_COMPANION_RETENTION_NORMALIZED_DAYS", NORMALIZED_EVIDENCE_RETENTION_DAYS),
-        "reportsAndLedgerDays": retention_days("DRAG_COMPANION_RETENTION_REPORT_LEDGER_DAYS", REPORT_LEDGER_RETENTION_DAYS),
+        "rawEvidenceDays": retention_days("DRAG_TRACKING_RETENTION_RAW_DAYS", RAW_EVIDENCE_RETENTION_DAYS),
+        "normalizedEvidenceDays": retention_days("DRAG_TRACKING_RETENTION_NORMALIZED_DAYS", NORMALIZED_EVIDENCE_RETENTION_DAYS),
+        "reportsAndLedgerDays": retention_days("DRAG_TRACKING_RETENTION_REPORT_LEDGER_DAYS", REPORT_LEDGER_RETENTION_DAYS),
     })
 }
 
 pub(crate) fn retention_days(env_name: &str, default_days: u32) -> u32 {
     std::env::var(env_name)
+        .or_else(|_| std::env::var(env_name.replace("DRAG_TRACKING_", "DRAG_COMPANION_")))
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(default_days)

@@ -37,15 +37,15 @@ pub(crate) struct RetentionConfig {
 pub(crate) fn retention_config_values() -> RetentionConfig {
     RetentionConfig {
         raw_days: retention_days(
-            "DRAG_COMPANION_RETENTION_RAW_DAYS",
+            "DRAG_TRACKING_RETENTION_RAW_DAYS",
             RAW_EVIDENCE_RETENTION_DAYS,
         ),
         normalized_days: retention_days(
-            "DRAG_COMPANION_RETENTION_NORMALIZED_DAYS",
+            "DRAG_TRACKING_RETENTION_NORMALIZED_DAYS",
             NORMALIZED_EVIDENCE_RETENTION_DAYS,
         ),
         report_ledger_days: retention_days(
-            "DRAG_COMPANION_RETENTION_REPORT_LEDGER_DAYS",
+            "DRAG_TRACKING_RETENTION_REPORT_LEDGER_DAYS",
             REPORT_LEDGER_RETENTION_DAYS,
         ),
     }
@@ -459,7 +459,7 @@ pub(crate) fn run_file_is_protected(path: &Path) -> bool {
 }
 
 pub(crate) fn status_payload(data_dir: &Path) -> Result<Value, CompanionError> {
-    let configured = scheduler_state_path(data_dir).exists();
+    let configured = config_path(data_dir).exists() || scheduler_state_path(data_dir).exists();
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
@@ -587,6 +587,9 @@ pub(crate) fn public_tracking_status(status: &Value) -> Value {
         "scheduler": status["scheduler"],
         "submission": status["submission"],
         "latestRun": status["latestRun"],
+        "sources": status["sources"],
+        "timezone": status["timezone"],
+        "migration": status["configuration"]["migration"],
         "pendingAction": status["pendingAction"],
         "networkAccess": status["networkAccess"],
         "liveMutationAllowed": status["liveMutationAllowed"],

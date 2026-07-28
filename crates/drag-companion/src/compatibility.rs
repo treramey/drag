@@ -11,7 +11,8 @@ fn main() {
     }
 
     let executable = tracking_executable();
-    match Command::new(&executable).args(&arguments).status() {
+    let delegated = translated_arguments(&arguments);
+    match Command::new(&executable).args(&delegated).status() {
         Ok(status) => std::process::exit(status.code().unwrap_or(1)),
         Err(error) => {
             eprintln!(
@@ -19,6 +20,22 @@ fn main() {
             );
             std::process::exit(1);
         }
+    }
+}
+
+fn translated_arguments(arguments: &[OsString]) -> Vec<OsString> {
+    let resume = arguments.iter().position(|argument| argument == "resume");
+    if resume.is_some()
+        && !arguments.iter().any(|argument| argument == "internal")
+        && arguments.iter().any(|argument| {
+            argument == "--date" || argument.to_string_lossy().starts_with("--date=")
+        })
+    {
+        let mut translated = arguments.to_vec();
+        translated.insert(resume.unwrap_or(0), OsString::from("internal"));
+        translated
+    } else {
+        arguments.to_vec()
     }
 }
 

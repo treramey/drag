@@ -22,7 +22,7 @@ use crate::output::Rendered;
 use crate::setup_tui::REDUCED_MOTION_ENV;
 use crate::tempo_openapi::{self, CACHE_DIR_ENV};
 
-const SCHEMA_VERSION: u64 = 11;
+const SCHEMA_VERSION: u64 = 12;
 
 pub(crate) fn schema() -> Rendered {
     let mut clap = Cli::command();
@@ -156,12 +156,13 @@ impl CommandIdentity {
             "delete" => Some(Self::Delete),
             "setup" => Some(Self::Setup),
             "doctor" => Some(Self::Doctor),
-            "tracking" | "tracking status" => Some(Self::Tracking),
+            "tracking" => Some(Self::Tracking),
             "resolve" => Some(Self::Resolve),
             "tempo" => Some(Self::Tempo),
             "schema" => Some(Self::Schema),
             "generate-skills" => Some(Self::GenerateSkills),
             "help" => Some(Self::Help),
+            path if path.starts_with("tracking ") => Some(Self::Tracking),
             _ => None,
         }
     }
@@ -461,9 +462,12 @@ fn command_skill_policy(identity: CommandIdentity) -> Option<CommandSkillPolicy>
             heading: "Read-only resolution policy",
             guidance: "`resolve` verifies a proposed Jira issue key and discovers required Tempo work attributes through Drag's authenticated adapters. It is read-only, returns stable JSON, and must be used by automation before constructing companion payloads that would otherwise rely on seeded resolution rows.",
         }),
+        CommandIdentity::Tracking => Some(CommandSkillPolicy {
+            heading: "Tracking safety policy",
+            guidance: "Use intent-level `drag tracking setup|status|run|review|pause|resume|uninstall`, `drag tracking sources ...`, and `drag tracking schedule ...` commands. Never invoke the hidden `drag-tracking internal` pipeline for normal work. Draft mode cannot submit. Review mode requires `drag tracking review approve DATE` for the current proposal-set digest. Automatic mode requires separate setup authorization and every runtime safety gate.",
+        }),
         CommandIdentity::Setup
         | CommandIdentity::Doctor
-        | CommandIdentity::Tracking
         | CommandIdentity::Tempo
         | CommandIdentity::Schema
         | CommandIdentity::GenerateSkills
@@ -583,50 +587,20 @@ fn command_semantics(identity: CommandIdentity) -> CommandSemantics {
             dry_run: unsupported_dry_run(),
         },
         CommandIdentity::Tracking => CommandSemantics {
-            success: object_schema(
-                &[
-                    "schemaVersion",
-                    "status",
-                    "configuration",
-                    "activity",
-                    "scheduler",
-                    "submission",
-                    "latestRun",
-                    "pendingAction",
-                    "networkAccess",
-                    "liveMutationAllowed",
-                ],
-                json!({
-                    "schemaVersion": {"const": 1},
-                    "status": {"type": "string"},
-                    "configuration": object_schema(
-                        &["configured", "dataDirectory"],
-                        json!({"configured": {"type": "boolean"}, "dataDirectory": {"type": "string"}}),
-                    ),
-                    "activity": object_schema(
-                        &["state", "activeRuns"],
-                        json!({"state": {"type": "string", "enum": ["idle", "running"]}, "activeRuns": {"type": "integer", "minimum": 0}}),
-                    ),
-                    "scheduler": object_schema(
-                        &["installed", "active", "healthy", "killSwitchActive"],
-                        json!({"installed": {"type": "boolean"}, "active": {"type": "boolean"}, "healthy": {"type": "boolean"}, "killSwitchActive": {"type": "boolean"}}),
-                    ),
-                    "submission": object_schema(
-                        &["mode", "automaticSubmissionAuthorized", "effectiveMutationPermission"],
-                        json!({"mode": {"type": "string", "enum": ["draft", "review", "automatic"]}, "automaticSubmissionAuthorized": {"type": "boolean"}, "effectiveMutationPermission": {"type": "boolean"}}),
-                    ),
-                    "latestRun": {"anyOf": [object_schema(
-                        &["selectedDate", "status", "startedAt", "finishedAt"],
-                        json!({"selectedDate": {"type": "string", "format": "date"}, "status": {"type": "string"}, "startedAt": {"type": "string"}, "finishedAt": nullable_schema(json!({"type": "string"}))}),
-                    ), {"type": "null"}]},
-                    "pendingAction": {"type": "string"},
-                    "networkAccess": {"const": false},
-                    "liveMutationAllowed": {"type": "boolean"},
-                }),
-            ),
+            success: tracking_success_schema(),
             error_codes: vec!["usage", "tracking_unavailable", "tracking_incompatible"],
-            side_effects: json!({"status": ["initializeLocalTrackingStateIfMissing"]}),
-            network_access: json!({"status": {}}),
+            side_effects: json!({
+                "status": ["initializeLocalTrackingStateIfMissing"],
+                "setup": ["persistTrackingConfiguration", "explicitlyAuthorizedSchedulerOrHookInstallation"],
+                "run": ["persistResumableRunState", "conditionallySubmitApprovedWorklogs"],
+                "reviewApprove": ["persistProposalSetDigestApproval"],
+                "pauseResume": ["updateSchedulerState"],
+                "uninstall": ["removeOnlyTrackingOwnedFiles", "preserveHistory"]
+            }),
+            network_access: json!({
+                "default": {},
+                "run": {"drag": "read", "tempoMutation": "conditionalOnModeApprovalAndRuntimeGates"}
+            }),
             dry_run: unsupported_dry_run(),
         },
         CommandIdentity::Resolve => CommandSemantics {
@@ -873,10 +847,12 @@ fn command_behavior_contract(identity: CommandIdentity) -> Value {
         }),
         CommandIdentity::Tracking => json!({
             "processBoundary": "drag-tracking executable",
-            "contractVersion": 1,
+            "contractVersion": 2,
             "discovery": ["adjacentExecutable", "PATH"],
             "delegation": "noShellWithInheritedStandardStreamsAndExitStatus",
-            "status": "localOnlyWithoutDragCredentialLoading"
+            "publicCommands": ["setup", "status", "run", "review", "pause", "resume", "uninstall", "sources", "schedule"],
+            "status": "localOnlyWithoutDragCredentialLoading",
+            "internalStages": "hiddenInDragTracking"
         }),
         CommandIdentity::Resolve => json!({
             "boundary": "readOnlyJiraTempoResolution",
@@ -1205,6 +1181,66 @@ fn setup_success_schema() -> Value {
                     "configuration": object_schema(&["status", "credentials"], json!({"status": {"const": "planned"}, "credentials": {"const": "replace"}}))
                 },
                 "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn tracking_success_schema() -> Value {
+    json!({
+        "oneOf": [
+            object_schema(
+                &[
+                    "schemaVersion",
+                    "status",
+                    "configuration",
+                    "activity",
+                    "scheduler",
+                    "submission",
+                    "latestRun",
+                    "pendingAction",
+                    "networkAccess",
+                    "liveMutationAllowed",
+                ],
+                json!({
+                    "schemaVersion": {"const": 2},
+                    "status": {"type": "string"},
+                    "configuration": {"type": "object"},
+                    "activity": {"type": "object"},
+                    "scheduler": {"type": "object"},
+                    "submission": {"type": "object"},
+                    "latestRun": {"type": ["object", "null"]},
+                    "pendingAction": {"type": "string"},
+                    "networkAccess": {"type": "boolean"},
+                    "liveMutationAllowed": {"type": "boolean"}
+                }),
+            ),
+            object_schema(
+                &[
+                    "schemaVersion",
+                    "selectedDate",
+                    "status",
+                    "networkAccess",
+                    "liveMutationAllowed",
+                    "nextSafeAction",
+                ],
+                json!({
+                    "schemaVersion": {"const": 2},
+                    "selectedDate": {"type": "string", "format": "date"},
+                    "status": {"type": "string"},
+                    "networkAccess": {"type": "boolean"},
+                    "liveMutationAllowed": {"type": "boolean"},
+                    "nextSafeAction": {"type": "string"}
+                }),
+            ),
+            {
+                "type": "object",
+                "required": ["networkAccess", "liveMutationAllowed"],
+                "properties": {
+                    "networkAccess": {"type": "boolean"},
+                    "liveMutationAllowed": {"type": "boolean"}
+                },
+                "additionalProperties": true
             }
         ]
     })

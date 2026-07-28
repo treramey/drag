@@ -2,4 +2,6 @@
 "@treramey/drag": minor
 ---
 
-Expose automatic tracking status through Drag and package the new tracking process.
+Make automatic tracking a first-class Drag resource with setup, status, run,
+review, source, schedule, pause, resume, and safe uninstall workflows backed by
+the separately packaged tracking process.

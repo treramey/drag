@@ -111,7 +111,7 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
     let envelope: Value = serde_json::from_slice(&output)?;
     assert_eq!(envelope["ok"], true);
     let status = &envelope["data"];
-    assert_eq!(status["schemaVersion"], 1);
+    assert_eq!(status["schemaVersion"], 2);
     assert_eq!(status["configuration"]["configured"], false);
     assert_eq!(status["activity"]["state"], "idle");
     assert_eq!(status["scheduler"]["healthy"], true);
@@ -124,7 +124,7 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
 
     let contract = json_output(tracking()?.arg("contract"))?;
     assert_eq!(contract["binary"], "drag-tracking");
-    assert_eq!(contract["schemaVersion"], 1);
+    assert_eq!(contract["schemaVersion"], 2);
 
     tracking()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -177,6 +177,212 @@ fn tracking_json_failures_use_stderr_without_loading_credentials(
 }
 
 #[test]
+fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_authorized(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("systemd");
+    let repo = directory.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+
+    tracking()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args(["--output", "json", "setup", "--mode", "automatic"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains(
+            "automatic mode requires separate --authorize-automatic consent",
+        ));
+    assert!(!scheduler_dir.exists());
+
+    let setup = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--mode",
+                "review",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    assert_eq!(setup["status"], "configured");
+    assert_eq!(setup["effects"]["schedulerInstalled"], true);
+    assert_eq!(setup["effects"]["hooksInstalled"], false);
+    assert_eq!(setup["effects"]["automaticSubmissionAuthorized"], false);
+    assert!(scheduler_dir.join("drag-tracking.timer").exists());
+
+    let status = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("status"),
+    )?;
+    assert_eq!(status["submission"]["mode"], "review");
+    assert_eq!(status["scheduler"]["active"], true);
+    assert_eq!(status["sources"][0]["health"], "healthy");
+
+    let uninstalled = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("uninstall"),
+    )?;
+    assert_eq!(uninstalled["historyPreserved"], true);
+    assert!(!scheduler_dir.join("drag-tracking.timer").exists());
+    assert!(data_dir.join("companion.sqlite3").exists());
+    Ok(())
+}
+
+#[test]
+fn public_schedule_aliases_and_run_keep_one_intent_level_result(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("systemd");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+
+    let paused = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "pause"]),
+    )?;
+    assert_eq!(paused["status"], "paused");
+    let resumed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("resume"),
+    )?;
+    assert_eq!(resumed["status"], "active");
+
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["run", "2026-07-24"]),
+    )?;
+    assert_eq!(run["selectedDate"], "2026-07-24");
+    assert_eq!(run["status"], "completed");
+    assert_eq!(run["networkAccess"], false);
+    assert_eq!(run["liveMutationAllowed"], false);
+    assert!(run["phases"].is_array());
+    Ok(())
+}
+
+#[test]
+fn review_approval_is_invalidated_when_the_proposal_set_changes(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&directory, "valid.json", valid_provider_response())?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "internal",
+                "propose",
+                "--date",
+                "2026-03-08",
+                "--fixture",
+                fixture.to_str().ok_or("fixture")?,
+            ]),
+    )?;
+    let connection = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let proposal: String =
+        connection.query_row("SELECT id FROM proposals LIMIT 1", [], |row| row.get(0))?;
+    for (name, value) in [
+        ("tempoAccountId", "account-default"),
+        ("issueKey", "DRAG-150"),
+        ("start", "2026-03-08T13:00:00Z"),
+        ("end", "2026-03-08T14:00:00Z"),
+        ("description", "Implemented proposal adapter"),
+        ("attributes", "{}"),
+    ] {
+        connection.execute(
+            "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![proposal, name, value],
+        )?;
+    }
+
+    let approved = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "approve", "2026-03-08"]),
+    )?;
+    assert_eq!(approved["approval"]["approved"], true);
+    let approved_digest = approved["proposalSetDigest"].clone();
+
+    connection.execute(
+        "UPDATE proposal_drag_resolutions SET value = 'Changed description' WHERE proposal_id = ?1 AND name = 'description'",
+        [&proposal],
+    )?;
+    let changed = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "2026-03-08"]),
+    )?;
+    assert_ne!(changed["proposalSetDigest"], approved_digest);
+    assert_eq!(changed["approval"]["approved"], false);
+    Ok(())
+}
+
+#[test]
+fn default_state_migration_is_atomic_and_refuses_two_active_stores(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let home = directory.path().join("home");
+    let working = directory.path().join("working");
+    let legacy = working.join(".drag-companion");
+    std::fs::create_dir_all(&legacy)?;
+    std::fs::create_dir_all(&home)?;
+    std::fs::write(legacy.join("recovery-record"), "uncertain-operation")?;
+
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env_remove("DRAG_TRACKING_DATA")
+        .env_remove("DRAG_COMPANION_DATA")
+        .arg("status")
+        .assert()
+        .success();
+    let migrated = home.join(".drag/tracking");
+    assert!(!legacy.exists());
+    assert_eq!(
+        std::fs::read_to_string(migrated.join("recovery-record"))?,
+        "uncertain-operation"
+    );
+    assert!(migrated.join("migration.json").exists());
+
+    std::fs::create_dir_all(&legacy)?;
+    tracking()?
+        .current_dir(&working)
+        .env("HOME", &home)
+        .env_remove("DRAG_TRACKING_DATA")
+        .env_remove("DRAG_COMPANION_DATA")
+        .arg("status")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("both legacy tracking state"));
+    Ok(())
+}
+
+#[test]
 fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;
@@ -192,7 +398,7 @@ fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
         .clone();
     let structured: Value = serde_json::from_slice(&structured)?;
     assert_eq!(structured["ok"], true);
-    assert_eq!(structured["data"]["schemaVersion"], 1);
+    assert_eq!(structured["data"]["schemaVersion"], 2);
 
     companion()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -488,23 +694,24 @@ fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
         .assert()
         .success()
         .stdout(predicate::str::contains("status"))
-        .stdout(predicate::str::contains("collect"))
-        .stdout(predicate::str::contains("reconcile"))
+        .stdout(predicate::str::contains("setup"))
+        .stdout(predicate::str::contains("run"))
+        .stdout(predicate::str::contains("review"))
         .stdout(predicate::str::contains("resume"))
-        .stdout(predicate::str::contains("report"))
-        .stdout(predicate::str::contains("log"))
-        .stdout(predicate::str::contains("purge"))
-        .stdout(predicate::str::contains("scheduler"))
-        .stdout(predicate::str::contains("claude-hook"));
+        .stdout(predicate::str::contains("sources"))
+        .stdout(predicate::str::contains("schedule"))
+        .stdout(predicate::str::contains("collect").not())
+        .stdout(predicate::str::contains("reconcile").not())
+        .stdout(predicate::str::contains("claude-hook").not());
 
     companion()?
-        .args(["reconcile", "--help"])
+        .args(["internal", "reconcile", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("--date"));
 
     companion()?
-        .args(["scheduler", "--help"])
+        .args(["internal", "scheduler", "--help"])
         .assert()
         .success()
         .stdout(predicate::str::contains("install"))
@@ -541,16 +748,15 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
     )?;
     assert_eq!(installed["status"], "installed");
     assert_eq!(installed["hostSchedulerMutated"], false);
-    let service = std::fs::read_to_string(systemd.join("drag-companion.service"))?;
-    let catch_up_service =
-        std::fs::read_to_string(systemd.join("drag-companion-catch-up.service"))?;
-    let timer = std::fs::read_to_string(systemd.join("drag-companion.timer"))?;
+    let service = std::fs::read_to_string(systemd.join("drag-tracking.service"))?;
+    let catch_up_service = std::fs::read_to_string(systemd.join("drag-tracking-catch-up.service"))?;
+    let timer = std::fs::read_to_string(systemd.join("drag-tracking.timer"))?;
     assert!(service.contains("scheduler run --date"));
     assert!(service.contains("date +%%F"));
     assert!(catch_up_service.contains("scheduler catch-up"));
     assert!(service.contains("data & state'"));
     assert!(timer.contains("18:45:00"));
-    assert!(timer.contains("Persistent=false"));
+    assert!(timer.contains("Persistent=true"));
     assert_eq!(
         std::fs::read_to_string(systemd.join("unrelated.timer"))?,
         "keep me"
@@ -568,9 +774,9 @@ fn scheduler_installs_systemd_and_launchd_using_explicit_date_command_non_destru
             ])
             .arg(&launchd),
     )?;
-    let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-companion.plist"))?;
+    let plist = std::fs::read_to_string(launchd.join("email.trevors.drag-tracking.plist"))?;
     let catch_up_plist =
-        std::fs::read_to_string(launchd.join("email.trevors.drag-companion.catch-up.plist"))?;
+        std::fs::read_to_string(launchd.join("email.trevors.drag-tracking.catch-up.plist"))?;
     assert!(plist.contains("scheduler run --date"));
     assert!(plist.contains("date +%F"));
     assert!(catch_up_plist.contains("scheduler catch-up"));
@@ -607,7 +813,7 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
     let data = dir.path().join("data");
     let target = dir.path().join("systemd");
     std::fs::create_dir_all(&target)?;
-    std::fs::write(target.join("drag-companion.timer"), "# unrelated timer")?;
+    std::fs::write(target.join("drag-tracking.timer"), "# unrelated timer")?;
 
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -625,13 +831,13 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
             "refusing to overwrite unrelated file",
         ));
     assert_eq!(
-        std::fs::read_to_string(target.join("drag-companion.timer"))?,
+        std::fs::read_to_string(target.join("drag-tracking.timer"))?,
         "# unrelated timer"
     );
 
     std::fs::write(
-        target.join("drag-companion.timer"),
-        "# managed-by=drag-companion\n",
+        target.join("drag-tracking.timer"),
+        "# managed-by=drag-tracking\n",
     )?;
     companion()?
         .args(["--data-dir", data.to_string_lossy().as_ref()])
@@ -658,7 +864,7 @@ fn scheduler_uninstall_removes_only_owned_files_and_preserves_unrelated_configur
             ])
             .arg(&target),
     )?;
-    assert!(!target.join("drag-companion.timer").exists());
+    assert!(!target.join("drag-tracking.timer").exists());
     assert_eq!(
         std::fs::read_to_string(target.join("other.service"))?,
         "keep"
@@ -850,7 +1056,7 @@ fn scheduler_status_reports_drag_schema_compatibility_and_independent_package(
             .args(["--data-dir", dir.path().to_string_lossy().as_ref()])
             .args(["scheduler", "status"]),
     )?;
-    assert_eq!(status["dragMachineContract"]["requiredVersion"], 11);
+    assert_eq!(status["dragMachineContract"]["requiredVersion"], 12);
     assert_eq!(status["dragMachineContract"]["compatible"], true);
     assert_eq!(status["package"]["name"], "drag-tracking");
     assert_eq!(status["package"]["independent"], true);
@@ -1176,7 +1382,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
     let contract: Value = serde_json::from_slice(&output)?;
 
     assert_eq!(contract["binary"], "drag-tracking");
-    assert_eq!(contract["schemaVersion"], 1);
+    assert_eq!(contract["schemaVersion"], 2);
     assert_eq!(contract["defaultMode"], "capture-only");
     assert_eq!(contract["adapters"]["collector"], "fake");
     assert_eq!(contract["adapters"]["mutator"], "disabled");
@@ -1188,7 +1394,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         .as_array()
         .ok_or("top-level live conditions")?
         .iter()
-        .any(|item| item == "execute requires DRAG_COMPANION_LIVE_MUTATION_ROLLOUT=1"));
+        .any(|item| item == "automatic execution requires DRAG_TRACKING_LIVE_MUTATION_ROLLOUT=1"));
 
     let commands = contract["commands"].as_array().ok_or("commands array")?;
     for required in [
@@ -2104,7 +2310,7 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
     let rendered = serde_json::to_string(&installed)?;
     assert_eq!(
         rendered
-            .matches("drag-companion claude-hook capture")
+            .matches("drag-tracking internal claude-hook capture")
             .count(),
         2
     );
@@ -2123,7 +2329,9 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
         removed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
         "echo keep-tool"
     );
-    assert!(!serde_json::to_string(&removed)?.contains("drag-companion claude-hook capture"));
+    assert!(
+        !serde_json::to_string(&removed)?.contains("drag-tracking internal claude-hook capture")
+    );
     Ok(())
 }
 
@@ -2143,7 +2351,7 @@ fn claude_hook_install_defaults_to_the_user_claude_settings_file(
     let installed: Value = serde_json::from_str(&std::fs::read_to_string(settings)?)?;
     assert_eq!(
         serde_json::to_string(&installed)?
-            .matches("drag-companion claude-hook capture")
+            .matches("drag-tracking internal claude-hook capture")
             .count(),
         2
     );
@@ -2582,7 +2790,7 @@ set -euo pipefail
 log="{}/commands.log"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":11,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":12,"name":"drag"}}}}'
   exit 0
 fi
 	if [[ "$*" == *" log "* ]]; then
@@ -2682,7 +2890,7 @@ log="{0}/commands.log"
 state="{0}/remote.jsonl"
 echo "$*" >> "$log"
 if [[ "$*" == *" schema" ]]; then
-  printf '{{"ok":true,"data":{{"schemaVersion":11,"name":"drag"}}}}'
+  printf '{{"ok":true,"data":{{"schemaVersion":12,"name":"drag"}}}}'
   exit 0
 fi
 if [[ "$*" == *" list "* ]]; then
@@ -3012,6 +3220,7 @@ fn ambiguous_remote_acceptance_stops_date_until_resume_reconciles_complete_day(
             &data,
             "--drag-bin",
             drag.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             "2026-03-08",
@@ -3695,7 +3904,7 @@ fn drag_read_blocks_schema_date_partial_and_ambiguous_failures(
     let drag = bash_executable(
         &dir,
         "bad-drag",
-        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":11}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\" schema\" ]]; then printf '{\"ok\":true,\"data\":{\"schemaVersion\":12}}'; exit 0; fi\necho timeout >&2\nexit 1\n",
     )?;
     companion()?
         .args([
@@ -3964,6 +4173,7 @@ fn reconcile_resume_status_persist_phases_and_skip_confirmed_work(
         .args([
             "--data-dir",
             data_dir.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             date,
@@ -4076,6 +4286,7 @@ fn stale_lease_is_recovered_but_unexpired_lease_blocks_takeover(
         .args([
             "--data-dir",
             data_dir.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             date,
@@ -4136,6 +4347,7 @@ fn retries_only_read_only_phases_and_blocked_pre_mutation_never_submits(
         .args([
             "--data-dir",
             data_dir.to_string_lossy().as_ref(),
+            "internal",
             "resume",
             "--date",
             blocked_date,

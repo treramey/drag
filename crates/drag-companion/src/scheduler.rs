@@ -8,6 +8,11 @@ pub(crate) fn scheduler_kill_switch_path(data_dir: &Path) -> PathBuf {
     data_dir.join("scheduler.kill")
 }
 
+pub(crate) fn tracking_kill_switch_active() -> bool {
+    std::env::var_os("DRAG_TRACKING_KILL_SWITCH").is_some()
+        || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some()
+}
+
 pub(crate) fn scheduler_status(data_dir: &Path) -> Result<Value, CompanionError> {
     let state_path = scheduler_state_path(data_dir);
     let state = if state_path.exists() {
@@ -25,9 +30,9 @@ pub(crate) fn scheduler_status(data_dir: &Path) -> Result<Value, CompanionError>
         "status": "ok",
         "schemaVersion": SCHEDULER_SCHEMA_VERSION,
         "enabled": state.get("enabled").and_then(Value::as_bool).unwrap_or(false),
-        "killSwitchActive": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
+        "killSwitchActive": scheduler_kill_switch_path(data_dir).exists() || tracking_kill_switch_active(),
         "mode": DEFAULT_MODE,
-        "shadowModeForced": scheduler_kill_switch_path(data_dir).exists() || std::env::var_os("DRAG_COMPANION_KILL_SWITCH").is_some(),
+        "shadowModeForced": scheduler_kill_switch_path(data_dir).exists() || tracking_kill_switch_active(),
         "dragMachineContract": { "requiredVersion": DRAG_MACHINE_CONTRACT_VERSION, "compatible": true },
         "package": { "name": "drag-tracking", "independent": true },
         "state": state,
@@ -39,6 +44,14 @@ pub(crate) fn install_scheduler(
     drag_bin: &Path,
     args: &SchedulerInstallArgs,
 ) -> Result<(), CompanionError> {
+    print_json(&install_scheduler_files(data_dir, drag_bin, args)?)
+}
+
+pub(crate) fn install_scheduler_files(
+    data_dir: &Path,
+    drag_bin: &Path,
+    args: &SchedulerInstallArgs,
+) -> Result<Value, CompanionError> {
     fs::create_dir_all(&args.target_dir).map_err(|source| CompanionError::CreateDir {
         path: args.target_dir.clone(),
         source,
@@ -48,6 +61,7 @@ pub(crate) fn install_scheduler(
         source,
     })?;
     validate_time_and_timezone(&args.at, &args.timezone)?;
+    remove_owned_legacy_scheduler_files(&args.target_dir)?;
     let timezone_prefix = if args.timezone == "local" {
         String::new()
     } else {
@@ -55,11 +69,11 @@ pub(crate) fn install_scheduler(
     };
     let companion = shell_quote(
         &std::env::current_exe()
-            .unwrap_or_else(|_| PathBuf::from("drag-companion"))
+            .unwrap_or_else(|_| PathBuf::from("drag-tracking"))
             .to_string_lossy(),
     );
     let command = format!(
-        "{}{} --data-dir {} --drag-bin {} scheduler run --date \"$({}date +%F)\"",
+        "{}{} --data-dir {} --drag-bin {} internal scheduler run --date \"$({}date +%F)\"",
         timezone_prefix,
         companion,
         shell_quote(&data_dir.to_string_lossy()),
@@ -67,7 +81,7 @@ pub(crate) fn install_scheduler(
         timezone_prefix,
     );
     let catch_up_command = format!(
-        "{}{} --data-dir {} --drag-bin {} scheduler catch-up",
+        "{}{} --data-dir {} --drag-bin {} internal scheduler catch-up",
         timezone_prefix,
         companion,
         shell_quote(&data_dir.to_string_lossy()),
@@ -80,10 +94,10 @@ pub(crate) fn install_scheduler(
                     .to_owned(),
             ));
         }
-        let plist = args.target_dir.join("email.trevors.drag-companion.plist");
+        let plist = args.target_dir.join("email.trevors.drag-tracking.plist");
         let catch_up_plist = args
             .target_dir
-            .join("email.trevors.drag-companion.catch-up.plist");
+            .join("email.trevors.drag-tracking.catch-up.plist");
         write_owned_file(&plist, &render_launchd(&command, &args.at, &args.timezone)?)?;
         write_owned_file(
             &catch_up_plist,
@@ -91,9 +105,9 @@ pub(crate) fn install_scheduler(
         )?;
         vec![plist, catch_up_plist]
     } else {
-        let service = args.target_dir.join("drag-companion.service");
-        let timer = args.target_dir.join("drag-companion.timer");
-        let catch_up_service = args.target_dir.join("drag-companion-catch-up.service");
+        let service = args.target_dir.join("drag-tracking.service");
+        let timer = args.target_dir.join("drag-tracking.timer");
+        let catch_up_service = args.target_dir.join("drag-tracking-catch-up.service");
         write_owned_file(&service, &render_systemd_service(&command))?;
         write_owned_file(&timer, &render_systemd_timer(&args.at, &args.timezone)?)?;
         write_owned_file(
@@ -114,16 +128,47 @@ pub(crate) fn install_scheduler(
             "operationKeys": [],
         }),
     )?;
-    print_json(
-        &serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
+    Ok(
+        serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
     )
+}
+
+fn remove_owned_legacy_scheduler_files(target_dir: &Path) -> Result<(), CompanionError> {
+    for name in [
+        "drag-companion.service",
+        "drag-companion.timer",
+        "drag-companion-catch-up.service",
+        "email.trevors.drag-companion.plist",
+        "email.trevors.drag-companion.catch-up.plist",
+    ] {
+        let path = target_dir.join(name);
+        if path.exists() && is_owned_scheduler_file(&path)? {
+            fs::remove_file(&path).map_err(|source| CompanionError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn uninstall_scheduler(
     data_dir: &Path,
     args: &SchedulerInstallArgs,
 ) -> Result<(), CompanionError> {
+    print_json(&uninstall_scheduler_files(data_dir, args)?)
+}
+
+pub(crate) fn uninstall_scheduler_files(
+    data_dir: &Path,
+    args: &SchedulerInstallArgs,
+) -> Result<Value, CompanionError> {
     let names = [
+        "drag-tracking.service",
+        "drag-tracking.timer",
+        "drag-tracking-catch-up.service",
+        "email.trevors.drag-tracking.plist",
+        "email.trevors.drag-tracking.catch-up.plist",
         "drag-companion.service",
         "drag-companion.timer",
         "drag-companion-catch-up.service",
@@ -150,12 +195,19 @@ pub(crate) fn uninstall_scheduler(
             "operationKeys": scheduler_status(data_dir)?.get("state").and_then(|s| s.get("operationKeys")).cloned().unwrap_or_else(|| serde_json::json!([])),
         }),
     )?;
-    print_json(
-        &serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": false, "removedFiles": removed }),
+    Ok(
+        serde_json::json!({ "status": "uninstalled", "hostSchedulerMutated": false, "removedFiles": removed }),
     )
 }
 
 pub(crate) fn set_scheduler_enabled(data_dir: &Path, enabled: bool) -> Result<(), CompanionError> {
+    print_json(&set_scheduler_enabled_state(data_dir, enabled)?)
+}
+
+pub(crate) fn set_scheduler_enabled_state(
+    data_dir: &Path,
+    enabled: bool,
+) -> Result<Value, CompanionError> {
     let mut state = scheduler_status(data_dir)?["state"].clone();
     state["schemaVersion"] = serde_json::json!(SCHEDULER_SCHEMA_VERSION);
     state["enabled"] = serde_json::json!(enabled);
@@ -166,8 +218,8 @@ pub(crate) fn set_scheduler_enabled(data_dir: &Path, enabled: bool) -> Result<()
         state["resumable"] = serde_json::json!(true);
     }
     write_scheduler_state(data_dir, state)?;
-    print_json(
-        &serde_json::json!({ "status": if enabled { "enabled" } else { "disabled" }, "hostSchedulerMutated": false }),
+    Ok(
+        serde_json::json!({ "status": if enabled { "enabled" } else { "disabled" }, "hostSchedulerMutated": false }),
     )
 }
 
@@ -265,12 +317,12 @@ pub(crate) fn latest_eligible_missed_workday(
 
 pub(crate) fn render_systemd_service(command: &str) -> String {
     let command = command.replace('%', "%%");
-    format!("# managed-by=drag-companion\n[Unit]\nDescription=Drag companion explicit-date reconciliation\n[Service]\nType=oneshot\nExecStart=/bin/sh -c {}\n", shell_quote(&command))
+    format!("# managed-by=drag-tracking\n[Unit]\nDescription=Drag automatic tracking\n[Service]\nType=oneshot\nExecStart=/bin/sh -c {}\n", shell_quote(&command))
 }
 
 pub(crate) fn render_systemd_catch_up_service(command: &str) -> String {
     let command = command.replace('%', "%%");
-    format!("# managed-by=drag-companion\n[Unit]\nDescription=Catch up missed Drag companion reconciliation after startup\n[Service]\nType=oneshot\nExecStart=/bin/sh -c {}\n[Install]\nWantedBy=default.target\n", shell_quote(&command))
+    format!("# managed-by=drag-tracking\n[Unit]\nDescription=Catch up missed Drag tracking after startup\n[Service]\nType=oneshot\nExecStart=/bin/sh -c {}\n[Install]\nWantedBy=default.target\n", shell_quote(&command))
 }
 
 pub(crate) fn render_systemd_timer(at: &str, timezone: &str) -> Result<String, CompanionError> {
@@ -280,7 +332,7 @@ pub(crate) fn render_systemd_timer(at: &str, timezone: &str) -> Result<String, C
     } else {
         format!(" {timezone}")
     };
-    Ok(format!("# managed-by=drag-companion\n[Unit]\nDescription=Run Drag companion at {at} {timezone}\n[Timer]\nOnCalendar=*-*-* {at}:00{timezone_suffix}\nPersistent=false\nWakeSystem=false\n[Install]\nWantedBy=timers.target\n"))
+    Ok(format!("# managed-by=drag-tracking\n[Unit]\nDescription=Run Drag automatic tracking at {at} {timezone}\n[Timer]\nOnCalendar=Mon..Fri *-*-* {at}:00{timezone_suffix}\nPersistent=true\n[Install]\nWantedBy=timers.target\n"))
 }
 
 pub(crate) fn render_launchd(
@@ -290,11 +342,11 @@ pub(crate) fn render_launchd(
 ) -> Result<String, CompanionError> {
     validate_time_and_timezone(at, timezone)?;
     let (hour, minute) = at.split_once(':').unwrap_or(("18", "45"));
-    Ok(format!("<!-- managed-by=drag-companion timezone={} -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-companion</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{}</string></array><key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict></dict></plist>\n", xml_escape(timezone), xml_escape(command)))
+    Ok(format!("<!-- managed-by=drag-tracking timezone={} -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-tracking</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{}</string></array><key>StartCalendarInterval</key><dict><key>Hour</key><integer>{hour}</integer><key>Minute</key><integer>{minute}</integer></dict></dict></plist>\n", xml_escape(timezone), xml_escape(command)))
 }
 
 pub(crate) fn render_launchd_catch_up(command: &str) -> Result<String, CompanionError> {
-    Ok(format!("<!-- managed-by=drag-companion timezone=local -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-companion.catch-up</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{}</string></array><key>RunAtLoad</key><true/></dict></plist>\n", xml_escape(command)))
+    Ok(format!("<!-- managed-by=drag-tracking timezone=local -->\n<plist version=\"1.0\"><dict><key>Label</key><string>email.trevors.drag-tracking.catch-up</string><key>ProgramArguments</key><array><string>/bin/sh</string><string>-lc</string><string>{}</string></array><key>RunAtLoad</key><true/></dict></plist>\n", xml_escape(command)))
 }
 
 pub(crate) fn shell_quote(value: &str) -> String {
@@ -338,7 +390,8 @@ pub(crate) fn is_owned_scheduler_file(path: &Path) -> Result<bool, CompanionErro
         path: path.to_path_buf(),
         source,
     })?;
-    Ok(content.contains("managed-by=drag-companion"))
+    Ok(content.contains("managed-by=drag-tracking")
+        || content.contains("managed-by=drag-companion"))
 }
 
 pub(crate) fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {

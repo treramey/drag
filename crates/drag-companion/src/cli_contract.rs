@@ -12,7 +12,7 @@ pub(crate) struct Cli {
     #[arg(long, global = true, value_enum)]
     pub(crate) output: Option<TrackingOutputMode>,
 
-    /// Directory for companion state. Defaults to .drag-companion in the current directory.
+    /// Tracking state directory. Defaults to ~/.drag/tracking.
     #[arg(long, global = true, value_name = "DIR")]
     pub(crate) data_dir: Option<PathBuf>,
 
@@ -32,50 +32,216 @@ pub(crate) enum TrackingOutputMode {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Show companion state and safety posture.
+    /// Configure sources, schedule, and submission policy.
+    Setup(PublicSetupArgs),
+    /// Show tracking state and safety posture.
     Status,
+    /// Run the complete tracking workflow for one selected date.
+    Run(PublicDateArgs),
+    /// Inspect or approve the immutable proposal set for one selected date.
+    Review(PublicReviewArgs),
+    /// Pause scheduled tracking without deleting history.
+    Pause,
+    /// Resume scheduled tracking after validating configuration.
+    #[command(name = "resume")]
+    ResumeTracking,
+    /// Remove tracking-owned scheduler and hook files while preserving history.
+    Uninstall,
+    /// Discover, configure, or test local evidence sources.
+    Sources(PublicSourcesArgs),
+    /// Inspect or update the tracking schedule.
+    Schedule(PublicScheduleArgs),
+    /// Low-level diagnostics and recovery operations.
+    #[command(hide = true)]
+    Internal(InternalArgs),
     /// Collect fake adapter observations without network access.
+    #[command(hide = true)]
     Collect(CollectArgs),
     /// Capture one explicit-date fake evidence event in the append-only journal.
+    #[command(hide = true)]
     Capture(DateArgs),
     /// Import append-only journal events into the canonical SQLite store.
+    #[command(hide = true)]
     Import,
     /// Run an explicit-date fake reconciliation and persist a terminal result.
+    #[command(hide = true)]
     Reconcile(DateArgs),
-    /// Resume a previously captured explicit-date run without live mutation.
-    Resume(DateArgs),
     /// Print a persisted explicit-date terminal report.
+    #[command(hide = true)]
     Report(DateArgs),
     /// Print a secret-safe structured JSON operator log for one explicit local date.
+    #[command(hide = true)]
     Log(DateArgs),
     /// Print a byte-stable minimized evidence bundle for one explicit local date.
+    #[command(hide = true)]
     Bundle(DateArgs),
     /// Generate schema-constrained worklog proposals from a minimized bundle and offline provider fixture.
+    #[command(hide = true)]
     Propose(ProposeArgs),
     /// Read the complete selected Tempo day through Drag without mutation.
+    #[command(hide = true)]
     Read(DateArgs),
     /// Audit proposals against existing Tempo worklogs through Drag without mutation.
+    #[command(hide = true)]
     Audit(AuditArgs),
     /// Preview exact structured Drag worklog payloads through dry-run only.
+    #[command(hide = true)]
     Preview(PreviewArgs),
     /// Execute approved payloads through Drag with an idempotent operation ledger.
+    #[command(hide = true)]
     Execute(ExecuteArgs),
     /// Inspect and advance persisted staged autonomy rollout gates.
+    #[command(hide = true)]
     Rollout(RolloutArgs),
     /// Replay recorded historical workday fixtures without external services.
+    #[command(hide = true)]
     Replay(ReplayArgs),
     /// Inspect the durable mutation operation ledger for tests and operators.
+    #[command(hide = true)]
     ProcessSpy(DateArgs),
     /// Remove persisted capture-only companion state while protecting recovery records by default.
+    #[command(hide = true)]
     Purge(PurgeArgs),
     /// Enforce age-based privacy retention safely and report compacted classes.
+    #[command(hide = true)]
     Retention(RetentionArgs),
     /// Install, inspect, remove, catch up, or run scheduler-safe explicit-date reconciliation.
+    #[command(hide = true)]
     Scheduler(SchedulerArgs),
     /// Install, remove, or capture Claude Code SessionStart/SessionEnd hooks.
+    #[command(hide = true)]
     ClaudeHook(ClaudeHookArgs),
     /// Print the machine-readable command and side-effect contract.
+    #[command(hide = true)]
     Contract,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SubmissionMode {
+    Draft,
+    Review,
+    Automatic,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicSetupArgs {
+    #[arg(long, value_enum, default_value_t = SubmissionMode::Draft)]
+    pub(crate) mode: SubmissionMode,
+    /// Separately authorize automatic worklog submission.
+    #[arg(long)]
+    pub(crate) authorize_automatic: bool,
+    /// Confirm installation of tracking-owned scheduler files.
+    #[arg(long)]
+    pub(crate) install_scheduler: bool,
+    /// Confirm installation of tracking-owned Claude Code hooks.
+    #[arg(long)]
+    pub(crate) install_hooks: bool,
+    #[arg(long, value_name = "DIR", requires = "install_scheduler")]
+    pub(crate) scheduler_target: Option<PathBuf>,
+    #[arg(long, default_value = DEFAULT_SCHEDULE_TIME)]
+    pub(crate) at: String,
+    #[arg(long, default_value = DEFAULT_SCHEDULE_TIMEZONE)]
+    pub(crate) schedule_timezone: String,
+    #[arg(long = "repo", value_name = "DIR")]
+    pub(crate) repos: Vec<PathBuf>,
+    #[arg(long = "ics", value_name = "FILE")]
+    pub(crate) ics_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicDateArgs {
+    /// Drag-style date selector; defaults to today.
+    pub(crate) when: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicReviewArgs {
+    /// Drag-style date selector; defaults to today.
+    pub(crate) when: Option<String>,
+    /// Approve the current immutable proposal set.
+    #[arg(long)]
+    pub(crate) approve: bool,
+    #[command(subcommand)]
+    pub(crate) operation: Option<PublicReviewOperation>,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PublicReviewOperation {
+    Approve(PublicDateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicSourcesArgs {
+    #[command(subcommand)]
+    pub(crate) operation: PublicSourcesOperation,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PublicSourcesOperation {
+    List,
+    Configure(PublicSourceConfigurationArgs),
+    Test(PublicDateArgs),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicSourceConfigurationArgs {
+    #[arg(long = "repo", value_name = "DIR")]
+    pub(crate) repos: Vec<PathBuf>,
+    #[arg(long = "ics", value_name = "FILE")]
+    pub(crate) ics_files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicScheduleArgs {
+    #[command(subcommand)]
+    pub(crate) operation: PublicScheduleOperation,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum PublicScheduleOperation {
+    Show,
+    Update(PublicScheduleUpdateArgs),
+    Pause,
+    Resume,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct PublicScheduleUpdateArgs {
+    #[arg(long)]
+    pub(crate) at: String,
+    #[arg(long)]
+    pub(crate) schedule_timezone: Option<String>,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct InternalArgs {
+    #[command(subcommand)]
+    pub(crate) command: InternalCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub(crate) enum InternalCommand {
+    Collect(CollectArgs),
+    Capture(DateArgs),
+    Import,
+    Reconcile(DateArgs),
+    Resume(DateArgs),
+    Report(DateArgs),
+    Log(DateArgs),
+    Bundle(DateArgs),
+    Propose(ProposeArgs),
+    Read(DateArgs),
+    Audit(AuditArgs),
+    Preview(PreviewArgs),
+    Execute(ExecuteArgs),
+    Rollout(RolloutArgs),
+    Replay(ReplayArgs),
+    ProcessSpy(DateArgs),
+    Purge(PurgeArgs),
+    Retention(RetentionArgs),
+    Scheduler(SchedulerArgs),
+    ClaudeHook(ClaudeHookArgs),
 }
 
 #[derive(Debug, Args)]

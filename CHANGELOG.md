@@ -7,9 +7,11 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ### Added
 
-- First-class `drag tracking status` delegation to the separately packaged
-  `drag-tracking` process, with versioned compatibility checks, human and JSON
-  health summaries, and a one-release `drag-companion` compatibility shim.
+- First-class `drag tracking` setup, status, run, review, source, schedule,
+  pause, resume, and safe uninstall workflows delegated to the separately
+  packaged `drag-tracking` process, with explicit effect authorization,
+  digest-bound review approval, state migration, versioned compatibility
+  checks, and a one-release `drag-companion` compatibility shim.
 - Portable Agent Skill recipes for coding-session logging, read-only daily and
   weekly audits, and explicitly authorized create-first worklog correction.
 - Conservative `read`, `mutation`, and `ambiguous` effect labels in generated

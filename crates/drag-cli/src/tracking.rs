@@ -3,10 +3,13 @@ use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
-use crate::cli::{TrackingArgs, TrackingCommand};
+use crate::cli::{
+    TrackingArgs, TrackingCommand, TrackingReviewCommand, TrackingScheduleCommand,
+    TrackingSourcesCommand, TrackingSubmissionMode,
+};
 use crate::{CliError, ResolvedOutputMode};
 
-const TRACKING_CONTRACT_VERSION: u64 = 1;
+const TRACKING_CONTRACT_VERSION: u64 = 2;
 
 pub(crate) fn run(args: TrackingArgs, mode: ResolvedOutputMode) -> Result<u8, CliError> {
     let executable = tracking_executable();
@@ -19,8 +22,112 @@ pub(crate) fn run(args: TrackingArgs, mode: ResolvedOutputMode) -> Result<u8, Cl
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     match args.command {
+        TrackingCommand::Setup(args) => {
+            command.args(["setup", "--mode", submission_mode_name(args.mode)]);
+            if args.authorize_automatic {
+                command.arg("--authorize-automatic");
+            }
+            if args.install_scheduler {
+                command.arg("--install-scheduler");
+            }
+            if args.install_hooks {
+                command.arg("--install-hooks");
+            }
+            if let Some(target) = args.scheduler_target {
+                command.args(["--scheduler-target".as_ref(), target.as_os_str()]);
+            }
+            command.args([
+                "--at",
+                &args.at,
+                "--schedule-timezone",
+                &args.schedule_timezone,
+            ]);
+            for repo in args.repos {
+                command.args(["--repo".as_ref(), repo.as_os_str()]);
+            }
+            for file in args.ics_files {
+                command.args(["--ics".as_ref(), file.as_os_str()]);
+            }
+        }
         TrackingCommand::Status => {
             command.arg("status");
+        }
+        TrackingCommand::Run(args) => {
+            command.arg("run");
+            if let Some(when) = args.when {
+                command.arg(when);
+            }
+        }
+        TrackingCommand::Review(args) => {
+            command.arg("review");
+            match args.operation {
+                Some(TrackingReviewCommand::Approve(date)) => {
+                    command.arg("approve");
+                    if let Some(when) = date.when {
+                        command.arg(when);
+                    }
+                }
+                None => {
+                    if let Some(when) = args.when {
+                        command.arg(when);
+                    }
+                    if args.approve {
+                        command.arg("--approve");
+                    }
+                }
+            }
+        }
+        TrackingCommand::Pause => {
+            command.arg("pause");
+        }
+        TrackingCommand::Resume => {
+            command.arg("resume");
+        }
+        TrackingCommand::Uninstall => {
+            command.arg("uninstall");
+        }
+        TrackingCommand::Sources(args) => {
+            command.arg("sources");
+            match args.operation {
+                TrackingSourcesCommand::List => {
+                    command.arg("list");
+                }
+                TrackingSourcesCommand::Configure(args) => {
+                    command.arg("configure");
+                    for repo in args.repos {
+                        command.args(["--repo".as_ref(), repo.as_os_str()]);
+                    }
+                    for file in args.ics_files {
+                        command.args(["--ics".as_ref(), file.as_os_str()]);
+                    }
+                }
+                TrackingSourcesCommand::Test(args) => {
+                    command.arg("test");
+                    if let Some(when) = args.when {
+                        command.arg(when);
+                    }
+                }
+            }
+        }
+        TrackingCommand::Schedule(args) => {
+            command.arg("schedule");
+            match args.operation {
+                TrackingScheduleCommand::Show => {
+                    command.arg("show");
+                }
+                TrackingScheduleCommand::Update(args) => {
+                    command.args(["update", "--at", &args.at]);
+                    if let Some(timezone) = args.schedule_timezone {
+                        command.args(["--schedule-timezone", &timezone]);
+                    }
+                }
+                TrackingScheduleCommand::Pause => {
+                    command.arg("pause");
+                }
+                TrackingScheduleCommand::Resume => {
+                    command.arg("resume");
+                }
+            }
         }
     }
     let status = command.status().map_err(|error| {
@@ -33,6 +140,14 @@ pub(crate) fn run(args: TrackingArgs, mode: ResolvedOutputMode) -> Result<u8, Cl
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+fn submission_mode_name(mode: TrackingSubmissionMode) -> &'static str {
+    match mode {
+        TrackingSubmissionMode::Draft => "draft",
+        TrackingSubmissionMode::Review => "review",
+        TrackingSubmissionMode::Automatic => "automatic",
+    }
 }
 
 fn output_name(mode: ResolvedOutputMode) -> &'static str {
