@@ -571,11 +571,22 @@ fn next_run_description(config: &TrackingConfig) -> Value {
 }
 
 fn migration_status(data_dir: &Path) -> Value {
-    if data_dir.join("migration.json").exists() {
-        serde_json::json!({"status": "completed", "legacyStatePreserved": true})
-    } else {
-        serde_json::json!({"status": "notRequired"})
-    }
+    fs::read_to_string(data_dir.join("migration.json"))
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .map(|record| {
+            serde_json::json!({
+                "status": record["status"],
+                "legacyStatePreserved": true,
+                "recoveryAction": record["recoveryAction"]
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "status": "notRequired",
+                "recoveryAction": "no migration recovery action required"
+            })
+        })
 }
 
 fn print_public(

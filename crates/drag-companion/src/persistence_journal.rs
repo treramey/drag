@@ -63,12 +63,14 @@ pub(crate) fn now_string() -> String {
 }
 
 pub(crate) fn retention_now() -> Result<DateTime<Utc>, CompanionError> {
-    match std::env::var("DRAG_COMPANION_RETENTION_NOW") {
+    match std::env::var("DRAG_TRACKING_RETENTION_NOW")
+        .or_else(|_| std::env::var("DRAG_COMPANION_RETENTION_NOW"))
+    {
         Ok(value) => DateTime::parse_from_rfc3339(&value)
             .map(|value| value.with_timezone(&Utc))
             .map_err(|error| {
                 CompanionError::Proposal(format!(
-                    "DRAG_COMPANION_RETENTION_NOW must be RFC3339: {error}"
+                    "DRAG_TRACKING_RETENTION_NOW must be RFC3339: {error}"
                 ))
             }),
         Err(_) => Ok(Utc::now()),

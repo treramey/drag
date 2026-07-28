@@ -119,6 +119,7 @@ pub(crate) fn configured_sources(
 }
 
 pub(crate) fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, CompanionError> {
+    validate_tracking_environment()?;
     if let Some(path) = explicit {
         return Ok(path);
     }
@@ -140,6 +141,7 @@ pub(crate) fn resolve_data_dir(explicit: Option<PathBuf>) -> Result<PathBuf, Com
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     let target = home.join(".drag/tracking");
+    finalize_migration_record(&target)?;
     migrate_legacy_data_dir(&target, &PathBuf::from(".drag-companion"))?;
     Ok(target)
 }
@@ -161,14 +163,74 @@ pub(crate) fn migrate_legacy_data_dir(target: &Path, legacy: &Path) -> Result<()
             source,
         })?;
     }
+    atomic_write(
+        &legacy.join("migration.json"),
+        br#"{"schemaVersion":1,"source":".drag-companion","status":"inProgress","recoveryAction":"rerun drag tracking status"}"#,
+    )?;
+    if std::env::var_os("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION").as_deref()
+        == Some(std::ffi::OsStr::new("1"))
+    {
+        return Err(CompanionError::Proposal(
+            "tracking state migration interrupted; rerun drag tracking status to resume".to_owned(),
+        ));
+    }
     fs::rename(legacy, target).map_err(|source| CompanionError::Write {
         path: target.to_path_buf(),
         source,
     })?;
+    if std::env::var_os("DRAG_TRACKING_TEST_INTERRUPT_MIGRATION").as_deref()
+        == Some(std::ffi::OsStr::new("after-move"))
+    {
+        return Err(CompanionError::Proposal(
+            "tracking state migration interrupted; rerun drag tracking status to resume".to_owned(),
+        ));
+    }
+    complete_migration_record(target)
+}
+
+fn finalize_migration_record(target: &Path) -> Result<(), CompanionError> {
+    let path = target.join("migration.json");
+    let in_progress = fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|record| record["status"].as_str().map(str::to_owned))
+        .as_deref()
+        == Some("inProgress");
+    if in_progress {
+        complete_migration_record(target)?;
+    }
+    Ok(())
+}
+
+fn complete_migration_record(target: &Path) -> Result<(), CompanionError> {
     atomic_write(
         &target.join("migration.json"),
-        br#"{"schemaVersion":1,"source":".drag-companion","status":"completed"}"#,
+        br#"{"schemaVersion":1,"source":".drag-companion","status":"completed","recoveryAction":"pause tracking, move the directory back to .drag-companion, and reinstall the previous release"}"#,
     )
+}
+
+fn validate_tracking_environment() -> Result<(), CompanionError> {
+    for suffix in [
+        "DATA",
+        "KILL_SWITCH",
+        "LIVE_MUTATION_ROLLOUT",
+        "RETENTION_NOW",
+        "RETENTION_RAW_DAYS",
+        "RETENTION_NORMALIZED_DAYS",
+        "RETENTION_REPORT_LEDGER_DAYS",
+        "TEMPO_WORK_ATTRIBUTES",
+    ] {
+        let current = format!("DRAG_TRACKING_{suffix}");
+        let legacy = format!("DRAG_COMPANION_{suffix}");
+        let current_value = std::env::var_os(&current);
+        let legacy_value = std::env::var_os(&legacy);
+        if matches!((&current_value, &legacy_value), (Some(left), Some(right)) if left != right) {
+            return Err(CompanionError::Proposal(format!(
+                "{current} and deprecated {legacy} conflict; remove one or set both to the same value"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn environment_enabled(current: &str, legacy: &str) -> Result<bool, CompanionError> {
