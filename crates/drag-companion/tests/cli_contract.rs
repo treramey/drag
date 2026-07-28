@@ -310,6 +310,12 @@ fn public_setup_keeps_scheduler_hooks_and_automatic_submission_separately_author
         preserved["successfulOperationKeys"][0],
         "scheduler.run.2026-07-24"
     );
+    let repeated_uninstall = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .arg("uninstall"),
+    )?;
+    assert_eq!(repeated_uninstall["status"], "uninstalled");
     tracking()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
         .args(["run", "2026-07-25"])
@@ -332,6 +338,7 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
 
     json_output(
         tracking()?
+            .current_dir(directory.path())
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args([
                 "setup",
@@ -339,9 +346,16 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
                 repo.to_string_lossy().as_ref(),
                 "--install-scheduler",
                 "--scheduler-target",
-                scheduler_dir.to_string_lossy().as_ref(),
+                "scheduler",
             ]),
     )?;
+
+    let persisted_config: Value =
+        serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
+    assert_eq!(
+        persisted_config["schedulerTarget"],
+        scheduler_dir.to_string_lossy().as_ref()
+    );
 
     let shown = json_output(
         tracking()?
@@ -353,6 +367,24 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
     assert_eq!(shown["active"], true);
     assert_eq!(shown["health"]["healthy"], true);
     assert!(shown["nextRun"].is_string());
+
+    let scheduler_state_path = data_dir.join("scheduler.json");
+    let mut legacy_state: Value =
+        serde_json::from_str(&std::fs::read_to_string(&scheduler_state_path)?)?;
+    legacy_state
+        .as_object_mut()
+        .ok_or("scheduler state object")?
+        .remove("installedFileHashes");
+    std::fs::write(
+        &scheduler_state_path,
+        serde_json::to_vec_pretty(&legacy_state)?,
+    )?;
+    let unknown_integrity = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "show"]),
+    )?;
+    assert_eq!(unknown_integrity["health"]["healthy"], false);
 
     let updated = json_output(
         tracking()?
@@ -383,10 +415,16 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
     let repeated_setup = json_output(
         tracking()?
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
-            .args(["setup", "--repo", repo.to_string_lossy().as_ref()]),
+            .args([
+                "setup",
+                "--repo",
+                repo.to_string_lossy().as_ref(),
+                "--at",
+                "16:15",
+            ]),
     )?;
     assert_eq!(repeated_setup["active"], false);
-    assert_eq!(repeated_setup["schedule"]["at"], "17:30");
+    assert_eq!(repeated_setup["schedule"]["at"], "16:15");
     let repeated_config: Value =
         serde_json::from_str(&std::fs::read_to_string(data_dir.join("config.json"))?)?;
     assert_eq!(
@@ -444,6 +482,40 @@ fn public_schedule_lifecycle_reports_health_and_resume_validates_configuration(
             .arg("pause"),
     )?;
     assert_eq!(top_level_pause["status"], "paused");
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+#[test]
+fn schedule_inspection_and_repair_do_not_open_the_run_store(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let scheduler_dir = directory.path().join("scheduler");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "setup",
+                "--install-scheduler",
+                "--scheduler-target",
+                scheduler_dir.to_string_lossy().as_ref(),
+            ]),
+    )?;
+    std::fs::write(data_dir.join("companion.sqlite3"), "not a sqlite database")?;
+
+    let shown = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "show"]),
+    )?;
+    assert_eq!(shown["health"]["healthy"], true);
+    let updated = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["schedule", "update", "--at", "17:30"]),
+    )?;
+    assert_eq!(updated["schedule"]["at"], "17:30");
     Ok(())
 }
 

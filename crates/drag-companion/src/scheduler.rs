@@ -61,17 +61,17 @@ pub(crate) fn install_scheduler_files(
         ));
     }
     let mut state = scheduler_status(data_dir)?["state"].clone();
+    let target_dir = absolute_path(&args.target_dir)?;
     let installed = if args.platform == "launchd" {
         vec![
-            args.target_dir.join("email.trevors.drag-tracking.plist"),
-            args.target_dir
-                .join("email.trevors.drag-tracking.catch-up.plist"),
+            target_dir.join("email.trevors.drag-tracking.plist"),
+            target_dir.join("email.trevors.drag-tracking.catch-up.plist"),
         ]
     } else {
         vec![
-            args.target_dir.join("drag-tracking.service"),
-            args.target_dir.join("drag-tracking.timer"),
-            args.target_dir.join("drag-tracking-catch-up.service"),
+            target_dir.join("drag-tracking.service"),
+            target_dir.join("drag-tracking.timer"),
+            target_dir.join("drag-tracking-catch-up.service"),
         ]
     };
     preflight_scheduler_destinations(&installed)?;
@@ -117,15 +117,15 @@ pub(crate) fn install_scheduler_files(
             render_systemd_catch_up_service(&catch_up_command),
         ]
     };
-    fs::create_dir_all(&args.target_dir).map_err(|source| CompanionError::CreateDir {
-        path: args.target_dir.clone(),
+    fs::create_dir_all(&target_dir).map_err(|source| CompanionError::CreateDir {
+        path: target_dir.clone(),
         source,
     })?;
     fs::create_dir_all(data_dir).map_err(|source| CompanionError::CreateDir {
         path: data_dir.to_path_buf(),
         source,
     })?;
-    remove_owned_legacy_scheduler_files(&args.target_dir)?;
+    remove_owned_legacy_scheduler_files(&target_dir)?;
     for (path, content) in installed.iter().zip(rendered) {
         write_owned_file(path, &content)?;
     }
@@ -158,6 +158,18 @@ pub(crate) fn install_scheduler_files(
     Ok(
         serde_json::json!({ "status": "installed", "hostSchedulerMutated": false, "installedFiles": installed }),
     )
+}
+
+pub(crate) fn absolute_path(path: &Path) -> Result<PathBuf, CompanionError> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .map_err(|source| CompanionError::Read {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn preflight_scheduler_destinations(paths: &[PathBuf]) -> Result<(), CompanionError> {
@@ -493,11 +505,18 @@ pub(crate) fn scheduler_files_healthy(state: &Value) -> bool {
             hashes
                 .and_then(|hashes| hashes.get(path.to_string_lossy().as_ref()))
                 .and_then(Value::as_str)
-                .is_none_or(|expected| {
+                .is_some_and(|expected| {
                     fs::read_to_string(path).is_ok_and(|content| sha256_str(&content) == expected)
                 })
         })
     })
+}
+
+pub(crate) fn scheduler_files_installed(state: &Value) -> bool {
+    state
+        .get("installedFiles")
+        .and_then(Value::as_array)
+        .is_some_and(|files| !files.is_empty())
 }
 
 pub(crate) fn write_owned_file(path: &Path, content: &str) -> Result<(), CompanionError> {

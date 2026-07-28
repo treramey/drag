@@ -28,7 +28,9 @@ pub(crate) fn setup_tracking(
     validate_source_configuration(&sources)?;
     config.installed = true;
     config.sources = sources;
-    if args.scheduler_target.is_some() || config.scheduler_target.is_none() {
+    let schedule_was_explicit =
+        args.at != DEFAULT_SCHEDULE_TIME || args.schedule_timezone != DEFAULT_SCHEDULE_TIMEZONE;
+    if config.scheduler_target.is_none() || schedule_was_explicit {
         config.schedule = TrackingSchedule {
             weekdays: true,
             at: args.at.clone(),
@@ -41,6 +43,7 @@ pub(crate) fn setup_tracking(
     };
 
     let scheduler = if let Some(target_dir) = args.scheduler_target {
+        let target_dir = absolute_path(&target_dir)?;
         let install = SchedulerInstallArgs {
             platform: default_scheduler_platform().to_owned(),
             target_dir: target_dir.clone(),
@@ -447,15 +450,15 @@ pub(crate) fn show_schedule(
 ) -> Result<(), CompanionError> {
     let config = require_config(data_dir)?;
     validate_schedule(&config.schedule)?;
-    let status = status_payload(data_dir)?;
+    let status = scheduler_status(data_dir)?;
     let result = serde_json::json!({
         "schedule": config.schedule,
         "active": config.active,
         "nextRun": next_run_description(&config),
         "health": {
-            "installed": status["scheduler"]["installed"],
-            "healthy": status["scheduler"]["healthy"],
-            "killSwitchActive": status["scheduler"]["killSwitchActive"]
+            "installed": scheduler_files_installed(&status["state"]),
+            "healthy": scheduler_files_healthy(&status["state"]),
+            "killSwitchActive": status["killSwitchActive"]
         },
         "networkAccess": false,
         "liveMutationAllowed": false
@@ -495,16 +498,16 @@ pub(crate) fn update_schedule(
         None
     };
     save_tracking_config(data_dir, &config)?;
-    let status = status_payload(data_dir)?;
+    let status = scheduler_status(data_dir)?;
     let result = serde_json::json!({
         "status": "updated",
         "schedule": config.schedule,
         "active": config.active,
         "nextRun": next_run_description(&config),
         "health": {
-            "installed": status["scheduler"]["installed"],
-            "healthy": status["scheduler"]["healthy"],
-            "killSwitchActive": status["scheduler"]["killSwitchActive"]
+            "installed": scheduler_files_installed(&status["state"]),
+            "healthy": scheduler_files_healthy(&status["state"]),
+            "killSwitchActive": status["killSwitchActive"]
         },
         "scheduler": scheduler,
         "networkAccess": false,
@@ -560,7 +563,11 @@ pub(crate) fn uninstall_tracking(
     data_dir: &Path,
     output: Option<TrackingOutputMode>,
 ) -> Result<(), CompanionError> {
-    let mut config = require_config(data_dir)?;
+    let mut config = load_tracking_config(data_dir)?.ok_or_else(|| {
+        CompanionError::Proposal(
+            "automatic tracking is not configured; run tracking setup first".to_owned(),
+        )
+    })?;
     let scheduler = if let Some(target_dir) = &config.scheduler_target {
         Some(uninstall_scheduler_files(
             data_dir,
