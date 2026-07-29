@@ -4568,6 +4568,7 @@ fi
 	  worklog=$(printf '%s' "$payload" | python3 -c 'import json,sys; p=json.load(sys.stdin); p["id"]=sys.argv[1]; print(json.dumps(p,separators=(",",":")))' "$id")
 	  echo "$worklog" >> "$state"
 	  if [[ "${{DRAG_FAULT:-}}" == "after-remote" ]]; then echo dropped >&2; exit 1; fi
+	  if [[ "${{DRAG_FAULT:-}}" == "missing-id-after-first" ]] && [[ $(wc -l < "$state") -gt 1 ]]; then printf '{{"ok":true,"data":{{}}}}'; exit 0; fi
 	  if [[ "${{DRAG_FAULT:-}}" == "malformed-json" ]]; then printf '{{'; exit 0; fi
 	  if [[ "${{DRAG_FAULT:-}}" == "truncated-json" ]]; then printf '{{"ok":true,"data":'; exit 0; fi
 	  if [[ "${{DRAG_FAULT:-}}" == "missing-data" ]]; then printf '{{"ok":true}}'; exit 0; fi
@@ -4703,6 +4704,227 @@ fn gated_execute_counts_terminal_operations_as_skipped_instead_of_blocked(
     assert_eq!(gated["skipped"], 1);
     assert_eq!(gated["blocked"], 0);
     assert_eq!(gated["uncertain"], false);
+    Ok(())
+}
+
+#[test]
+fn execution_rechecks_selection_and_runtime_gates_inside_the_mutation_boundary(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    seed_approved_payload(
+        &data,
+        "proposal-review-race",
+        "DRAG-171",
+        "2026-03-08T09:00:00Z",
+        "2026-03-08T10:00:00Z",
+    )?;
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "review",
+        "2026-03-08",
+        "--approve",
+    ]))?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+
+    let raced = json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_COMPANION_TEST_INVALIDATE_SELECTION_AFTER_LEASE", "1"),
+    )?;
+    assert_eq!(raced["status"], "gated");
+    assert_eq!(raced["effectivePermission"], false);
+    assert_eq!(raced["submitted"], 0);
+    assert_eq!(raced["effects"]["mutationAttempted"], false);
+    assert!(!directory.path().join("remote.jsonl").exists());
+
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    for (proposal, issue, start, end) in [
+        ("proposal-one", "DRAG-171", "13:00", "14:00"),
+        ("proposal-two", "DRAG-172", "15:00", "16:00"),
+    ] {
+        seed_approved_payload(
+            &data,
+            proposal,
+            issue,
+            &format!("2026-03-08T{start}:00Z"),
+            &format!("2026-03-08T{end}:00Z"),
+        )?;
+    }
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+    let killed = json_output(
+        companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_COMPANION_TEST_KILL_AFTER_SUBMISSIONS", "1"),
+    )?;
+    assert_eq!(killed["status"], "gated");
+    assert_eq!(killed["submitted"], 1);
+    assert_eq!(killed["blocked"], 1);
+    assert_eq!(killed["effects"], Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("commands.log"))?
+            .matches(" log ")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn execution_reports_blocked_and_uncertain_partial_progress(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    for (proposal, issue, start, end) in [
+        ("proposal-one", "DRAG-171", "13:00", "14:00"),
+        ("proposal-two", "DRAG-172", "15:00", "16:00"),
+    ] {
+        seed_approved_payload(
+            &data,
+            proposal,
+            issue,
+            &format!("2026-03-08T{start}:00Z"),
+            &format!("2026-03-08T{end}:00Z"),
+        )?;
+    }
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+    let uncertain = json_output(
+        companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_FAULT", "missing-id-after-first"),
+    )?;
+    assert_eq!(uncertain["status"], "uncertain");
+    assert_eq!(uncertain["submitted"], 1);
+    assert_eq!(uncertain["uncertain"], true);
+    assert_eq!(uncertain["mutationAttempted"], true);
+
+    Ok(())
+}
+
+#[test]
+fn public_run_permission_and_effects_are_scoped_to_current_recovery_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "setup",
+        "--mode",
+        "automatic",
+        "--authorize-automatic",
+    ]))?;
+    seed_approved_payload(
+        &data,
+        "proposal-blocked",
+        "DRAG-171",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    json_output(companion()?.args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"]))?;
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    conn.execute(
+        "INSERT INTO mutation_operations (id, state, idempotency_key, local_date, tempo_account, payload_json) VALUES ('old-uncertain', 'uncertain', 'old-uncertain', '2026-03-08', 'account-default', '{}')",
+        [],
+    )?;
+    drop(conn);
+    let drag = executable_drag(&directory)?;
+
+    let gated = json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+    assert_eq!(gated["effectivePermission"], false);
+    assert_eq!(gated["blocked"], 1);
+    assert_eq!(gated["uncertain"], true);
+    assert_eq!(gated["effects"]["mutationAttempted"], false);
+    assert_eq!(gated["liveMutationAllowed"], false);
+
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "setup",
+        "--mode",
+        "automatic",
+        "--authorize-automatic",
+    ]))?;
+    seed_approved_payload(
+        &data,
+        "proposal-history",
+        "DRAG-171",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+    let incomplete_drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-03-08",
+            "partial": true,
+            "worklogs": []
+        })],
+    )?;
+    let failed = tracking()?
+        .args(["--data-dir", &data])
+        .args(["--drag-bin", incomplete_drag.to_string_lossy().as_ref()])
+        .args(["--output", "json", "run", "2026-03-08"])
+        .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+        .output()?;
+    assert_eq!(failed.status.code(), Some(1));
+    let failure: Value = serde_json::from_slice(&failed.stderr)?;
+    assert_eq!(failure["error"]["details"]["submitted"], 0);
+    assert_eq!(
+        failure["error"]["details"]["effects"]["mutationAttempted"],
+        false
+    );
+    assert_eq!(failure["error"]["details"]["liveMutationAllowed"], false);
     Ok(())
 }
 
