@@ -105,9 +105,25 @@ pub(crate) fn install_claude_hooks(
     settings_path: &Path,
     data_dir: &Path,
 ) -> Result<(), CompanionError> {
+    let data_dir = if data_dir.is_absolute() {
+        data_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                CompanionError::InvalidClaudeHook(format!(
+                    "failed to resolve the Claude hook data directory: {error}"
+                ))
+            })?
+            .join(data_dir)
+    };
+    let data_dir = data_dir.to_str().ok_or_else(|| {
+        CompanionError::InvalidClaudeHook(
+            "Claude hook data directory must be valid UTF-8".to_owned(),
+        )
+    })?;
     let capture_command = format!(
         "drag-tracking --data-dir {} internal claude-hook capture",
-        shell_quote(&data_dir.to_string_lossy())
+        shell_quote(data_dir)
     );
     let mut settings = read_settings(settings_path)?;
     if !settings.is_object() {
@@ -949,12 +965,27 @@ pub(crate) fn is_our_command(command: &Value) -> bool {
     command
         .get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| {
-            command.contains(CLAUDE_HOOK_COMMAND)
-                || command.contains(LEGACY_CLAUDE_HOOK_COMMAND)
-                || (command.starts_with("drag-tracking ")
-                    && command.ends_with(" internal claude-hook capture"))
-        })
+        .is_some_and(is_managed_claude_hook_command)
+}
+
+fn is_managed_claude_hook_command(command: &str) -> bool {
+    if matches!(command, CLAUDE_HOOK_COMMAND | LEGACY_CLAUDE_HOOK_COMMAND) {
+        return true;
+    }
+    let Some(argument) = command
+        .strip_prefix("drag-tracking --data-dir ")
+        .and_then(|command| command.strip_suffix(" internal claude-hook capture"))
+    else {
+        return false;
+    };
+    let Some(inner) = argument
+        .strip_prefix('\'')
+        .and_then(|argument| argument.strip_suffix('\''))
+    else {
+        return false;
+    };
+    let unquoted = inner.replace("'\\\\''", "'");
+    shell_quote(&unquoted) == argument
 }
 
 pub(crate) fn read_claude_hook_event(data_dir: &Path) -> Result<JournalEvent, CompanionError> {

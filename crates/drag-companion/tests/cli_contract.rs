@@ -3992,15 +3992,82 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
     Ok(())
 }
 
+#[test]
+fn claude_hook_install_does_not_claim_wrapped_or_incidental_commands(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let settings = dir.path().join("settings.json");
+    let commands = [
+        "echo \"drag-tracking internal claude-hook capture\"",
+        "drag-tracking --verbose internal claude-hook capture",
+        "env WRAPPED=1 drag-companion claude-hook capture",
+    ];
+    std::fs::write(
+        &settings,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "hooks": {"SessionStart": [{
+                "matcher": "project",
+                "hooks": commands.map(|command| serde_json::json!({
+                    "type": "command",
+                    "command": command
+                }))
+            }]}
+        }))?,
+    )?;
+
+    companion()?
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    companion()?
+        .args([
+            "claude-hook",
+            "remove",
+            "--settings",
+            settings.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+
+    let installed: Value = serde_json::from_slice(&std::fs::read(settings)?)?;
+    let preserved = installed["hooks"]["SessionStart"][0]["hooks"]
+        .as_array()
+        .ok_or("preserved commands")?;
+    assert_eq!(preserved.len(), commands.len());
+    for command in commands {
+        assert!(preserved.iter().any(|entry| entry["command"] == command));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn claude_hook_install_propagates_the_selected_data_directory_to_capture(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let settings = dir.path().join("settings.json");
-    let data_dir = dir.path().join("custom data & state");
+    let data_dir = Path::new("custom data & state's");
+    let expected_data_dir = dir.path().join(data_dir);
+    let capture_dir = tempdir()?;
 
     companion()?
+        .current_dir(dir.path())
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+    companion()?
+        .current_dir(dir.path())
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
         .args([
             "claude-hook",
@@ -4030,6 +4097,7 @@ fn claude_hook_install_propagates_the_selected_data_directory_to_capture(
     });
     let mut capture = std::process::Command::new("bash")
         .args(["-c", command])
+        .current_dir(capture_dir.path())
         .env("PATH", path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -4046,8 +4114,39 @@ fn claude_hook_install_propagates_the_selected_data_directory_to_capture(
         "capture failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(data_dir.join("journal.jsonl").exists());
-    assert!(!dir.path().join(".drag/tracking/journal.jsonl").exists());
+    assert!(expected_data_dir.join("journal.jsonl").exists());
+    assert!(!capture_dir
+        .path()
+        .join(data_dir)
+        .join("journal.jsonl")
+        .exists());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_hook_install_rejects_a_non_utf8_data_directory() -> Result<(), Box<dyn std::error::Error>>
+{
+    use std::os::unix::ffi::OsStringExt;
+
+    let dir = tempdir()?;
+    let settings = dir.path().join("settings.json");
+    let data_dir = std::ffi::OsString::from_vec(vec![b's', b't', b'a', b't', b'e', 0xff]);
+    companion()?
+        .arg("--data-dir")
+        .arg(data_dir)
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "Claude hook data directory must be valid UTF-8",
+        ));
+    assert!(!settings.exists());
     Ok(())
 }
 
@@ -4864,6 +4963,7 @@ fn execution_reports_blocked_and_uncertain_partial_progress(
     for (proposal, issue, start, end) in [
         ("proposal-one", "DRAG-171", "13:00", "14:00"),
         ("proposal-two", "DRAG-172", "15:00", "16:00"),
+        ("proposal-three", "DRAG-173", "17:00", "18:00"),
     ] {
         seed_approved_payload(
             &data,
@@ -4892,6 +4992,7 @@ fn execution_reports_blocked_and_uncertain_partial_progress(
     )?;
     assert_eq!(uncertain["status"], "uncertain");
     assert_eq!(uncertain["submitted"], 1);
+    assert_eq!(uncertain["blocked"], 2);
     assert_eq!(uncertain["uncertain"], true);
     assert_eq!(uncertain["mutationAttempted"], true);
 
@@ -6228,7 +6329,9 @@ fn concurrent_reconcile_allows_only_one_owner_per_account_and_date(
     assert!(!second.status.success());
     let stderr = String::from_utf8_lossy(&second.stderr);
     assert!(
-        stderr.contains("already owned") || stderr.contains("locked"),
+        stderr.contains("already owned")
+            || stderr.contains("locked")
+            || stderr.contains("companion state is busy"),
         "{stderr}"
     );
     Ok(())
@@ -6612,7 +6715,7 @@ fn canonical_data_dir_lock_blocks_symlink_alias_before_creation(
 }
 
 #[test]
-fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
+fn retention_compaction_serializes_capture_without_losing_the_following_append(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
     let data_dir = dir.path().join("state");
@@ -6630,7 +6733,7 @@ fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
         .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
         .stdout(std::process::Stdio::null())
         .spawn()?;
-    companion()?
+    let capture = companion()?
         .args([
             "--data-dir",
             &data,
@@ -6639,14 +6742,27 @@ fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
             "--date",
             "2026-03-10",
         ])
-        .assert()
-        .success();
-    child.wait()?;
+        .output()?;
+    assert!(child.wait()?.success());
+    if !capture.status.success() {
+        assert!(String::from_utf8_lossy(&capture.stderr).contains("companion state is busy"));
+        companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "internal",
+                "capture",
+                "--date",
+                "2026-03-10",
+            ])
+            .assert()
+            .success();
+    }
 
     let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
     assert!(
         journal.contains("evidence.fake.2026-03-10"),
-        "concurrent append was lost: {journal}"
+        "serialized append was lost: {journal}"
     );
     Ok(())
 }

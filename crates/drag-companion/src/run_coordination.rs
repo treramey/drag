@@ -99,7 +99,10 @@ fn command_requires_exclusive_lock(command: &Command) -> bool {
         | Command::ResumeTracking
         | Command::Uninstall
         | Command::Import
+        | Command::Reconcile(_)
+        | Command::Preview(_)
         | Command::Purge(_)
+        | Command::Retention(_)
         | Command::Rollout(_)
         | Command::Propose(_)
         | Command::Audit(_)
@@ -122,12 +125,15 @@ fn internal_command_requires_exclusive_lock(command: &InternalCommand) -> bool {
     matches!(
         command,
         InternalCommand::Import
+            | InternalCommand::Reconcile(_)
             | InternalCommand::Resume(_)
+            | InternalCommand::Preview(_)
             | InternalCommand::Propose(_)
             | InternalCommand::Audit(_)
             | InternalCommand::Execute(_)
             | InternalCommand::Rollout(_)
             | InternalCommand::Purge(_)
+            | InternalCommand::Retention(_)
             | InternalCommand::Scheduler(_)
     )
 }
@@ -463,9 +469,8 @@ pub(crate) fn coordinated_run_with_submission(
             let _ = release_sqlite_lease(&conn, date, &account, &owner_id);
             return Err(error);
         }
-        if let Ok(ms) = std::env::var("DRAG_COMPANION_TEST_HOLD_MS")
-            .unwrap_or_default()
-            .parse::<u64>()
+        if let Some(ms) =
+            test_env_var("DRAG_COMPANION_TEST_HOLD_MS").and_then(|value| value.parse::<u64>().ok())
         {
             if ms > 0 {
                 std::thread::sleep(std::time::Duration::from_millis(ms));
