@@ -1244,6 +1244,189 @@ fn review_approval_is_invalidated_when_the_proposal_set_changes(
 }
 
 #[test]
+fn review_reports_the_immutable_proposal_set_policy_conflicts_and_approval_availability(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&directory, "valid.json", valid_provider_response())?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "internal",
+                "propose",
+                "--date",
+                "2026-03-08",
+                "--fixture",
+                fixture.to_str().ok_or("fixture")?,
+            ]),
+    )?;
+    let connection = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let proposal: String =
+        connection.query_row("SELECT id FROM proposals LIMIT 1", [], |row| row.get(0))?;
+    for (name, value) in [
+        ("tempoAccountId", "account-default"),
+        ("issueKey", "DRAG-150"),
+        ("start", "2026-03-08T13:00:00Z"),
+        ("end", "2026-03-08T14:00:00Z"),
+        ("description", "Implemented proposal adapter"),
+        ("attributes", "{}"),
+    ] {
+        connection.execute(
+            "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![proposal, name, value],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO policy_decisions (id, proposal_id, decision, reason_codes_json, evidence_trace_json, decided_at) VALUES (?1, ?1, 'rejected', '[\"tempo.overlap\",\"evidence.contradiction\"]', '[\"/Users/alice/private/repo#abc123\"]', '2026-03-08T00:00:00Z')",
+        [&proposal],
+    )?;
+
+    let review = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "2026-03-08"]),
+    )?;
+
+    assert_eq!(review["selectedDate"], "2026-03-08");
+    assert_eq!(review["proposals"][0]["id"], proposal);
+    assert_eq!(review["approvalAvailability"]["available"], true);
+    assert_eq!(review["approvalAvailability"]["mode"], "review");
+    assert_eq!(review["conflicts"][0]["proposalId"], proposal);
+    assert_eq!(
+        review["conflicts"][0]["reasonCodes"],
+        serde_json::json!(["evidence.contradiction", "tempo.overlap"])
+    );
+    assert_eq!(review["submissionState"], "pending");
+    assert_eq!(review["liveMutationAllowed"], false);
+    let serialized = serde_json::to_string(&review)?;
+    assert!(!serialized.contains("/Users/alice/private"));
+    assert!(!serialized.contains("token=secret"));
+    Ok(())
+}
+
+#[test]
+fn draft_review_cannot_offer_or_record_proposal_approval() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "draft"]),
+    )?;
+
+    let review = json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "2026-03-08"]),
+    )?;
+    assert_eq!(review["approvalAvailability"]["available"], false);
+    assert_eq!(
+        review["approvalAvailability"]["reason"],
+        "reviewModeRequired"
+    );
+
+    let output = tracking()?
+        .args([
+            "--output",
+            "json",
+            "--data-dir",
+            data_dir.to_string_lossy().as_ref(),
+        ])
+        .args(["review", "approve", "2026-03-08"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let error: Value = serde_json::from_slice(&output)?;
+    assert_eq!(error["error"]["code"], "tracking_error");
+    assert!(error["error"]["message"]
+        .as_str()
+        .ok_or("error message")?
+        .contains("only in review mode"));
+    assert!(!data_dir.join("approvals/2026-03-08.json").exists());
+    Ok(())
+}
+
+#[test]
+fn review_approval_preserves_runtime_submission_gates() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    seed_proposal_bundle(data_dir.to_str().ok_or("data dir")?)?;
+    let fixture = write_provider_fixture(&directory, "valid.json", valid_provider_response())?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args([
+                "internal",
+                "propose",
+                "--date",
+                "2026-03-08",
+                "--fixture",
+                fixture.to_str().ok_or("fixture")?,
+            ]),
+    )?;
+    let connection = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    let proposal: String =
+        connection.query_row("SELECT id FROM proposals LIMIT 1", [], |row| row.get(0))?;
+    for (name, value) in [
+        ("tempoAccountId", "account-default"),
+        ("issueKey", "DRAG-150"),
+        ("start", "2026-03-08T13:00:00Z"),
+        ("end", "2026-03-08T14:00:00Z"),
+        ("description", "Implemented proposal adapter"),
+        ("attributes", "{}"),
+    ] {
+        connection.execute(
+            "INSERT INTO proposal_drag_resolutions (proposal_id, name, value) VALUES (?1, ?2, ?3)",
+            rusqlite::params![proposal, name, value],
+        )?;
+    }
+    json_output(
+        tracking()?
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["review", "approve", "2026-03-08"]),
+    )?;
+    let drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-03-08",
+            "worklogs": []
+        })],
+    )?;
+
+    let run = json_output(
+        tracking()?
+            .env_remove("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT")
+            .env_remove("DRAG_COMPANION_LIVE_MUTATION_ROLLOUT")
+            .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"]),
+    )?;
+    assert_eq!(run["status"], "gated");
+    assert_eq!(run["submitted"], 0);
+    assert_eq!(run["liveMutationAllowed"], false);
+    let commands = std::fs::read_to_string(directory.path().join("commands.log"))?;
+    assert!(commands.contains(" list 2026-03-08"));
+    assert!(!commands.contains(" log "));
+    Ok(())
+}
+
+#[test]
 fn default_state_migration_is_atomic_and_refuses_two_active_stores(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let directory = tempdir()?;

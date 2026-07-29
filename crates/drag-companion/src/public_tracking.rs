@@ -400,16 +400,23 @@ pub(crate) fn review_tracking(
     }
     let date = select_public_date(args.when.as_deref(), &config.schedule.timezone)?;
     let digest = proposal_set_digest(data_dir, date)?;
+    let proposals = review_proposals(data_dir, date)?;
+    let approval_available =
+        config.submission.mode == SubmissionMode::Review && !proposals.is_empty();
     if args.approve {
         if config.submission.mode != SubmissionMode::Review {
             return Err(CompanionError::Proposal(
                 "proposal approval is available only in review mode".to_owned(),
             ));
         }
+        if proposals.is_empty() {
+            return Err(CompanionError::Proposal(
+                "there are no proposals to approve for the selected date".to_owned(),
+            ));
+        }
         persist_approval(data_dir, date, &digest)?;
     }
     let approval = load_approval(data_dir, date)?;
-    let proposals = review_proposals(data_dir, date)?;
     let policy_inputs = if store_path(data_dir).exists() {
         proposal_policy_inputs(data_dir, date)?
     } else {
@@ -420,18 +427,32 @@ pub(crate) fn review_tracking(
         .map(|value| {
             serde_json::json!({
                 "proposalId": value.id,
-                "references": value.evidence_refs
+                "references": value.evidence_refs.into_iter().map(|reference| minimized_reference(&reference)).collect::<Vec<_>>()
             })
         })
         .collect::<Vec<_>>();
+    let policy_decisions = review_decisions(data_dir, date)?;
+    let conflicts = review_conflicts(&policy_decisions);
     let result = serde_json::json!({
         "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
         "selectedDate": date,
         "proposals": proposals.into_iter().map(|(id, payload)| serde_json::json!({"id": id, "payload": payload})).collect::<Vec<_>>(),
         "evidenceReferences": evidence,
-        "policyDecisions": review_decisions(data_dir, date)?,
+        "policyDecisions": policy_decisions,
+        "conflicts": conflicts,
         "existingWorklogConflicts": [],
         "proposalSetDigest": digest,
+        "approvalAvailability": {
+            "available": approval_available,
+            "mode": config.submission.mode,
+            "reason": if approval_available {
+                "currentProposalSetCanBeApproved"
+            } else if config.submission.mode != SubmissionMode::Review {
+                "reviewModeRequired"
+            } else {
+                "noProposals"
+            }
+        },
         "approval": {
             "approved": approval.as_ref().is_some_and(|value| value["digest"] == digest),
             "record": approval
@@ -1069,14 +1090,50 @@ fn review_decisions(data_dir: &Path, date: NaiveDate) -> Result<Vec<Value>, Comp
     let rows = stmt.query_map([date.to_string()], |row| {
         let reasons: String = row.get(2)?;
         let evidence: String = row.get(3)?;
+        let evidence = serde_json::from_str::<Vec<String>>(&evidence)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|reference| minimized_reference(&reference))
+            .collect::<Vec<_>>();
         Ok(serde_json::json!({
             "proposalId": row.get::<_, String>(0)?,
             "decision": row.get::<_, String>(1)?,
             "reasonCodes": serde_json::from_str::<Value>(&reasons)
                 .unwrap_or_else(|_| Value::Array(Vec::new())),
-            "evidenceReferences": serde_json::from_str::<Value>(&evidence)
-                .unwrap_or_else(|_| Value::Array(Vec::new()))
+            "evidenceReferences": evidence
         }))
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+fn review_conflicts(policy_decisions: &[Value]) -> Vec<Value> {
+    policy_decisions
+        .iter()
+        .filter_map(|decision| {
+            let mut reason_codes = decision["reasonCodes"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|code| {
+                    matches!(
+                        *code,
+                        "tempo.duplicate"
+                            | "tempo.overlap"
+                            | "proposal.overlap"
+                            | "allocation.multiple_candidates"
+                            | "tempo.current_state.has_issue_worklog"
+                            | "evidence.contradiction"
+                    )
+                })
+                .collect::<Vec<_>>();
+            if reason_codes.is_empty() {
+                return None;
+            }
+            reason_codes.sort_unstable();
+            Some(serde_json::json!({
+                "proposalId": decision["proposalId"],
+                "reasonCodes": reason_codes
+            }))
+        })
+        .collect()
 }
