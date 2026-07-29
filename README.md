@@ -9,6 +9,10 @@ structured output for scripts and AI agents.
   <a href="LICENSE"><img src="https://img.shields.io/github/license/treramey/drag" alt="MIT license"></a>
 </p>
 
+<p align="center">
+  <img src="docs/assets/drag-setup.jpeg" alt="Drag interactive setup wizard">
+</p>
+
 > [!IMPORTANT]
 > Drag is pre-1.0. Use `--dry-run` and test with a non-production Tempo account
 > before replacing an existing installation.
