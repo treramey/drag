@@ -1840,9 +1840,19 @@ fn tracking_contract_documents_the_intent_surface_and_compatibility_removal(
     );
     assert_eq!(
         contract["compatibility"]["shim"]["availableThrough"],
-        "0.9.x"
+        "0.10.x"
     );
-    assert_eq!(contract["compatibility"]["shim"]["removeIn"], "0.10.0");
+    assert_eq!(contract["compatibility"]["shim"]["removeIn"], "0.11.0");
+    let shim_replacements = contract["compatibility"]["shim"]["replacements"]
+        .as_array()
+        .ok_or("shim replacements")?;
+    assert!(shim_replacements.iter().any(|mapping| {
+        mapping["command"] == "status" && mapping["replacement"] == "drag tracking status"
+    }));
+    assert!(shim_replacements.iter().any(|mapping| {
+        mapping["command"] == "capture"
+            && mapping["replacement"] == "drag-tracking internal capture"
+    }));
     assert_eq!(
         contract["compatibility"]["legacyDirectCommands"]["replacementPrefix"],
         "drag-tracking internal"
@@ -2047,7 +2057,7 @@ fn retention_enforce_expires_overrides_protects_recovery_and_preserves_privacy(
     )?;
 
     let output = companion()?
-        .args(["--data-dir", &data, "retention", "enforce"])
+        .args(["--data-dir", &data, "internal", "retention", "enforce"])
         .env("DRAG_COMPANION_RETENTION_NOW", "2026-03-10T00:00:00Z")
         .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
         .env("DRAG_COMPANION_RETENTION_NORMALIZED_DAYS", "2")
@@ -6568,7 +6578,14 @@ fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
         .stdout(std::process::Stdio::null())
         .spawn()?;
     companion()?
-        .args(["--data-dir", &data, "capture", "--date", "2026-03-10"])
+        .args([
+            "--data-dir",
+            &data,
+            "internal",
+            "capture",
+            "--date",
+            "2026-03-10",
+        ])
         .assert()
         .success();
     child.wait()?;

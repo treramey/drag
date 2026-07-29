@@ -39,7 +39,7 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
         Command::Internal(args) => handle_internal(&data_dir, &drag_bin, args.command),
         // One-minor compatibility aliases. Keep these as pure routing so the
         // hidden replacement remains the only implementation and all safety
-        // gates are identical until the aliases are removed in 0.10.0.
+        // gates are identical until the aliases are removed in 0.11.0.
         Command::Collect(args) => {
             handle_internal(&data_dir, &drag_bin, InternalCommand::Collect(args))
         }
@@ -98,9 +98,14 @@ fn command_requires_exclusive_lock(command: &Command) -> bool {
         | Command::Pause
         | Command::ResumeTracking
         | Command::Uninstall
+        | Command::Import
         | Command::Purge(_)
         | Command::Rollout(_)
-        | Command::Internal(_) => true,
+        | Command::Propose(_)
+        | Command::Audit(_)
+        | Command::Execute(_)
+        | Command::Scheduler(_) => true,
+        Command::Internal(args) => internal_command_requires_exclusive_lock(&args.command),
         Command::Sources(args) => !matches!(
             &args.operation,
             PublicSourcesOperation::List | PublicSourcesOperation::Test(_)
@@ -111,6 +116,20 @@ fn command_requires_exclusive_lock(command: &Command) -> bool {
         }
         _ => false,
     }
+}
+
+fn internal_command_requires_exclusive_lock(command: &InternalCommand) -> bool {
+    matches!(
+        command,
+        InternalCommand::Import
+            | InternalCommand::Resume(_)
+            | InternalCommand::Propose(_)
+            | InternalCommand::Audit(_)
+            | InternalCommand::Execute(_)
+            | InternalCommand::Rollout(_)
+            | InternalCommand::Purge(_)
+            | InternalCommand::Scheduler(_)
+    )
 }
 
 fn handle_internal(

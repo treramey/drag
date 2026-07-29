@@ -129,13 +129,13 @@ direct pipeline spellings on `drag-tracking` delegate to their exact
 `drag-tracking internal <command>` replacements and retain the same safety
 gates during the compatibility window.
 
-The deprecated `drag-companion` executable remains available through the 0.9.x
+The deprecated `drag-companion` executable remains available through the 0.10.x
 minor-release line as a compatibility shim. It delegates without changing
 structured stdout or mutation behavior. Both the shim and legacy direct
-pipeline spellings are removed in 0.10.0; migrate scripts to `drag tracking`
+pipeline spellings are removed in 0.11.0; migrate scripts to `drag tracking`
 for intent workflows or `drag-tracking internal` for operator recovery before
 upgrading. Rollback remains possible by pausing tracking, restoring the legacy
-state directory as described in `docs/architecture.md`, and reinstalling 0.9.x.
+state directory as described in `docs/architecture.md`, and reinstalling 0.10.x.
 
 When `drag list` opens an interactive terminal report, use Left/Right Arrow or
 `h`/`l` to change days, Up/Down Arrow or `k`/`j` to move between worklogs, and

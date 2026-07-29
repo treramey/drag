@@ -33,7 +33,14 @@ pub(crate) struct ShimCompatibility {
     pub(crate) binary: &'static str,
     pub(crate) available_through: &'static str,
     pub(crate) remove_in: &'static str,
-    pub(crate) replacement: &'static str,
+    pub(crate) replacements: Vec<ShimCommandReplacement>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShimCommandReplacement {
+    pub(crate) command: &'static str,
+    pub(crate) replacement: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,13 +125,44 @@ pub(crate) fn contract() -> Contract {
         compatibility: CompatibilityContract {
             shim: ShimCompatibility {
                 binary: "drag-companion",
-                available_through: "0.9.x",
-                remove_in: "0.10.0",
-                replacement: "drag tracking",
+                available_through: "0.10.x",
+                remove_in: "0.11.0",
+                replacements: [
+                    "setup", "status", "run", "review", "pause", "resume", "uninstall",
+                    "sources", "schedule",
+                ]
+                .into_iter()
+                .map(|command| ShimCommandReplacement {
+                    command,
+                    replacement: format!("drag tracking {command}"),
+                })
+                .chain(
+                    [
+                        "collect", "capture", "import", "reconcile", "report", "log", "bundle",
+                        "propose", "read", "audit", "preview", "execute", "rollout", "replay",
+                        "process-spy", "purge", "retention", "scheduler", "claude-hook",
+                    ]
+                    .into_iter()
+                    .map(|command| ShimCommandReplacement {
+                        command,
+                        replacement: format!("drag-tracking internal {command}"),
+                    }),
+                )
+                .chain([
+                    ShimCommandReplacement {
+                        command: "internal",
+                        replacement: "drag-tracking internal".to_owned(),
+                    },
+                    ShimCommandReplacement {
+                        command: "contract",
+                        replacement: "drag-tracking contract".to_owned(),
+                    },
+                ])
+                .collect(),
             },
             legacy_direct_commands: LegacyCommandCompatibility {
-                available_through: "0.9.x",
-                remove_in: "0.10.0",
+                available_through: "0.10.x",
+                remove_in: "0.11.0",
                 replacement_prefix: "drag-tracking internal",
                 replacements: [
                     "collect", "capture", "import", "reconcile", "report", "log", "bundle",
