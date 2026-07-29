@@ -105,7 +105,7 @@ pub(crate) fn execute_drag_worklogs_bound(
     let _lock = acquire_advisory_lock(data_dir, date, &account)?;
     let owner_id = format!("execute:{}:{}", std::process::id(), now_string());
     acquire_sqlite_lease(&conn, date, &account, &owner_id)?;
-    if std::env::var("DRAG_COMPANION_TEST_INVALIDATE_SELECTION_AFTER_LEASE").is_ok() {
+    if test_env_var("DRAG_COMPANION_TEST_INVALIDATE_SELECTION_AFTER_LEASE").is_some() {
         conn.execute(
             "UPDATE policy_decisions SET decision = 'rejected' WHERE proposal_id IN (SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1)",
             [date.to_string()],
@@ -238,6 +238,7 @@ pub(crate) fn execute_drag_worklogs_locked(
                     .and_then(Value::as_str)
                 else {
                     mark_operation_uncertain(conn, date, &account, &key)?;
+                    blocked += approved_count.saturating_sub(index);
                     return Ok(uncertain_execute_result(
                         date,
                         submitted,
@@ -248,8 +249,7 @@ pub(crate) fn execute_drag_worklogs_locked(
                 };
                 persist_confirmed_operation(conn, &key, id)?;
                 submitted += 1;
-                if std::env::var("DRAG_COMPANION_TEST_KILL_AFTER_SUBMISSIONS")
-                    .ok()
+                if test_env_var("DRAG_COMPANION_TEST_KILL_AFTER_SUBMISSIONS")
                     .and_then(|value| value.parse::<usize>().ok())
                     == Some(submitted)
                 {
@@ -263,6 +263,7 @@ pub(crate) fn execute_drag_worklogs_locked(
             }
             Err(error) if unverifiable_after_live_spawn(&error) => {
                 mark_operation_uncertain(conn, date, &account, &key)?;
+                blocked += approved_count.saturating_sub(index);
                 return Ok(uncertain_execute_result(
                     date,
                     submitted,
@@ -654,8 +655,7 @@ pub(crate) fn acquire_sqlite_lease(
     owner_id: &str,
 ) -> Result<(bool, bool), CompanionError> {
     let now = epoch_ms();
-    let ttl = std::env::var("DRAG_COMPANION_TEST_LEASE_TTL_MS")
-        .ok()
+    let ttl = test_env_var("DRAG_COMPANION_TEST_LEASE_TTL_MS")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(LEASE_TTL_MS);
     let expires = now + ttl;
@@ -717,22 +717,15 @@ pub(crate) fn run_phase(
     phase: &'static str,
 ) -> Result<(), CompanionError> {
     let retryable = matches!(phase, "collecting" | "model" | "tempo_read");
-    let transient = std::env::var("DRAG_COMPANION_TEST_TRANSIENT_PHASE")
-        .ok()
-        .as_deref()
-        == Some(phase);
+    let transient = test_env_var("DRAG_COMPANION_TEST_TRANSIENT_PHASE").as_deref() == Some(phase);
     let max_attempts = if retryable { READ_ONLY_RETRIES } else { 1 };
     for attempt in 1..=max_attempts {
         persist_phase_start(conn, date, account, phase, attempt)?;
-        if std::env::var("DRAG_COMPANION_TEST_CRASH_AFTER_PHASE")
-            .ok()
-            .as_deref()
-            == Some(phase)
-        {
+        if test_env_var("DRAG_COMPANION_TEST_CRASH_AFTER_PHASE").as_deref() == Some(phase) {
             std::process::exit(42);
         }
         if phase == "pre_mutation"
-            && std::env::var("DRAG_COMPANION_TEST_BLOCK_BEFORE_MUTATION").is_ok()
+            && test_env_var("DRAG_COMPANION_TEST_BLOCK_BEFORE_MUTATION").is_some()
         {
             finish_phase(
                 conn,

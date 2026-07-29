@@ -89,7 +89,7 @@ pub(crate) fn setup_tracking(
         None
     };
     if args.install_hooks {
-        install_claude_hooks(&default_claude_settings_path())?;
+        install_claude_hooks(&default_claude_settings_path(), data_dir)?;
         config.hooks_installed = true;
         save_tracking_config(data_dir, &config)?;
     }

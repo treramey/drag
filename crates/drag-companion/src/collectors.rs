@@ -101,7 +101,30 @@ pub(crate) struct FakeObservation {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
+pub(crate) fn install_claude_hooks(
+    settings_path: &Path,
+    data_dir: &Path,
+) -> Result<(), CompanionError> {
+    let data_dir = if data_dir.is_absolute() {
+        data_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                CompanionError::InvalidClaudeHook(format!(
+                    "failed to resolve the Claude hook data directory: {error}"
+                ))
+            })?
+            .join(data_dir)
+    };
+    let data_dir = data_dir.to_str().ok_or_else(|| {
+        CompanionError::InvalidClaudeHook(
+            "Claude hook data directory must be valid UTF-8".to_owned(),
+        )
+    })?;
+    let capture_command = format!(
+        "drag-tracking --data-dir {} internal claude-hook capture",
+        shell_quote(data_dir)
+    );
     let mut settings = read_settings(settings_path)?;
     if !settings.is_object() {
         return Err(CompanionError::InvalidClaudeHook(
@@ -140,10 +163,22 @@ pub(crate) fn install_claude_hooks(settings_path: &Path) -> Result<(), Companion
                 "{event} hooks must be an array"
             )));
         };
-        if !arr.iter().any(is_our_hook_entry) {
+        let mut updated = false;
+        for entry in arr.iter_mut() {
+            let Some(commands) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for command in commands {
+                if is_our_command(command) {
+                    command["command"] = Value::String(capture_command.clone());
+                    updated = true;
+                }
+            }
+        }
+        if !updated {
             arr.push(serde_json::json!({
                 "matcher": "*",
-                "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                "hooks": [{ "type": "command", "command": capture_command }]
             }));
         }
     }
@@ -930,9 +965,27 @@ pub(crate) fn is_our_command(command: &Value) -> bool {
     command
         .get("command")
         .and_then(Value::as_str)
-        .is_some_and(|command| {
-            command.contains(CLAUDE_HOOK_COMMAND) || command.contains(LEGACY_CLAUDE_HOOK_COMMAND)
-        })
+        .is_some_and(is_managed_claude_hook_command)
+}
+
+fn is_managed_claude_hook_command(command: &str) -> bool {
+    if matches!(command, CLAUDE_HOOK_COMMAND | LEGACY_CLAUDE_HOOK_COMMAND) {
+        return true;
+    }
+    let Some(argument) = command
+        .strip_prefix("drag-tracking --data-dir ")
+        .and_then(|command| command.strip_suffix(" internal claude-hook capture"))
+    else {
+        return false;
+    };
+    let Some(inner) = argument
+        .strip_prefix('\'')
+        .and_then(|argument| argument.strip_suffix('\''))
+    else {
+        return false;
+    };
+    let unquoted = inner.replace("'\\\\''", "'");
+    shell_quote(&unquoted) == argument
 }
 
 pub(crate) fn read_claude_hook_event(data_dir: &Path) -> Result<JournalEvent, CompanionError> {

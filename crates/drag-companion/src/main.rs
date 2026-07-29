@@ -43,6 +43,16 @@ const LEGACY_TEMPO_WORK_ATTRIBUTES_ENV: &str = "DRAG_COMPANION_TEMPO_WORK_ATTRIB
 const DEFAULT_SCHEDULE_TIME: &str = "18:45";
 const DEFAULT_SCHEDULE_TIMEZONE: &str = "local";
 
+#[cfg(debug_assertions)]
+pub(crate) fn test_env_var(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+#[cfg(not(debug_assertions))]
+pub(crate) fn test_env_var(_name: &str) -> Option<String> {
+    None
+}
+
 mod cli_contract;
 mod collectors;
 mod contract;
