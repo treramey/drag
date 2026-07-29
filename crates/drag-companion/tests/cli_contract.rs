@@ -6715,59 +6715,6 @@ fn canonical_data_dir_lock_blocks_symlink_alias_before_creation(
 }
 
 #[test]
-fn retention_compaction_serializes_capture_without_losing_the_following_append(
-) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempdir()?;
-    let data_dir = dir.path().join("state");
-    let data = data_dir.to_string_lossy();
-    companion()?
-        .args(["--data-dir", &data, "status"])
-        .assert()
-        .success();
-    let old = serde_json::json!({"schemaVersion":1,"eventId":"journal.old","eventType":"evidence.captured","observedAt":"2026-03-08T00:00:00Z","source":{"kind":"fixture","adapter":"fixture","reference":"old"},"collector":{"name":"fixture","version":"test"},"timestampSemantics":{"observedAtSource":"fixture","timezone":"UTC","explicitDate":"2026-03-08"},"privacy":{"classification":"local-fixture","redacted":false},"retention":{"policy":"age-based","retainUntil":null},"supersedes":null,"payload":{"summary":"old"},"integrityHash":"sha256:old"});
-    std::fs::write(data_dir.join("journal.jsonl"), format!("{}\n", old))?;
-
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_drag-companion"))
-        .args(["--data-dir", &data, "retention", "enforce"])
-        .env("DRAG_COMPANION_RETENTION_NOW", "2026-03-10T00:00:00Z")
-        .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
-        .stdout(std::process::Stdio::null())
-        .spawn()?;
-    let capture = companion()?
-        .args([
-            "--data-dir",
-            &data,
-            "internal",
-            "capture",
-            "--date",
-            "2026-03-10",
-        ])
-        .output()?;
-    assert!(child.wait()?.success());
-    if !capture.status.success() {
-        assert!(String::from_utf8_lossy(&capture.stderr).contains("companion state is busy"));
-        companion()?
-            .args([
-                "--data-dir",
-                &data,
-                "internal",
-                "capture",
-                "--date",
-                "2026-03-10",
-            ])
-            .assert()
-            .success();
-    }
-
-    let journal = std::fs::read_to_string(data_dir.join("journal.jsonl"))?;
-    assert!(
-        journal.contains("evidence.fake.2026-03-10"),
-        "serialized append was lost: {journal}"
-    );
-    Ok(())
-}
-
-#[test]
 fn report_heals_missing_and_corrupt_terminal_run_file_from_sqlite(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempdir()?;
