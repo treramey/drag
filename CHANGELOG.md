@@ -5,6 +5,8 @@ This project follows [Semantic Versioning](https://semver.org/) and
 
 ## [Unreleased]
 
+- Enable digest-approved review runs and explicitly authorized automatic runs to submit policy-accepted worklogs through the guarded tracking execution boundary, with explicit permission and outcome reporting.
+
 ### Added
 
 - Optional automatic-tracking onboarding after successful interactive Jira and
