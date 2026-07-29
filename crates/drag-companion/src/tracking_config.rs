@@ -419,16 +419,3 @@ fn validate_tracking_environment() -> Result<(), CompanionError> {
     }
     Ok(())
 }
-
-pub(crate) fn environment_enabled(current: &str, legacy: &str) -> Result<bool, CompanionError> {
-    let current_value = std::env::var_os(current);
-    let legacy_value = std::env::var_os(legacy);
-    if let (Some(current_value), Some(legacy_value)) = (&current_value, &legacy_value) {
-        if current_value != legacy_value {
-            return Err(CompanionError::Proposal(format!(
-                "{current} and deprecated {legacy} conflict; remove one or set both to the same value"
-            )));
-        }
-    }
-    Ok(current_value.or(legacy_value).is_some())
-}

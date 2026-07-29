@@ -7,6 +7,7 @@ pub(crate) struct ExecuteResult {
     pub(crate) selected_date: NaiveDate,
     pub(crate) submitted: usize,
     pub(crate) skipped: usize,
+    pub(crate) blocked: usize,
     pub(crate) uncertain: bool,
     pub(crate) network_access: bool,
     pub(crate) live_mutation_allowed: bool,
@@ -20,24 +21,32 @@ pub(crate) fn live_rollout_enabled() -> bool {
         == Some("1")
 }
 
+pub(crate) fn runtime_mutation_allowed(
+    data_dir: &Path,
+    authorize_live: bool,
+) -> Result<bool, CompanionError> {
+    Ok(authorize_live
+        && live_rollout_enabled()
+        && persisted_live_mutation_allowed(data_dir)?
+        && !scheduler_kill_switch_path(data_dir).exists()
+        && !tracking_kill_switch_active())
+}
+
 pub(crate) fn execute_drag_worklogs(
     data_dir: &Path,
     drag_bin: &Path,
     date: NaiveDate,
     authorize_live: bool,
 ) -> Result<ExecuteResult, CompanionError> {
-    if !authorize_live
-        || !live_rollout_enabled()
-        || !persisted_live_mutation_allowed(data_dir)?
-        || scheduler_kill_switch_path(data_dir).exists()
-        || tracking_kill_switch_active()
-    {
+    if !runtime_mutation_allowed(data_dir, authorize_live)? {
+        let progress = gated_execution_progress(data_dir, date)?;
         return Ok(ExecuteResult {
             status: "gated",
             selected_date: date,
             submitted: 0,
-            skipped: 0,
-            uncertain: false,
+            skipped: progress.skipped,
+            blocked: progress.blocked,
+            uncertain: progress.uncertain,
             network_access: false,
             live_mutation_allowed: false,
         });
@@ -151,6 +160,7 @@ pub(crate) fn execute_drag_worklogs_locked(
         selected_date: date,
         submitted,
         skipped,
+        blocked: 0,
         uncertain,
         network_access: true,
         live_mutation_allowed: true,
@@ -163,16 +173,26 @@ pub(crate) fn uncertain_execute_result(date: NaiveDate) -> ExecuteResult {
         selected_date: date,
         submitted: 0,
         skipped: 0,
+        blocked: 0,
         uncertain: true,
         network_access: true,
         live_mutation_allowed: true,
     }
 }
 
+#[derive(Default)]
+pub(crate) struct PersistedExecutionProgress {
+    pub(crate) submitted: usize,
+    pub(crate) skipped: usize,
+    pub(crate) blocked: usize,
+    pub(crate) uncertain: bool,
+    pub(crate) mutation_attempted: bool,
+}
+
 pub(crate) fn persisted_execution_progress(
     data_dir: &Path,
     date: NaiveDate,
-) -> Result<(usize, usize, bool), CompanionError> {
+) -> Result<PersistedExecutionProgress, CompanionError> {
     let conn = Connection::open(store_path(data_dir))?;
     let submitted = conn.query_row(
         "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND state = 'confirmed'",
@@ -184,12 +204,51 @@ pub(crate) fn persisted_execution_progress(
         [date.to_string()],
         |row| row.get::<_, usize>(0),
     )?;
+    let uncertain = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mutation_operations WHERE local_date = ?1 AND state IN ('submitting', 'uncertain'))",
+        [date.to_string()],
+        |row| row.get::<_, bool>(0),
+    )?;
     let mutation_attempted = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM mutation_operations WHERE local_date = ?1)",
         [date.to_string()],
         |row| row.get::<_, bool>(0),
     )?;
-    Ok((submitted, skipped, mutation_attempted))
+    Ok(PersistedExecutionProgress {
+        submitted,
+        skipped,
+        blocked: 0,
+        uncertain,
+        mutation_attempted,
+    })
+}
+
+fn gated_execution_progress(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<PersistedExecutionProgress, CompanionError> {
+    if !store_path(data_dir).exists() {
+        return Ok(PersistedExecutionProgress::default());
+    }
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    let records = approved_payloads(data_dir, date)?;
+    let mut progress = PersistedExecutionProgress::default();
+    for record in records {
+        let key = operation_key(&record.tempo_account, date, &record.payload)?;
+        match operation_state(&conn, &key)?.as_deref() {
+            Some("confirmed" | "failed") => progress.skipped += 1,
+            Some("submitting" | "uncertain") => progress.uncertain = true,
+            Some(_) | None => progress.blocked += 1,
+        }
+    }
+    progress.mutation_attempted = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mutation_operations WHERE local_date = ?1)",
+        [date.to_string()],
+        |row| row.get::<_, bool>(0),
+    )?;
+    Ok(progress)
 }
 
 pub(crate) fn unverifiable_after_live_spawn(error: &CompanionError) -> bool {

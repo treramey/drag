@@ -235,6 +235,12 @@ pub(crate) fn run_tracking_for_date(
     date: NaiveDate,
 ) -> Result<Value, CompanionError> {
     let mut progress = TrackingRunProgress::new(data_dir, config, date);
+    let configured_authorization = match config.submission.mode {
+        SubmissionMode::Automatic => config.submission.automatic_submission_authorized,
+        SubmissionMode::Review => approval_matches(data_dir, date)?,
+        SubmissionMode::Draft => false,
+    };
+    progress.effective_permission = runtime_mutation_allowed(data_dir, configured_authorization)?;
     let outcome = (|| -> Result<(), CompanionError> {
         let collect = CollectArgs {
             repos: config
@@ -314,6 +320,7 @@ pub(crate) fn run_tracking_for_date(
             SubmissionMode::Review => approved_review,
             SubmissionMode::Draft => false,
         };
+        progress.effective_permission = runtime_mutation_allowed(data_dir, execution_authorized)?;
         let run = coordinated_run_with_submission(
             data_dir,
             drag_bin,
@@ -343,11 +350,7 @@ pub(crate) fn run_tracking_for_date(
             progress.skipped = execution.skipped;
             progress.network_access |= execution.network_access;
             progress.live_mutation_allowed = execution.live_mutation_allowed;
-            progress.blocked = if execution.status == "gated" {
-                progress.counts.accepted as usize
-            } else {
-                0
-            };
+            progress.blocked = execution.blocked;
             progress.uncertain = execution.uncertain;
         }
         progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
@@ -371,14 +374,14 @@ pub(crate) fn run_tracking_for_date(
         }
         Err(error) => {
             progress.counts = proposal_counts(data_dir, date).unwrap_or_default();
-            if let Ok((submitted, skipped, mutation_attempted)) =
-                persisted_execution_progress(data_dir, date)
-            {
-                progress.submitted = submitted;
-                progress.skipped = skipped;
-                progress.mutation_attempted |= mutation_attempted;
-                progress.live_mutation_allowed |= mutation_attempted;
-                progress.network_access |= mutation_attempted;
+            if let Ok(execution) = persisted_execution_progress(data_dir, date) {
+                progress.submitted = execution.submitted;
+                progress.skipped = execution.skipped;
+                progress.blocked = execution.blocked;
+                progress.uncertain = execution.uncertain;
+                progress.mutation_attempted |= execution.mutation_attempted;
+                progress.live_mutation_allowed |= execution.mutation_attempted;
+                progress.network_access |= execution.mutation_attempted;
             }
             let failure = serde_json::json!({
                 "kind": tracking_failure_kind(&error),
@@ -810,12 +813,11 @@ fn effective_mutation_permission(
     data_dir: &Path,
     config: &TrackingConfig,
 ) -> Result<bool, CompanionError> {
-    Ok(config.submission.mode == SubmissionMode::Automatic
-        && config.submission.automatic_submission_authorized
-        && live_rollout_enabled()
-        && persisted_live_mutation_allowed(data_dir)?
-        && !scheduler_kill_switch_path(data_dir).exists()
-        && !environment_enabled("DRAG_TRACKING_KILL_SWITCH", "DRAG_COMPANION_KILL_SWITCH")?)
+    runtime_mutation_allowed(
+        data_dir,
+        config.submission.mode == SubmissionMode::Automatic
+            && config.submission.automatic_submission_authorized,
+    )
 }
 
 fn next_run_description(config: &TrackingConfig) -> Value {
@@ -881,6 +883,7 @@ struct ProposalCounts {
 struct TrackingRunProgress {
     date: NaiveDate,
     configured_mode: SubmissionMode,
+    effective_permission: bool,
     resumed: bool,
     source_health: Vec<Value>,
     collection_failures: Vec<Value>,
@@ -908,6 +911,7 @@ impl TrackingRunProgress {
         Self {
             date,
             configured_mode: config.submission.mode,
+            effective_permission: false,
             resumed: run_path(data_dir, date).exists(),
             source_health: source_statuses(config),
             collection_failures: Vec::new(),
@@ -937,7 +941,7 @@ impl TrackingRunProgress {
             "selectedDate": self.date,
             "status": status,
             "configuredMode": self.configured_mode,
-            "effectivePermission": self.live_mutation_allowed,
+            "effectivePermission": self.effective_permission,
             "resumed": self.resumed,
             "resumable": true,
             "sourceHealth": self.source_health,
