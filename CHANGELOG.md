@@ -14,6 +14,11 @@ This project follows [Semantic Versioning](https://semver.org/) and
   permission, and unresolved operations at the guarded execution boundary;
   preserve partial submission counters and scope run effects to current work.
 
+### Fixed
+
+- Propagate the selected tracking data directory into installed Claude Code
+  lifecycle hooks so captured evidence reaches the configured store.
+
 ### Added
 
 - Optional automatic-tracking onboarding after successful interactive Jira and

@@ -203,7 +203,7 @@ fn handle_internal(
         InternalCommand::Scheduler(args) => handle_scheduler(data_dir, drag_bin, args),
         InternalCommand::ClaudeHook(args) => match args.operation {
             ClaudeHookOperation::Install(args) => {
-                install_claude_hooks(&args.settings)?;
+                install_claude_hooks(&args.settings, data_dir)?;
                 print_json(&serde_json::json!({
                     "status": "installed",
                     "settings": args.settings,

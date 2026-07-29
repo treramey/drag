@@ -101,7 +101,14 @@ pub(crate) struct FakeObservation {
     pub(crate) summary: &'static str,
 }
 
-pub(crate) fn install_claude_hooks(settings_path: &Path) -> Result<(), CompanionError> {
+pub(crate) fn install_claude_hooks(
+    settings_path: &Path,
+    data_dir: &Path,
+) -> Result<(), CompanionError> {
+    let capture_command = format!(
+        "drag-tracking --data-dir {} internal claude-hook capture",
+        shell_quote(&data_dir.to_string_lossy())
+    );
     let mut settings = read_settings(settings_path)?;
     if !settings.is_object() {
         return Err(CompanionError::InvalidClaudeHook(
@@ -140,10 +147,22 @@ pub(crate) fn install_claude_hooks(settings_path: &Path) -> Result<(), Companion
                 "{event} hooks must be an array"
             )));
         };
-        if !arr.iter().any(is_our_hook_entry) {
+        let mut updated = false;
+        for entry in arr.iter_mut() {
+            let Some(commands) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            for command in commands {
+                if is_our_command(command) {
+                    command["command"] = Value::String(capture_command.clone());
+                    updated = true;
+                }
+            }
+        }
+        if !updated {
             arr.push(serde_json::json!({
                 "matcher": "*",
-                "hooks": [{ "type": "command", "command": CLAUDE_HOOK_COMMAND }]
+                "hooks": [{ "type": "command", "command": capture_command }]
             }));
         }
     }
@@ -931,7 +950,10 @@ pub(crate) fn is_our_command(command: &Value) -> bool {
         .get("command")
         .and_then(Value::as_str)
         .is_some_and(|command| {
-            command.contains(CLAUDE_HOOK_COMMAND) || command.contains(LEGACY_CLAUDE_HOOK_COMMAND)
+            command.contains(CLAUDE_HOOK_COMMAND)
+                || command.contains(LEGACY_CLAUDE_HOOK_COMMAND)
+                || (command.starts_with("drag-tracking ")
+                    && command.ends_with(" internal claude-hook capture"))
         })
 }
 

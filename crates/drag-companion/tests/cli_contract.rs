@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
 use serde_json::Value;
+use std::io::Write;
 use std::path::Path;
 use tempfile::tempdir;
 
@@ -3971,12 +3972,7 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
         1
     );
     let rendered = serde_json::to_string(&installed)?;
-    assert_eq!(
-        rendered
-            .matches("drag-tracking internal claude-hook capture")
-            .count(),
-        2
-    );
+    assert_eq!(rendered.matches("internal claude-hook capture").count(), 2);
 
     companion()?
         .args(["claude-hook", "remove", "--settings", settings_arg.as_str()])
@@ -3992,9 +3988,66 @@ fn claude_hook_install_and_remove_preserve_unrelated_user_config(
         removed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
         "echo keep-tool"
     );
-    assert!(
-        !serde_json::to_string(&removed)?.contains("drag-tracking internal claude-hook capture")
+    assert!(!serde_json::to_string(&removed)?.contains("internal claude-hook capture"));
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn claude_hook_install_propagates_the_selected_data_directory_to_capture(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempdir()?;
+    let settings = dir.path().join("settings.json");
+    let data_dir = dir.path().join("custom data & state");
+
+    companion()?
+        .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
+        .args([
+            "claude-hook",
+            "install",
+            "--settings",
+            settings.to_string_lossy().as_ref(),
+        ])
+        .assert()
+        .success();
+
+    let installed: Value = serde_json::from_str(&std::fs::read_to_string(&settings)?)?;
+    let command = installed["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .ok_or("installed hook command")?;
+    let binary = assert_cmd::cargo::cargo_bin("drag-tracking");
+    let binary_dir = binary.parent().ok_or("tracking binary directory")?;
+    let path = format!(
+        "{}:{}",
+        binary_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
     );
+    let payload = serde_json::json!({
+        "hook_event_name": "SessionStart",
+        "session_id": "custom-data-session",
+        "timestamp": "2026-03-08T12:00:00Z",
+        "cwd": dir.path()
+    });
+    let mut capture = std::process::Command::new("bash")
+        .args(["-c", command])
+        .env("PATH", path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    capture
+        .stdin
+        .take()
+        .ok_or("capture stdin")?
+        .write_all(&serde_json::to_vec(&payload)?)?;
+    let output = capture.wait_with_output()?;
+    assert!(
+        output.status.success(),
+        "capture failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(data_dir.join("journal.jsonl").exists());
+    assert!(!dir.path().join(".drag/tracking/journal.jsonl").exists());
     Ok(())
 }
 
@@ -4014,7 +4067,7 @@ fn claude_hook_install_defaults_to_the_user_claude_settings_file(
     let installed: Value = serde_json::from_str(&std::fs::read_to_string(settings)?)?;
     assert_eq!(
         serde_json::to_string(&installed)?
-            .matches("drag-tracking internal claude-hook capture")
+            .matches("internal claude-hook capture")
             .count(),
         2
     );
