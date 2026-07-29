@@ -111,7 +111,7 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
     let envelope: Value = serde_json::from_slice(&output)?;
     assert_eq!(envelope["ok"], true);
     let status = &envelope["data"];
-    assert_eq!(status["schemaVersion"], 2);
+    assert_eq!(status["schemaVersion"], 3);
     assert_eq!(status["configuration"]["configured"], false);
     assert_eq!(status["activity"]["state"], "idle");
     assert_eq!(status["scheduler"]["healthy"], true);
@@ -124,7 +124,7 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
 
     let contract = json_output(tracking()?.arg("contract"))?;
     assert_eq!(contract["binary"], "drag-tracking");
-    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["schemaVersion"], 3);
 
     tracking()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -182,7 +182,7 @@ fn contract_probe_does_not_resolve_or_migrate_tracking_state(
             .env_remove("DRAG_COMPANION_DATA")
             .arg("contract"),
     )?;
-    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["schemaVersion"], 3);
     assert!(legacy.exists());
     assert!(!home.join(".drag/tracking").exists());
     Ok(())
@@ -430,7 +430,7 @@ fn sources_configure_and_list_report_versioned_redacted_health(
                 calendar.to_string_lossy().as_ref(),
             ]),
     )?;
-    assert_eq!(configured["schemaVersion"], 2);
+    assert_eq!(configured["schemaVersion"], 3);
     assert_eq!(configured["effects"]["configurationPersisted"], true);
     assert_eq!(configured["networkAccess"], false);
     assert_eq!(configured["liveMutationAllowed"], false);
@@ -461,7 +461,7 @@ fn sources_configure_and_list_report_versioned_redacted_health(
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["sources", "list"]),
     )?;
-    assert_eq!(listed["schemaVersion"], 2);
+    assert_eq!(listed["schemaVersion"], 3);
     assert_eq!(listed["networkAccess"], false);
     assert_eq!(listed["liveMutationAllowed"], false);
     let sources = listed["configured"]
@@ -751,7 +751,7 @@ fn sources_test_is_bounded_redacted_and_does_not_persist_evidence_or_worklogs(
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["sources", "test", "2026-03-08"]),
     )?;
-    assert_eq!(tested["schemaVersion"], 2);
+    assert_eq!(tested["schemaVersion"], 3);
     assert_eq!(tested["selectedDate"], "2026-03-08");
     assert_eq!(tested["redaction"]["applied"], true);
     assert_eq!(tested["redaction"]["rawEvidenceIncluded"], false);
@@ -1792,7 +1792,7 @@ fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
         .clone();
     let structured: Value = serde_json::from_slice(&structured)?;
     assert_eq!(structured["ok"], true);
-    assert_eq!(structured["data"]["schemaVersion"], 2);
+    assert_eq!(structured["data"]["schemaVersion"], 3);
 
     companion()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -1804,6 +1804,90 @@ fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
         .stderr(predicate::str::contains("use `drag tracking`"));
 
     companion()?.arg("not-a-command").assert().code(2);
+    Ok(())
+}
+
+#[test]
+fn tracking_contract_documents_the_intent_surface_and_compatibility_removal(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contract = json_output(tracking()?.arg("contract"))?;
+    let commands = contract["commands"]
+        .as_array()
+        .ok_or("commands")?
+        .iter()
+        .filter_map(|command| command["name"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(contract["schemaVersion"], 3);
+    assert_eq!(
+        commands,
+        [
+            "setup",
+            "status",
+            "run",
+            "review",
+            "pause",
+            "resume",
+            "uninstall",
+            "sources",
+            "schedule",
+            "internal"
+        ]
+    );
+    assert_eq!(
+        contract["compatibility"]["shim"]["binary"],
+        "drag-companion"
+    );
+    assert_eq!(
+        contract["compatibility"]["shim"]["availableThrough"],
+        "0.9.x"
+    );
+    assert_eq!(contract["compatibility"]["shim"]["removeIn"], "0.10.0");
+    assert_eq!(
+        contract["compatibility"]["legacyDirectCommands"]["replacementPrefix"],
+        "drag-tracking internal"
+    );
+    let replacements = contract["compatibility"]["legacyDirectCommands"]["replacements"]
+        .as_array()
+        .ok_or("legacy replacements")?;
+    assert!(replacements
+        .iter()
+        .any(|mapping| { mapping["legacy"] == "execute" && mapping["replacement"] == "execute" }));
+    Ok(())
+}
+
+#[test]
+fn legacy_direct_pipeline_commands_preserve_behavior_through_internal_delegation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let direct_data = directory.path().join("direct");
+    let internal_data = directory.path().join("internal");
+
+    let direct = tracking()?
+        .args([
+            "--data-dir",
+            direct_data.to_string_lossy().as_ref(),
+            "capture",
+            "--date",
+            "2026-07-24",
+        ])
+        .output()?;
+    let internal = tracking()?
+        .args([
+            "--data-dir",
+            internal_data.to_string_lossy().as_ref(),
+            "internal",
+            "capture",
+            "--date",
+            "2026-07-24",
+        ])
+        .output()?;
+
+    assert_eq!(direct.status.code(), internal.status.code());
+    let direct: Value = serde_json::from_slice(&direct.stdout)?;
+    let internal: Value = serde_json::from_slice(&internal.stdout)?;
+    assert_eq!(direct["status"], internal["status"]);
+    assert_eq!(direct["eventId"], internal["eventId"]);
     Ok(())
 }
 
@@ -2084,6 +2168,44 @@ fn golden_operator_reports_cover_all_terminal_states() -> Result<(), Box<dyn std
 
 #[test]
 fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
+    let help = tracking()?.arg("--help").output()?;
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout)?;
+    for command in [
+        "setup",
+        "status",
+        "run",
+        "review",
+        "pause",
+        "resume",
+        "uninstall",
+        "sources",
+        "schedule",
+    ] {
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start().starts_with(command)),
+            "missing {command} from help:\n{help}"
+        );
+    }
+    for command in [
+        "internal",
+        "collect",
+        "capture",
+        "import",
+        "reconcile",
+        "execute",
+        "scheduler",
+        "claude-hook",
+    ] {
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with(command)),
+            "unexpected {command} in help:\n{help}"
+        );
+    }
+
     companion()?
         .arg("--help")
         .assert()
@@ -2929,7 +3051,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
     let contract: Value = serde_json::from_slice(&output)?;
 
     assert_eq!(contract["binary"], "drag-tracking");
-    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["schemaVersion"], 3);
     assert_eq!(contract["defaultMode"], "capture-only");
     assert_eq!(contract["adapters"]["collector"], "fake");
     assert_eq!(contract["adapters"]["mutator"], "disabled");
@@ -2945,28 +3067,16 @@ fn contract_is_machine_readable_and_capture_only_by_default(
 
     let commands = contract["commands"].as_array().ok_or("commands array")?;
     for required in [
+        "setup",
         "status",
-        "collect",
-        "capture",
-        "import",
-        "reconcile",
+        "run",
+        "review",
+        "pause",
         "resume",
-        "report",
-        "log",
-        "bundle",
-        "propose",
-        "read",
-        "audit",
-        "preview",
-        "execute",
-        "rollout",
-        "replay",
-        "process-spy",
-        "purge",
-        "retention",
-        "scheduler",
-        "claude-hook",
-        "contract",
+        "uninstall",
+        "sources",
+        "schedule",
+        "internal",
     ] {
         assert!(
             commands.iter().any(|command| command["name"] == required),
@@ -2974,31 +3084,23 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         );
     }
 
-    let execute = commands
+    let internal = commands
         .iter()
-        .find(|command| command["name"] == "execute")
-        .ok_or("execute command")?;
-    assert_eq!(execute["defaultNetworkAccess"], false);
-    assert_eq!(execute["possibleNetworkAccess"], true);
-    assert_eq!(execute["defaultLiveMutationAllowed"], false);
-    assert_eq!(execute["possibleLiveMutationAllowed"], true);
-    assert!(execute["conditionalLiveMutationAllowed"]
+        .find(|command| command["name"] == "internal")
+        .ok_or("internal command")?;
+    assert_eq!(internal["defaultNetworkAccess"], false);
+    assert_eq!(internal["possibleNetworkAccess"], true);
+    assert_eq!(internal["defaultLiveMutationAllowed"], false);
+    assert_eq!(internal["possibleLiveMutationAllowed"], true);
+    assert!(internal["conditionalLiveMutationAllowed"]
         .as_array()
         .ok_or("live conditions")?
         .iter()
-        .any(|item| item == "--authorize-live"));
-    let replay = commands
-        .iter()
-        .find(|command| command["name"] == "replay")
-        .ok_or("replay command")?;
-    assert_eq!(replay["requiresExplicitDate"], false);
-
-    let scheduler = commands
-        .iter()
-        .find(|command| command["name"] == "scheduler")
-        .ok_or("scheduler command")?;
-    for operation in ["install", "enable", "disable", "uninstall", "status"] {
-        assert!(scheduler["operations"]
+        .any(|item| item
+            .as_str()
+            .is_some_and(|value| value.contains("retains every"))));
+    for operation in ["capture", "import", "execute", "replay", "scheduler"] {
+        assert!(internal["operations"]
             .as_array()
             .ok_or("operations")?
             .iter()
@@ -3606,30 +3708,19 @@ fn contract_exposes_capture_and_import_without_live_mutation(
         .clone();
     let contract: Value = serde_json::from_slice(&output)?;
     let commands = contract["commands"].as_array().ok_or("commands array")?;
+    let internal = commands
+        .iter()
+        .find(|command| command["name"] == "internal")
+        .ok_or("internal")?;
     for required in ["capture", "import"] {
-        let command = commands
+        assert!(internal["operations"]
+            .as_array()
+            .ok_or("internal operations")?
             .iter()
-            .find(|command| command["name"] == required)
-            .ok_or(required)?;
-        assert_eq!(command["defaultNetworkAccess"], false);
-        assert_eq!(command["possibleNetworkAccess"], false);
-        assert_eq!(
-            command["conditionalNetworkAccess"]
-                .as_array()
-                .ok_or("network conditions")?
-                .len(),
-            0
-        );
-        assert_eq!(command["defaultLiveMutationAllowed"], false);
-        assert_eq!(command["possibleLiveMutationAllowed"], false);
-        assert_eq!(
-            command["conditionalLiveMutationAllowed"]
-                .as_array()
-                .ok_or("live conditions")?
-                .len(),
-            0
-        );
+            .any(|operation| operation == required));
     }
+    assert_eq!(internal["defaultNetworkAccess"], false);
+    assert_eq!(internal["defaultLiveMutationAllowed"], false);
     Ok(())
 }
 

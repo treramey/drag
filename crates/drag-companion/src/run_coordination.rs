@@ -37,89 +37,56 @@ pub(crate) fn run(cli: Cli) -> Result<(), CompanionError> {
             PublicScheduleOperation::Resume => set_tracking_active(&data_dir, true, output),
         },
         Command::Internal(args) => handle_internal(&data_dir, &drag_bin, args.command),
+        // One-minor compatibility aliases. Keep these as pure routing so the
+        // hidden replacement remains the only implementation and all safety
+        // gates are identical until the aliases are removed in 0.10.0.
         Command::Collect(args) => {
-            let result = collect_activity(&data_dir, &args)?;
-            print_json(&result)
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Collect(args))
         }
         Command::Capture(args) => {
-            let event = evidence_event(args.date);
-            append_journal_event(&data_dir, &event)?;
-            print_json(
-                &serde_json::json!({ "status": "captured", "eventId": event.event_id, "journal": journal_path(&data_dir) }),
-            )
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Capture(args))
         }
-        Command::Import => {
-            let imported = import_journal(&data_dir)?;
-            print_json(
-                &serde_json::json!({ "status": "imported", "imported": imported, "store": store_path(&data_dir) }),
-            )
-        }
+        Command::Import => handle_internal(&data_dir, &drag_bin, InternalCommand::Import),
         Command::Reconcile(args) => {
-            let result = coordinated_run(&data_dir, &drag_bin, args.date, false)?;
-            print_json(&result)
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Reconcile(args))
         }
-        Command::Report(args) => println_safe_markdown(&daily_report(&data_dir, args.date)?),
-        Command::Log(args) => print_json(&operator_log(&data_dir, args.date)?),
+        Command::Report(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Report(args))
+        }
+        Command::Log(args) => handle_internal(&data_dir, &drag_bin, InternalCommand::Log(args)),
         Command::Bundle(args) => {
-            let bundle = build_bundle(&data_dir, args.date)?;
-            print_json(&bundle)
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Bundle(args))
         }
         Command::Propose(args) => {
-            let result = propose_from_fixture(&data_dir, args.date, &args.fixture)?;
-            print_json(&result)
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Propose(args))
         }
-        Command::Read(args) => print_json(&read_drag_day(&drag_bin, args.date)?),
-        Command::Audit(args) => print_json(&audit_drag_day(
-            &data_dir,
-            &drag_bin,
-            args.date,
-            args.authorize_unattended,
-        )?),
-        Command::Preview(args) => print_json(&preview_drag_payload(
-            &data_dir,
-            &drag_bin,
-            args.date,
-            args.proposal.as_deref(),
-        )?),
-        Command::Execute(args) => print_json(&execute_drag_worklogs(
-            &data_dir,
-            &drag_bin,
-            args.date,
-            args.authorize_live,
-        )?),
-        Command::Rollout(args) => handle_rollout(&data_dir, args),
+        Command::Read(args) => handle_internal(&data_dir, &drag_bin, InternalCommand::Read(args)),
+        Command::Audit(args) => handle_internal(&data_dir, &drag_bin, InternalCommand::Audit(args)),
+        Command::Preview(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Preview(args))
+        }
+        Command::Execute(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Execute(args))
+        }
+        Command::Rollout(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Rollout(args))
+        }
         Command::Replay(args) => {
-            print_json(&run_replay(&args.fixtures, args.artifacts.as_deref())?)
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Replay(args))
         }
-        Command::ProcessSpy(args) => print_json(&process_spy(&data_dir, args.date)?),
-        Command::Purge(args) => {
-            print_json(&purge_state(&data_dir, args.acknowledge_lost_recovery)?)
+        Command::ProcessSpy(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::ProcessSpy(args))
         }
-        Command::Retention(args) => match args.operation {
-            RetentionOperation::Enforce => {
-                print_json(&enforce_retention(&data_dir, RetentionTrigger::Operator)?)
-            }
-        },
-        Command::Scheduler(args) => handle_scheduler(&data_dir, &drag_bin, args),
-        Command::ClaudeHook(args) => match args.operation {
-            ClaudeHookOperation::Install(args) => {
-                install_claude_hooks(&args.settings)?;
-                print_json(
-                    &serde_json::json!({ "status": "installed", "settings": args.settings, "events": ["SessionStart", "SessionEnd"] }),
-                )
-            }
-            ClaudeHookOperation::Remove(args) => {
-                remove_claude_hooks(&args.settings)?;
-                print_json(&serde_json::json!({ "status": "removed", "settings": args.settings }))
-            }
-            ClaudeHookOperation::Capture => {
-                let event = read_claude_hook_event(&data_dir)?;
-                append_journal_event(&data_dir, &event)?;
-                print_json(
-                    &serde_json::json!({ "status": "captured", "eventId": event.event_id, "journal": journal_path(&data_dir), "networkAccess": false }),
-                )
-            }
-        },
+        Command::Purge(args) => handle_internal(&data_dir, &drag_bin, InternalCommand::Purge(args)),
+        Command::Retention(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Retention(args))
+        }
+        Command::Scheduler(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::Scheduler(args))
+        }
+        Command::ClaudeHook(args) => {
+            handle_internal(&data_dir, &drag_bin, InternalCommand::ClaudeHook(args))
+        }
         Command::Contract => unreachable!("contract commands return before state resolution"),
     }
 }

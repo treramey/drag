@@ -16,7 +16,40 @@ pub(crate) struct Contract {
     pub(crate) possible_live_mutation_allowed: bool,
     pub(crate) conditional_live_mutation_allowed: Vec<&'static str>,
     pub(crate) drag_boundary: DragBoundary,
+    pub(crate) compatibility: CompatibilityContract,
     pub(crate) commands: Vec<CommandContract>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompatibilityContract {
+    pub(crate) shim: ShimCompatibility,
+    pub(crate) legacy_direct_commands: LegacyCommandCompatibility,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShimCompatibility {
+    pub(crate) binary: &'static str,
+    pub(crate) available_through: &'static str,
+    pub(crate) remove_in: &'static str,
+    pub(crate) replacement: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LegacyCommandCompatibility {
+    pub(crate) available_through: &'static str,
+    pub(crate) remove_in: &'static str,
+    pub(crate) replacement_prefix: &'static str,
+    pub(crate) replacements: Vec<LegacyCommandReplacement>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LegacyCommandReplacement {
+    pub(crate) legacy: &'static str,
+    pub(crate) replacement: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -82,6 +115,30 @@ pub(crate) fn contract() -> Contract {
             "execute requires persisted rollout general-autonomy permission",
         ],
         drag_boundary: drag_boundary(),
+        compatibility: CompatibilityContract {
+            shim: ShimCompatibility {
+                binary: "drag-companion",
+                available_through: "0.9.x",
+                remove_in: "0.10.0",
+                replacement: "drag tracking",
+            },
+            legacy_direct_commands: LegacyCommandCompatibility {
+                available_through: "0.9.x",
+                remove_in: "0.10.0",
+                replacement_prefix: "drag-tracking internal",
+                replacements: [
+                    "collect", "capture", "import", "reconcile", "report", "log", "bundle",
+                    "propose", "read", "audit", "preview", "execute", "rollout", "replay",
+                    "process-spy", "purge", "retention", "scheduler", "claude-hook",
+                ]
+                .into_iter()
+                .map(|legacy| LegacyCommandReplacement {
+                    legacy,
+                    replacement: legacy,
+                })
+                .collect(),
+            },
+        },
         commands: vec![
             command(
                 "setup",
@@ -116,107 +173,13 @@ pub(crate) fn contract() -> Contract {
                 vec!["list", "configure", "test"],
             ),
             command("schedule", false, vec!["persist and install an explicitly configured weekday schedule"], vec!["show", "update", "pause", "resume"]),
-            command("internal", false, vec![], vec!["diagnostics", "recovery", "replay"]),
-            command("collect", false, vec!["capture fake observations"], vec![]),
             command(
-                "capture",
-                true,
-                vec!["append one immutable evidence event to journal"],
-                vec![],
-            ),
-            command(
-                "import",
+                "internal",
                 false,
-                vec!["migrate sqlite store", "import journal events idempotently"],
-                vec![],
-            ),
-            command("reconcile", true, vec!["write terminal run result"], vec![]),
-            command("resume", true, vec!["write terminal run result"], vec![]),
-            command("report", true, vec![], vec![]),
-            command("log", true, vec!["emit secret-safe structured operator status"], vec![]),
-            command(
-                "bundle",
-                true,
-                vec!["read imported evidence and print minimized daily bundle"],
-                vec![],
-            ),
-            command(
-                "propose",
-                true,
-                vec!["read minimized bundle", "persist schema-valid proposals and safe provider metadata"],
-                vec![],
-            ),
-            command("read", true, vec![], vec!["drag list through public CLI"]).with_possible_network(vec!["drag public CLI may contact Tempo depending on Drag cache/config"]),
-            command(
-                "audit",
-                true,
-                vec![],
-                vec![
-                    "drag list through public CLI",
-                    "local duplicate and overlap comparison",
-                    "deterministic unattended policy decisions require --authorize-unattended before approval",
-                ],
-            ).with_possible_network(vec!["drag list through public CLI may contact Tempo depending on Drag cache/config"]),
-            command("preview", true, vec![], vec!["drag log --json - --dry-run through public CLI"]).with_possible_network(vec!["drag dry-run public CLI may perform schema/client validation without creating worklogs"]),
-            command(
-                "execute",
-                true,
-                vec![
-                    "persist exact payload and submitting intent before Drag invocation",
-                    "persist durable mutation operation ledger",
-                ],
-                vec![
-                    "drag list complete day before create",
-                    "drag log --json - only when --authorize-live and rollout env are enabled",
-                ],
-            ).with_possible_network(vec!["drag list complete day before create", "drag log submission when live mutation conditions pass"]).with_possible_live_mutation(vec!["--authorize-live", "DRAG_TRACKING_LIVE_MUTATION_ROLLOUT=1 (deprecated DRAG_COMPANION alias accepted)", "persisted rollout permits general-autonomy"]),
-            command(
-                "rollout",
-                false,
-                vec!["persist staged autonomy promotion evidence and reset reasons"],
-                vec!["status", "record", "promote", "effective-mode"],
-            ),
-            command("replay", false, vec!["read recorded fixtures and compare deterministic outputs"], vec![]),
-            command(
-                "process-spy",
-                true,
-                vec![],
-                vec!["inspect durable mutation operation ledger"],
-            ),
-            command(
-                "purge",
-                false,
-                vec!["delete companion data directory"],
-                vec![],
-            ),
-            command(
-                "retention",
-                false,
-                vec!["compact journal and canonical store according to configured retention windows"],
-                vec!["enforce"],
-            ),
-            command(
-                "scheduler",
-                false,
-                vec![
-                    "write only owned host scheduler files",
-                    "persist scheduler state atomically with backup",
-                    "run one scheduler-safe explicit-date reconciliation command",
-                    "kill switch forces shadow mode before mutation",
-                ],
-                vec!["install", "enable", "disable", "uninstall", "status", "catch-up", "run"],
-            ),
-            command(
-                "claude-hook",
-                false,
-                vec![
-                    "install SessionStart and SessionEnd capture hooks while preserving unrelated Claude settings",
-                    "remove only drag-companion Claude hook commands",
-                    "append local Claude lifecycle metadata from stdin without transcript capture",
-                ],
-                vec!["install", "remove", "capture"],
-            ),
-            command("contract", false, vec![], vec![]),
+                vec!["diagnostic and recovery effects vary by selected operation"],
+                vec!["collect", "capture", "import", "reconcile", "resume", "report", "log", "bundle", "propose", "read", "audit", "preview", "execute", "rollout", "replay", "process-spy", "purge", "retention", "scheduler", "claude-hook"],
+            ).with_possible_network(vec!["read, audit, preview, and guarded execute operations use the Drag process boundary"])
+             .with_possible_live_mutation(vec!["internal execute retains every authorization, rollout, duplicate, uncertainty, and kill-switch gate"]),
         ],
     }
 }
