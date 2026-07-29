@@ -6,6 +6,13 @@ This project follows [Semantic Versioning](https://semver.org/) and
 ## [Unreleased]
 
 - Enable digest-approved review runs and explicitly authorized automatic runs to submit policy-accepted worklogs through the guarded tracking execution boundary, with explicit permission and outcome reporting.
+- Finish the intent-level tracking transition: standard help, contracts, and
+  generated skills expose public workflows while low-level operations share a
+  hidden internal implementation; document and test the 0.10.x compatibility
+  window and 0.11.0 shim removal.
+- Revalidate proposal approvals, policy selections, kill switches, rollout
+  permission, and unresolved operations at the guarded execution boundary;
+  preserve partial submission counters and scope run effects to current work.
 
 ### Added
 

@@ -122,8 +122,20 @@ runs also stop before audit until a schema-valid proposal provider fixture is
 configured. Re-running setup preserves source and scheduler settings that were
 not supplied again.
 
-The deprecated `drag-companion` executable remains available as a compatibility
-shim for this release.
+Low-level diagnostics, replay, scheduler entrypoints, and recovery tools live
+under the hidden `drag-tracking internal` surface. Normal users and agents
+should use only the intent-level `drag tracking` commands above. The legacy
+direct pipeline spellings on `drag-tracking` delegate to their exact
+`drag-tracking internal <command>` replacements and retain the same safety
+gates during the compatibility window.
+
+The deprecated `drag-companion` executable remains available through the 0.10.x
+minor-release line as a compatibility shim. It delegates without changing
+structured stdout or mutation behavior. Both the shim and legacy direct
+pipeline spellings are removed in 0.11.0; migrate scripts to `drag tracking`
+for intent workflows or `drag-tracking internal` for operator recovery before
+upgrading. Rollback remains possible by pausing tracking, restoring the legacy
+state directory as described in `docs/architecture.md`, and reinstalling 0.10.x.
 
 When `drag list` opens an interactive terminal report, use Left/Right Arrow or
 `h`/`l` to change days, Up/Down Arrow or `k`/`j` to move between worklogs, and

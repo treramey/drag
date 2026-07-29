@@ -111,7 +111,7 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
     let envelope: Value = serde_json::from_slice(&output)?;
     assert_eq!(envelope["ok"], true);
     let status = &envelope["data"];
-    assert_eq!(status["schemaVersion"], 2);
+    assert_eq!(status["schemaVersion"], 3);
     assert_eq!(status["configuration"]["configured"], false);
     assert_eq!(status["activity"]["state"], "idle");
     assert_eq!(status["scheduler"]["healthy"], true);
@@ -124,7 +124,7 @@ fn tracking_status_reports_the_public_local_contract() -> Result<(), Box<dyn std
 
     let contract = json_output(tracking()?.arg("contract"))?;
     assert_eq!(contract["binary"], "drag-tracking");
-    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["schemaVersion"], 3);
 
     tracking()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -182,7 +182,7 @@ fn contract_probe_does_not_resolve_or_migrate_tracking_state(
             .env_remove("DRAG_COMPANION_DATA")
             .arg("contract"),
     )?;
-    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["schemaVersion"], 3);
     assert!(legacy.exists());
     assert!(!home.join(".drag/tracking").exists());
     Ok(())
@@ -430,7 +430,7 @@ fn sources_configure_and_list_report_versioned_redacted_health(
                 calendar.to_string_lossy().as_ref(),
             ]),
     )?;
-    assert_eq!(configured["schemaVersion"], 2);
+    assert_eq!(configured["schemaVersion"], 3);
     assert_eq!(configured["effects"]["configurationPersisted"], true);
     assert_eq!(configured["networkAccess"], false);
     assert_eq!(configured["liveMutationAllowed"], false);
@@ -461,7 +461,7 @@ fn sources_configure_and_list_report_versioned_redacted_health(
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["sources", "list"]),
     )?;
-    assert_eq!(listed["schemaVersion"], 2);
+    assert_eq!(listed["schemaVersion"], 3);
     assert_eq!(listed["networkAccess"], false);
     assert_eq!(listed["liveMutationAllowed"], false);
     let sources = listed["configured"]
@@ -751,7 +751,7 @@ fn sources_test_is_bounded_redacted_and_does_not_persist_evidence_or_worklogs(
             .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
             .args(["sources", "test", "2026-03-08"]),
     )?;
-    assert_eq!(tested["schemaVersion"], 2);
+    assert_eq!(tested["schemaVersion"], 3);
     assert_eq!(tested["selectedDate"], "2026-03-08");
     assert_eq!(tested["redaction"]["applied"], true);
     assert_eq!(tested["redaction"]["rawEvidenceIncluded"], false);
@@ -1792,7 +1792,7 @@ fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
         .clone();
     let structured: Value = serde_json::from_slice(&structured)?;
     assert_eq!(structured["ok"], true);
-    assert_eq!(structured["data"]["schemaVersion"], 2);
+    assert_eq!(structured["data"]["schemaVersion"], 3);
 
     companion()?
         .args(["--data-dir", data_dir.to_string_lossy().as_ref()])
@@ -1804,6 +1804,100 @@ fn companion_shim_warns_only_for_human_output_and_preserves_structured_stdout(
         .stderr(predicate::str::contains("use `drag tracking`"));
 
     companion()?.arg("not-a-command").assert().code(2);
+    Ok(())
+}
+
+#[test]
+fn tracking_contract_documents_the_intent_surface_and_compatibility_removal(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let contract = json_output(tracking()?.arg("contract"))?;
+    let commands = contract["commands"]
+        .as_array()
+        .ok_or("commands")?
+        .iter()
+        .filter_map(|command| command["name"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(contract["schemaVersion"], 3);
+    assert_eq!(
+        commands,
+        [
+            "setup",
+            "status",
+            "run",
+            "review",
+            "pause",
+            "resume",
+            "uninstall",
+            "sources",
+            "schedule",
+            "internal"
+        ]
+    );
+    assert_eq!(
+        contract["compatibility"]["shim"]["binary"],
+        "drag-companion"
+    );
+    assert_eq!(
+        contract["compatibility"]["shim"]["availableThrough"],
+        "0.10.x"
+    );
+    assert_eq!(contract["compatibility"]["shim"]["removeIn"], "0.11.0");
+    let shim_replacements = contract["compatibility"]["shim"]["replacements"]
+        .as_array()
+        .ok_or("shim replacements")?;
+    assert!(shim_replacements.iter().any(|mapping| {
+        mapping["command"] == "status" && mapping["replacement"] == "drag tracking status"
+    }));
+    assert!(shim_replacements.iter().any(|mapping| {
+        mapping["command"] == "capture"
+            && mapping["replacement"] == "drag-tracking internal capture"
+    }));
+    assert_eq!(
+        contract["compatibility"]["legacyDirectCommands"]["replacementPrefix"],
+        "drag-tracking internal"
+    );
+    let replacements = contract["compatibility"]["legacyDirectCommands"]["replacements"]
+        .as_array()
+        .ok_or("legacy replacements")?;
+    assert!(replacements
+        .iter()
+        .any(|mapping| { mapping["legacy"] == "execute" && mapping["replacement"] == "execute" }));
+    Ok(())
+}
+
+#[test]
+fn legacy_direct_pipeline_commands_preserve_behavior_through_internal_delegation(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let direct_data = directory.path().join("direct");
+    let internal_data = directory.path().join("internal");
+
+    let direct = tracking()?
+        .args([
+            "--data-dir",
+            direct_data.to_string_lossy().as_ref(),
+            "capture",
+            "--date",
+            "2026-07-24",
+        ])
+        .output()?;
+    let internal = tracking()?
+        .args([
+            "--data-dir",
+            internal_data.to_string_lossy().as_ref(),
+            "internal",
+            "capture",
+            "--date",
+            "2026-07-24",
+        ])
+        .output()?;
+
+    assert_eq!(direct.status.code(), internal.status.code());
+    let direct: Value = serde_json::from_slice(&direct.stdout)?;
+    let internal: Value = serde_json::from_slice(&internal.stdout)?;
+    assert_eq!(direct["status"], internal["status"]);
+    assert_eq!(direct["eventId"], internal["eventId"]);
     Ok(())
 }
 
@@ -1963,7 +2057,7 @@ fn retention_enforce_expires_overrides_protects_recovery_and_preserves_privacy(
     )?;
 
     let output = companion()?
-        .args(["--data-dir", &data, "retention", "enforce"])
+        .args(["--data-dir", &data, "internal", "retention", "enforce"])
         .env("DRAG_COMPANION_RETENTION_NOW", "2026-03-10T00:00:00Z")
         .env("DRAG_COMPANION_RETENTION_RAW_DAYS", "1")
         .env("DRAG_COMPANION_RETENTION_NORMALIZED_DAYS", "2")
@@ -2084,6 +2178,44 @@ fn golden_operator_reports_cover_all_terminal_states() -> Result<(), Box<dyn std
 
 #[test]
 fn help_exposes_required_commands() -> Result<(), Box<dyn std::error::Error>> {
+    let help = tracking()?.arg("--help").output()?;
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout)?;
+    for command in [
+        "setup",
+        "status",
+        "run",
+        "review",
+        "pause",
+        "resume",
+        "uninstall",
+        "sources",
+        "schedule",
+    ] {
+        assert!(
+            help.lines()
+                .any(|line| line.trim_start().starts_with(command)),
+            "missing {command} from help:\n{help}"
+        );
+    }
+    for command in [
+        "internal",
+        "collect",
+        "capture",
+        "import",
+        "reconcile",
+        "execute",
+        "scheduler",
+        "claude-hook",
+    ] {
+        assert!(
+            !help
+                .lines()
+                .any(|line| line.trim_start().starts_with(command)),
+            "unexpected {command} in help:\n{help}"
+        );
+    }
+
     companion()?
         .arg("--help")
         .assert()
@@ -2929,7 +3061,7 @@ fn contract_is_machine_readable_and_capture_only_by_default(
     let contract: Value = serde_json::from_slice(&output)?;
 
     assert_eq!(contract["binary"], "drag-tracking");
-    assert_eq!(contract["schemaVersion"], 2);
+    assert_eq!(contract["schemaVersion"], 3);
     assert_eq!(contract["defaultMode"], "capture-only");
     assert_eq!(contract["adapters"]["collector"], "fake");
     assert_eq!(contract["adapters"]["mutator"], "disabled");
@@ -2945,28 +3077,16 @@ fn contract_is_machine_readable_and_capture_only_by_default(
 
     let commands = contract["commands"].as_array().ok_or("commands array")?;
     for required in [
+        "setup",
         "status",
-        "collect",
-        "capture",
-        "import",
-        "reconcile",
+        "run",
+        "review",
+        "pause",
         "resume",
-        "report",
-        "log",
-        "bundle",
-        "propose",
-        "read",
-        "audit",
-        "preview",
-        "execute",
-        "rollout",
-        "replay",
-        "process-spy",
-        "purge",
-        "retention",
-        "scheduler",
-        "claude-hook",
-        "contract",
+        "uninstall",
+        "sources",
+        "schedule",
+        "internal",
     ] {
         assert!(
             commands.iter().any(|command| command["name"] == required),
@@ -2974,31 +3094,23 @@ fn contract_is_machine_readable_and_capture_only_by_default(
         );
     }
 
-    let execute = commands
+    let internal = commands
         .iter()
-        .find(|command| command["name"] == "execute")
-        .ok_or("execute command")?;
-    assert_eq!(execute["defaultNetworkAccess"], false);
-    assert_eq!(execute["possibleNetworkAccess"], true);
-    assert_eq!(execute["defaultLiveMutationAllowed"], false);
-    assert_eq!(execute["possibleLiveMutationAllowed"], true);
-    assert!(execute["conditionalLiveMutationAllowed"]
+        .find(|command| command["name"] == "internal")
+        .ok_or("internal command")?;
+    assert_eq!(internal["defaultNetworkAccess"], false);
+    assert_eq!(internal["possibleNetworkAccess"], true);
+    assert_eq!(internal["defaultLiveMutationAllowed"], false);
+    assert_eq!(internal["possibleLiveMutationAllowed"], true);
+    assert!(internal["conditionalLiveMutationAllowed"]
         .as_array()
         .ok_or("live conditions")?
         .iter()
-        .any(|item| item == "--authorize-live"));
-    let replay = commands
-        .iter()
-        .find(|command| command["name"] == "replay")
-        .ok_or("replay command")?;
-    assert_eq!(replay["requiresExplicitDate"], false);
-
-    let scheduler = commands
-        .iter()
-        .find(|command| command["name"] == "scheduler")
-        .ok_or("scheduler command")?;
-    for operation in ["install", "enable", "disable", "uninstall", "status"] {
-        assert!(scheduler["operations"]
+        .any(|item| item
+            .as_str()
+            .is_some_and(|value| value.contains("retains every"))));
+    for operation in ["capture", "import", "execute", "replay", "scheduler"] {
+        assert!(internal["operations"]
             .as_array()
             .ok_or("operations")?
             .iter()
@@ -3606,30 +3718,19 @@ fn contract_exposes_capture_and_import_without_live_mutation(
         .clone();
     let contract: Value = serde_json::from_slice(&output)?;
     let commands = contract["commands"].as_array().ok_or("commands array")?;
+    let internal = commands
+        .iter()
+        .find(|command| command["name"] == "internal")
+        .ok_or("internal")?;
     for required in ["capture", "import"] {
-        let command = commands
+        assert!(internal["operations"]
+            .as_array()
+            .ok_or("internal operations")?
             .iter()
-            .find(|command| command["name"] == required)
-            .ok_or(required)?;
-        assert_eq!(command["defaultNetworkAccess"], false);
-        assert_eq!(command["possibleNetworkAccess"], false);
-        assert_eq!(
-            command["conditionalNetworkAccess"]
-                .as_array()
-                .ok_or("network conditions")?
-                .len(),
-            0
-        );
-        assert_eq!(command["defaultLiveMutationAllowed"], false);
-        assert_eq!(command["possibleLiveMutationAllowed"], false);
-        assert_eq!(
-            command["conditionalLiveMutationAllowed"]
-                .as_array()
-                .ok_or("live conditions")?
-                .len(),
-            0
-        );
+            .any(|operation| operation == required));
     }
+    assert_eq!(internal["defaultNetworkAccess"], false);
+    assert_eq!(internal["defaultLiveMutationAllowed"], false);
     Ok(())
 }
 
@@ -4477,6 +4578,7 @@ fi
 	  worklog=$(printf '%s' "$payload" | python3 -c 'import json,sys; p=json.load(sys.stdin); p["id"]=sys.argv[1]; print(json.dumps(p,separators=(",",":")))' "$id")
 	  echo "$worklog" >> "$state"
 	  if [[ "${{DRAG_FAULT:-}}" == "after-remote" ]]; then echo dropped >&2; exit 1; fi
+	  if [[ "${{DRAG_FAULT:-}}" == "missing-id-after-first" ]] && [[ $(wc -l < "$state") -gt 1 ]]; then printf '{{"ok":true,"data":{{}}}}'; exit 0; fi
 	  if [[ "${{DRAG_FAULT:-}}" == "malformed-json" ]]; then printf '{{'; exit 0; fi
 	  if [[ "${{DRAG_FAULT:-}}" == "truncated-json" ]]; then printf '{{"ok":true,"data":'; exit 0; fi
 	  if [[ "${{DRAG_FAULT:-}}" == "missing-data" ]]; then printf '{{"ok":true}}'; exit 0; fi
@@ -4612,6 +4714,227 @@ fn gated_execute_counts_terminal_operations_as_skipped_instead_of_blocked(
     assert_eq!(gated["skipped"], 1);
     assert_eq!(gated["blocked"], 0);
     assert_eq!(gated["uncertain"], false);
+    Ok(())
+}
+
+#[test]
+fn execution_rechecks_selection_and_runtime_gates_inside_the_mutation_boundary(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    seed_approved_payload(
+        &data,
+        "proposal-review-race",
+        "DRAG-171",
+        "2026-03-08T09:00:00Z",
+        "2026-03-08T10:00:00Z",
+    )?;
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "review",
+        "2026-03-08",
+        "--approve",
+    ]))?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+
+    let raced = json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_COMPANION_TEST_INVALIDATE_SELECTION_AFTER_LEASE", "1"),
+    )?;
+    assert_eq!(raced["status"], "gated");
+    assert_eq!(raced["effectivePermission"], false);
+    assert_eq!(raced["submitted"], 0);
+    assert_eq!(raced["effects"]["mutationAttempted"], false);
+    assert!(!directory.path().join("remote.jsonl").exists());
+
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    for (proposal, issue, start, end) in [
+        ("proposal-one", "DRAG-171", "13:00", "14:00"),
+        ("proposal-two", "DRAG-172", "15:00", "16:00"),
+    ] {
+        seed_approved_payload(
+            &data,
+            proposal,
+            issue,
+            &format!("2026-03-08T{start}:00Z"),
+            &format!("2026-03-08T{end}:00Z"),
+        )?;
+    }
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+    let killed = json_output(
+        companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_COMPANION_TEST_KILL_AFTER_SUBMISSIONS", "1"),
+    )?;
+    assert_eq!(killed["status"], "gated");
+    assert_eq!(killed["submitted"], 1);
+    assert_eq!(killed["blocked"], 1);
+    assert_eq!(killed["effects"], Value::Null);
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("commands.log"))?
+            .matches(" log ")
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn execution_reports_blocked_and_uncertain_partial_progress(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    for (proposal, issue, start, end) in [
+        ("proposal-one", "DRAG-171", "13:00", "14:00"),
+        ("proposal-two", "DRAG-172", "15:00", "16:00"),
+    ] {
+        seed_approved_payload(
+            &data,
+            proposal,
+            issue,
+            &format!("2026-03-08T{start}:00Z"),
+            &format!("2026-03-08T{end}:00Z"),
+        )?;
+    }
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+    let uncertain = json_output(
+        companion()?
+            .args([
+                "--data-dir",
+                &data,
+                "--drag-bin",
+                drag.to_string_lossy().as_ref(),
+                "execute",
+                "--date",
+                "2026-03-08",
+                "--authorize-live",
+            ])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+            .env("DRAG_FAULT", "missing-id-after-first"),
+    )?;
+    assert_eq!(uncertain["status"], "uncertain");
+    assert_eq!(uncertain["submitted"], 1);
+    assert_eq!(uncertain["uncertain"], true);
+    assert_eq!(uncertain["mutationAttempted"], true);
+
+    Ok(())
+}
+
+#[test]
+fn public_run_permission_and_effects_are_scoped_to_current_recovery_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "setup",
+        "--mode",
+        "automatic",
+        "--authorize-automatic",
+    ]))?;
+    seed_approved_payload(
+        &data,
+        "proposal-blocked",
+        "DRAG-171",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    json_output(companion()?.args(["--data-dir", &data, "process-spy", "--date", "2026-03-08"]))?;
+    let conn = rusqlite::Connection::open(data_dir.join("companion.sqlite3"))?;
+    conn.execute(
+        "INSERT INTO mutation_operations (id, state, idempotency_key, local_date, tempo_account, payload_json) VALUES ('old-uncertain', 'uncertain', 'old-uncertain', '2026-03-08', 'account-default', '{}')",
+        [],
+    )?;
+    drop(conn);
+    let drag = executable_drag(&directory)?;
+
+    let gated = json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+    assert_eq!(gated["effectivePermission"], false);
+    assert_eq!(gated["blocked"], 1);
+    assert_eq!(gated["uncertain"], true);
+    assert_eq!(gated["effects"]["mutationAttempted"], false);
+    assert_eq!(gated["liveMutationAllowed"], false);
+
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "setup",
+        "--mode",
+        "automatic",
+        "--authorize-automatic",
+    ]))?;
+    seed_approved_payload(
+        &data,
+        "proposal-history",
+        "DRAG-171",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+    json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+    let incomplete_drag = fake_drag(
+        &directory,
+        vec![serde_json::json!({
+            "schemaVersion": 1,
+            "selectedDate": "2026-03-08",
+            "partial": true,
+            "worklogs": []
+        })],
+    )?;
+    let failed = tracking()?
+        .args(["--data-dir", &data])
+        .args(["--drag-bin", incomplete_drag.to_string_lossy().as_ref()])
+        .args(["--output", "json", "run", "2026-03-08"])
+        .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1")
+        .output()?;
+    assert_eq!(failed.status.code(), Some(1));
+    let failure: Value = serde_json::from_slice(&failed.stderr)?;
+    assert_eq!(failure["error"]["details"]["submitted"], 0);
+    assert_eq!(
+        failure["error"]["details"]["effects"]["mutationAttempted"],
+        false
+    );
+    assert_eq!(failure["error"]["details"]["liveMutationAllowed"], false);
     Ok(())
 }
 
@@ -6255,7 +6578,14 @@ fn retention_compaction_preserves_concurrent_append_with_stable_journal_lock(
         .stdout(std::process::Stdio::null())
         .spawn()?;
     companion()?
-        .args(["--data-dir", &data, "capture", "--date", "2026-03-10"])
+        .args([
+            "--data-dir",
+            &data,
+            "internal",
+            "capture",
+            "--date",
+            "2026-03-10",
+        ])
         .assert()
         .success();
     child.wait()?;

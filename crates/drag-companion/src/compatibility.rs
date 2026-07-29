@@ -6,7 +6,7 @@ fn main() {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     if requests_human_output(&arguments) {
         eprintln!(
-            "warning: `drag-companion` is deprecated; use `drag tracking` or `drag-tracking`"
+            "warning: `drag-companion` is deprecated; use `drag tracking` or `drag-tracking`; the shim is available through 0.10.x and will be removed in 0.11.0"
         );
     }
 

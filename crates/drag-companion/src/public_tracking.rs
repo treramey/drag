@@ -235,12 +235,18 @@ pub(crate) fn run_tracking_for_date(
     date: NaiveDate,
 ) -> Result<Value, CompanionError> {
     let mut progress = TrackingRunProgress::new(data_dir, config, date);
+    progress.execution_baseline = if store_path(data_dir).exists() {
+        persisted_execution_progress(data_dir, date)?
+    } else {
+        PersistedExecutionProgress::default()
+    };
     let configured_authorization = match config.submission.mode {
         SubmissionMode::Automatic => config.submission.automatic_submission_authorized,
         SubmissionMode::Review => approval_matches(data_dir, date)?,
         SubmissionMode::Draft => false,
     };
-    progress.effective_permission = runtime_mutation_allowed(data_dir, configured_authorization)?;
+    progress.effective_permission =
+        runtime_mutation_allowed_for_date(data_dir, date, configured_authorization)?;
     let outcome = (|| -> Result<(), CompanionError> {
         let collect = CollectArgs {
             repos: config
@@ -315,12 +321,19 @@ pub(crate) fn run_tracking_for_date(
         }
         progress.counts = proposal_counts(data_dir, date)?;
 
+        let review_digest = if config.submission.mode == SubmissionMode::Review {
+            let digest = proposal_set_digest(data_dir, date)?;
+            approval_matches_digest(data_dir, date, &digest)?.then_some(digest)
+        } else {
+            None
+        };
         let execution_authorized = match config.submission.mode {
             SubmissionMode::Automatic => config.submission.automatic_submission_authorized,
-            SubmissionMode::Review => approved_review,
+            SubmissionMode::Review => review_digest.is_some(),
             SubmissionMode::Draft => false,
         };
-        progress.effective_permission = runtime_mutation_allowed(data_dir, execution_authorized)?;
+        progress.effective_permission =
+            runtime_mutation_allowed_for_date(data_dir, date, execution_authorized)?;
         let run = coordinated_run_with_submission(
             data_dir,
             drag_bin,
@@ -334,10 +347,17 @@ pub(crate) fn run_tracking_for_date(
         }
 
         if execution_authorized {
-            progress.mutation_attempted = true;
-            let execution = execute_drag_worklogs(data_dir, drag_bin, date, true)?;
+            let binding = ExecutionBinding {
+                proposal_digest: review_digest,
+                selection_digest: Some(execution_selection_digest(data_dir, date)?),
+                block_unresolved: true,
+            };
+            let execution = execute_drag_worklogs_bound(data_dir, drag_bin, date, true, &binding)?;
             if execution.status != "executed" {
                 progress.terminal_status = Some(execution.status);
+                if execution.status == "gated" {
+                    progress.effective_permission = false;
+                }
                 progress.warnings.push(match execution.status {
                     "gated" => "submission was blocked by runtime safety gates".to_owned(),
                     "uncertain" => {
@@ -350,8 +370,12 @@ pub(crate) fn run_tracking_for_date(
             progress.skipped = execution.skipped;
             progress.network_access |= execution.network_access;
             progress.live_mutation_allowed = execution.live_mutation_allowed;
+            if execution.status == "executed" {
+                progress.effective_permission = execution.live_mutation_allowed;
+            }
             progress.blocked = execution.blocked;
             progress.uncertain = execution.uncertain;
+            progress.mutation_attempted = execution.mutation_attempted;
         }
         progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
         Ok(())
@@ -375,13 +399,19 @@ pub(crate) fn run_tracking_for_date(
         Err(error) => {
             progress.counts = proposal_counts(data_dir, date).unwrap_or_default();
             if let Ok(execution) = persisted_execution_progress(data_dir, date) {
-                progress.submitted = execution.submitted;
-                progress.skipped = execution.skipped;
+                progress.submitted = execution
+                    .submitted
+                    .saturating_sub(progress.execution_baseline.submitted);
+                progress.skipped = execution
+                    .skipped
+                    .saturating_sub(progress.execution_baseline.skipped);
                 progress.blocked = execution.blocked;
                 progress.uncertain = execution.uncertain;
-                progress.mutation_attempted |= execution.mutation_attempted;
-                progress.live_mutation_allowed |= execution.mutation_attempted;
-                progress.network_access |= execution.mutation_attempted;
+                let attempted_this_run =
+                    execution.operations > progress.execution_baseline.operations;
+                progress.mutation_attempted |= attempted_this_run;
+                progress.live_mutation_allowed |= attempted_this_run;
+                progress.network_access |= attempted_this_run;
             }
             let failure = serde_json::json!({
                 "kind": tracking_failure_kind(&error),
@@ -904,6 +934,7 @@ struct TrackingRunProgress {
     warnings: Vec<String>,
     phases: Value,
     retention: Option<Value>,
+    execution_baseline: PersistedExecutionProgress,
 }
 
 impl TrackingRunProgress {
@@ -932,6 +963,7 @@ impl TrackingRunProgress {
             warnings: Vec::new(),
             phases: Value::Array(Vec::new()),
             retention: None,
+            execution_baseline: PersistedExecutionProgress::default(),
         }
     }
 
@@ -1041,7 +1073,10 @@ fn proposal_counts(data_dir: &Path, date: NaiveDate) -> Result<ProposalCounts, C
     })
 }
 
-fn proposal_set_digest(data_dir: &Path, date: NaiveDate) -> Result<String, CompanionError> {
+pub(crate) fn proposal_set_digest(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<String, CompanionError> {
     let proposals = review_proposals(data_dir, date)?;
     let bytes = serde_json::to_vec(&proposals).map_err(CompanionError::Serialize)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
@@ -1093,8 +1128,16 @@ fn load_approval(data_dir: &Path, date: NaiveDate) -> Result<Option<Value>, Comp
 
 fn approval_matches(data_dir: &Path, date: NaiveDate) -> Result<bool, CompanionError> {
     let digest = proposal_set_digest(data_dir, date)?;
+    approval_matches_digest(data_dir, date, &digest)
+}
+
+pub(crate) fn approval_matches_digest(
+    data_dir: &Path,
+    date: NaiveDate,
+    digest: &str,
+) -> Result<bool, CompanionError> {
     Ok(load_approval(data_dir, date)?
-        .is_some_and(|approval| approval["digest"].as_str() == Some(&digest)))
+        .is_some_and(|approval| approval["digest"].as_str() == Some(digest)))
 }
 
 fn review_decisions(data_dir: &Path, date: NaiveDate) -> Result<Vec<Value>, CompanionError> {

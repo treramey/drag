@@ -14,7 +14,7 @@ use crate::tracking_setup::{
 use crate::tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::{CliError, ResolvedOutputMode};
 
-const TRACKING_CONTRACT_VERSION: u64 = 2;
+const TRACKING_CONTRACT_VERSION: u64 = 3;
 
 pub(crate) fn run(
     mut args: TrackingArgs,

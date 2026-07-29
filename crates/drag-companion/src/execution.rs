@@ -9,6 +9,7 @@ pub(crate) struct ExecuteResult {
     pub(crate) skipped: usize,
     pub(crate) blocked: usize,
     pub(crate) uncertain: bool,
+    pub(crate) mutation_attempted: bool,
     pub(crate) network_access: bool,
     pub(crate) live_mutation_allowed: bool,
 }
@@ -32,11 +33,52 @@ pub(crate) fn runtime_mutation_allowed(
         && !tracking_kill_switch_active())
 }
 
+pub(crate) fn runtime_mutation_allowed_for_date(
+    data_dir: &Path,
+    date: NaiveDate,
+    authorize_live: bool,
+) -> Result<bool, CompanionError> {
+    if !runtime_mutation_allowed(data_dir, authorize_live)? {
+        return Ok(false);
+    }
+    if !store_path(data_dir).exists() {
+        return Ok(true);
+    }
+    let mut conn = Connection::open(store_path(data_dir))?;
+    migrate(&mut conn)?;
+    migrate_run_coordination(&conn)?;
+    let account = execution_tempo_account(data_dir, date)?;
+    Ok(!date_has_unresolved_operation(&conn, date, &account)?)
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ExecutionBinding {
+    pub(crate) proposal_digest: Option<String>,
+    pub(crate) selection_digest: Option<String>,
+    pub(crate) block_unresolved: bool,
+}
+
 pub(crate) fn execute_drag_worklogs(
     data_dir: &Path,
     drag_bin: &Path,
     date: NaiveDate,
     authorize_live: bool,
+) -> Result<ExecuteResult, CompanionError> {
+    execute_drag_worklogs_bound(
+        data_dir,
+        drag_bin,
+        date,
+        authorize_live,
+        &ExecutionBinding::default(),
+    )
+}
+
+pub(crate) fn execute_drag_worklogs_bound(
+    data_dir: &Path,
+    drag_bin: &Path,
+    date: NaiveDate,
+    authorize_live: bool,
+    binding: &ExecutionBinding,
 ) -> Result<ExecuteResult, CompanionError> {
     if !runtime_mutation_allowed(data_dir, authorize_live)? {
         let progress = gated_execution_progress(data_dir, date)?;
@@ -47,6 +89,7 @@ pub(crate) fn execute_drag_worklogs(
             skipped: progress.skipped,
             blocked: progress.blocked,
             uncertain: progress.uncertain,
+            mutation_attempted: false,
             network_access: false,
             live_mutation_allowed: false,
         });
@@ -62,7 +105,21 @@ pub(crate) fn execute_drag_worklogs(
     let _lock = acquire_advisory_lock(data_dir, date, &account)?;
     let owner_id = format!("execute:{}:{}", std::process::id(), now_string());
     acquire_sqlite_lease(&conn, date, &account, &owner_id)?;
-    let result = execute_drag_worklogs_locked(data_dir, drag_bin, date, &account, &conn);
+    if std::env::var("DRAG_COMPANION_TEST_INVALIDATE_SELECTION_AFTER_LEASE").is_ok() {
+        conn.execute(
+            "UPDATE policy_decisions SET decision = 'rejected' WHERE proposal_id IN (SELECT p.id FROM proposals p JOIN daily_bundles b ON b.id = p.bundle_id WHERE b.explicit_date = ?1)",
+            [date.to_string()],
+        )?;
+    }
+    let result = execute_drag_worklogs_locked(
+        data_dir,
+        drag_bin,
+        date,
+        &account,
+        &conn,
+        authorize_live,
+        binding,
+    );
     let release = release_sqlite_lease(&conn, date, &account, &owner_id);
     match (result, release) {
         (Err(error), _) => Err(error),
@@ -77,17 +134,42 @@ pub(crate) fn execute_drag_worklogs_locked(
     date: NaiveDate,
     account: &str,
     conn: &Connection,
+    authorize_live: bool,
+    binding: &ExecutionBinding,
 ) -> Result<ExecuteResult, CompanionError> {
+    if !runtime_mutation_allowed(data_dir, authorize_live)? {
+        return gated_execution_result(data_dir, date);
+    }
+    if binding.block_unresolved
+        && !runtime_mutation_allowed_for_date(data_dir, date, authorize_live)?
+    {
+        return gated_execution_result(data_dir, date);
+    }
+    if let Some(expected) = binding.proposal_digest.as_deref() {
+        if !approval_matches_digest(data_dir, date, expected)? {
+            return gated_execution_result(data_dir, date);
+        }
+    }
+    if let Some(expected) = binding.selection_digest.as_deref() {
+        if execution_selection_digest(data_dir, date)? != expected {
+            return gated_execution_result(data_dir, date);
+        }
+    }
     reconcile_complete_day_and_ledger(conn, drag_bin, date, account)?;
     let approved = approved_payloads_for_account(data_dir, date, account)?;
+    let approved_count = approved.len();
     let mut submitted = 0;
     let mut skipped = 0;
+    let mut blocked = 0;
+    let mut mutation_attempted = false;
+    let network_access = true;
     let mut blocked_accounts = std::collections::BTreeSet::new();
-    for record in approved {
+    for (index, record) in approved.into_iter().enumerate() {
         let proposal_id = record.proposal_id;
         let account = record.tempo_account;
         let payload = record.payload;
         if blocked_accounts.contains(&account) {
+            blocked += 1;
             continue;
         }
         let key = operation_key(&account, date, &payload)?;
@@ -98,12 +180,14 @@ pub(crate) fn execute_drag_worklogs_locked(
             }
             Some("submitting" | "uncertain") => {
                 blocked_accounts.insert(account);
+                blocked += 1;
                 continue;
             }
             Some(_) | None => {}
         }
         if date_has_unresolved_operation(conn, date, &account)? {
             blocked_accounts.insert(account);
+            blocked += 1;
             continue;
         }
         let latest = read_drag_day(drag_bin, date)?;
@@ -118,7 +202,22 @@ pub(crate) fn execute_drag_worklogs_locked(
             skipped += 1;
             continue;
         }
+        if !runtime_mutation_allowed(data_dir, authorize_live)? {
+            blocked += approved_count.saturating_sub(index);
+            return Ok(ExecuteResult {
+                status: "gated",
+                selected_date: date,
+                submitted,
+                skipped,
+                blocked,
+                uncertain: false,
+                mutation_attempted,
+                network_access,
+                live_mutation_allowed: false,
+            });
+        }
         persist_submitting_operation(conn, date, &account, &proposal_id, &key, &payload)?;
+        mutation_attempted = true;
         let response = drag_json(
             drag_bin,
             &[
@@ -139,14 +238,38 @@ pub(crate) fn execute_drag_worklogs_locked(
                     .and_then(Value::as_str)
                 else {
                     mark_operation_uncertain(conn, date, &account, &key)?;
-                    return Ok(uncertain_execute_result(date));
+                    return Ok(uncertain_execute_result(
+                        date,
+                        submitted,
+                        skipped,
+                        blocked,
+                        mutation_attempted,
+                    ));
                 };
                 persist_confirmed_operation(conn, &key, id)?;
                 submitted += 1;
+                if std::env::var("DRAG_COMPANION_TEST_KILL_AFTER_SUBMISSIONS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    == Some(submitted)
+                {
+                    fs::write(scheduler_kill_switch_path(data_dir), b"test kill switch").map_err(
+                        |source| CompanionError::Write {
+                            path: scheduler_kill_switch_path(data_dir),
+                            source,
+                        },
+                    )?;
+                }
             }
             Err(error) if unverifiable_after_live_spawn(&error) => {
                 mark_operation_uncertain(conn, date, &account, &key)?;
-                return Ok(uncertain_execute_result(date));
+                return Ok(uncertain_execute_result(
+                    date,
+                    submitted,
+                    skipped,
+                    blocked,
+                    mutation_attempted,
+                ));
             }
             Err(error) => {
                 mark_operation_failed(conn, &key)?;
@@ -154,27 +277,35 @@ pub(crate) fn execute_drag_worklogs_locked(
             }
         }
     }
-    let uncertain = submitted == 0 && skipped == 0 && !blocked_accounts.is_empty();
+    let uncertain = blocked > 0;
     Ok(ExecuteResult {
         status: if uncertain { "uncertain" } else { "executed" },
         selected_date: date,
         submitted,
         skipped,
-        blocked: 0,
+        blocked,
         uncertain,
-        network_access: true,
+        mutation_attempted,
+        network_access,
         live_mutation_allowed: true,
     })
 }
 
-pub(crate) fn uncertain_execute_result(date: NaiveDate) -> ExecuteResult {
+pub(crate) fn uncertain_execute_result(
+    date: NaiveDate,
+    submitted: usize,
+    skipped: usize,
+    blocked: usize,
+    mutation_attempted: bool,
+) -> ExecuteResult {
     ExecuteResult {
         status: "uncertain",
         selected_date: date,
-        submitted: 0,
-        skipped: 0,
-        blocked: 0,
+        submitted,
+        skipped,
+        blocked,
         uncertain: true,
+        mutation_attempted,
         network_access: true,
         live_mutation_allowed: true,
     }
@@ -187,6 +318,7 @@ pub(crate) struct PersistedExecutionProgress {
     pub(crate) blocked: usize,
     pub(crate) uncertain: bool,
     pub(crate) mutation_attempted: bool,
+    pub(crate) operations: usize,
 }
 
 pub(crate) fn persisted_execution_progress(
@@ -194,13 +326,14 @@ pub(crate) fn persisted_execution_progress(
     date: NaiveDate,
 ) -> Result<PersistedExecutionProgress, CompanionError> {
     let conn = Connection::open(store_path(data_dir))?;
+    migrate_run_coordination(&conn)?;
     let submitted = conn.query_row(
-        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND state = 'confirmed'",
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND state = 'confirmed' AND COALESCE(tempo_worklog_id, '') <> 'reconciled-existing'",
         [date.to_string()],
         |row| row.get::<_, usize>(0),
     )?;
     let skipped = conn.query_row(
-        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND state = 'skipped'",
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1 AND (state = 'failed' OR (state = 'confirmed' AND tempo_worklog_id = 'reconciled-existing'))",
         [date.to_string()],
         |row| row.get::<_, usize>(0),
     )?;
@@ -214,12 +347,18 @@ pub(crate) fn persisted_execution_progress(
         [date.to_string()],
         |row| row.get::<_, bool>(0),
     )?;
+    let operations = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1",
+        [date.to_string()],
+        |row| row.get::<_, usize>(0),
+    )?;
     Ok(PersistedExecutionProgress {
         submitted,
         skipped,
         blocked: 0,
         uncertain,
         mutation_attempted,
+        operations,
     })
 }
 
@@ -239,7 +378,10 @@ fn gated_execution_progress(
         let key = operation_key(&record.tempo_account, date, &record.payload)?;
         match operation_state(&conn, &key)?.as_deref() {
             Some("confirmed" | "failed") => progress.skipped += 1,
-            Some("submitting" | "uncertain") => progress.uncertain = true,
+            Some("submitting" | "uncertain") => {
+                progress.uncertain = true;
+                progress.blocked += 1;
+            }
             Some(_) | None => progress.blocked += 1,
         }
     }
@@ -248,7 +390,53 @@ fn gated_execution_progress(
         [date.to_string()],
         |row| row.get::<_, bool>(0),
     )?;
+    progress.uncertain |= conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM mutation_operations WHERE local_date = ?1 AND state IN ('submitting', 'uncertain'))",
+        [date.to_string()],
+        |row| row.get::<_, bool>(0),
+    )?;
+    progress.operations = conn.query_row(
+        "SELECT COUNT(*) FROM mutation_operations WHERE local_date = ?1",
+        [date.to_string()],
+        |row| row.get::<_, usize>(0),
+    )?;
     Ok(progress)
+}
+
+fn gated_execution_result(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<ExecuteResult, CompanionError> {
+    let progress = gated_execution_progress(data_dir, date)?;
+    Ok(ExecuteResult {
+        status: "gated",
+        selected_date: date,
+        submitted: 0,
+        skipped: progress.skipped,
+        blocked: progress.blocked,
+        uncertain: progress.uncertain,
+        mutation_attempted: false,
+        network_access: false,
+        live_mutation_allowed: false,
+    })
+}
+
+pub(crate) fn execution_selection_digest(
+    data_dir: &Path,
+    date: NaiveDate,
+) -> Result<String, CompanionError> {
+    let records = approved_payloads(data_dir, date)?
+        .into_iter()
+        .map(|record| {
+            serde_json::json!({
+                "proposalId": record.proposal_id,
+                "tempoAccount": record.tempo_account,
+                "payload": record.payload
+            })
+        })
+        .collect::<Vec<_>>();
+    let bytes = serde_json::to_vec(&records).map_err(CompanionError::Serialize)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 pub(crate) fn unverifiable_after_live_spawn(error: &CompanionError) -> bool {

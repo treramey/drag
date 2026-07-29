@@ -158,6 +158,14 @@ receiving shell access or direct Tempo mutation authority.
 `drag-tracking`, warns only for explicitly human output, and leaves structured
 stdout unchanged.
 
+Compatibility lasts for the 0.10.x minor-release line. The shim and hidden
+top-level pipeline aliases are removed in 0.11.0. Until then each legacy direct
+pipeline command routes to the same `drag-tracking internal <command>`
+implementation, so it cannot bypass authorization, rollout, duplicate,
+uncertainty, or kill-switch gates. The tracking machine contract publishes the
+window, removal version, and replacement prefix. Migrate intent automation to
+`drag tracking`; reserve `drag-tracking internal` for diagnostics and recovery.
+
 The public surface owns intent-level setup, status, run, review, source,
 schedule, pause, resume, and uninstall methods. Pipeline stages remain hidden
 under `drag-tracking internal` for diagnostics, tests, replay, and recovery.

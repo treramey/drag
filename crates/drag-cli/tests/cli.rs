@@ -264,7 +264,7 @@ fn tracking_delegation_preserves_standard_streams_arguments_and_exit_status(
     let drag = copied_drag_with_tracking(
         &directory,
         Some(
-            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nprintf 'config:%s\\n' \"$DRAG_CONFIG\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":3,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf 'arguments:%s\\n' \"$*\"\nprintf 'config:%s\\n' \"$DRAG_CONFIG\"\nIFS= read -r line\nprintf '%s\\n' \"$line\"\nprintf 'tracking stderr\\n' >&2\nexit 23\n",
         ),
     )?;
     let selected_config = directory.path().join("selected-config.json");
@@ -317,7 +317,7 @@ fn non_terminal_tracking_setup_remains_unattended_and_delegates_without_promptin
     let drag = copied_drag_with_tracking(
         &directory,
         Some(
-            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":2,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf '%s' \"$*\"\n",
+            "#!/bin/sh\nif [ \"$1\" = contract ]; then\n  printf '{\"schemaVersion\":3,\"binary\":\"drag-tracking\"}'\n  exit 0\nfi\nprintf '%s' \"$*\"\n",
         ),
     )?;
     let output = std::process::Command::new(&drag)
@@ -367,7 +367,7 @@ fn tracking_delegation_reports_missing_and_incompatible_processes(
     assert!(error["error"]["message"]
         .as_str()
         .ok_or("incompatible tracking error message")?
-        .contains("expected contract version 2"));
+        .contains("expected contract version 3"));
     Ok(())
 }
 
