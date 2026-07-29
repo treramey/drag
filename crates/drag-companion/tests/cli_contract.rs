@@ -1043,7 +1043,11 @@ fn public_automatic_run_surfaces_runtime_submission_gates() -> Result<(), Box<dy
             .args(["run", "2026-07-24"]),
     )?;
     assert_eq!(run["status"], "gated");
+    assert_eq!(run["configuredMode"], "automatic");
+    assert_eq!(run["effectivePermission"], false);
     assert_eq!(run["submitted"], 0);
+    assert_eq!(run["blocked"], 0);
+    assert_eq!(run["uncertain"], false);
     assert_eq!(run["liveMutationAllowed"], false);
     assert!(run["warnings"]
         .as_array()
@@ -1052,6 +1056,90 @@ fn public_automatic_run_surfaces_runtime_submission_gates() -> Result<(), Box<dy
         .as_str()
         .ok_or("next safe action")?
         .contains("runtime gates"));
+    Ok(())
+}
+
+#[test]
+fn public_review_run_submits_only_the_approved_immutable_proposal_set(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["setup", "--mode", "review"]),
+    )?;
+    seed_approved_payload(
+        &data,
+        "proposal-review",
+        "DRAG-171",
+        "2026-03-08T13:00:00Z",
+        "2026-03-08T14:00:00Z",
+    )?;
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "review",
+        "2026-03-08",
+        "--approve",
+    ]))?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+
+    assert_eq!(run["configuredMode"], "review");
+    assert_eq!(run["effectivePermission"], true);
+    assert_eq!(run["submitted"], 1);
+    assert_eq!(run["blocked"], 0);
+    assert_eq!(run["uncertain"], false);
+    let commands = std::fs::read_to_string(directory.path().join("commands.log"))?;
+    assert_eq!(commands.matches(" log ").count(), 1);
+    assert!(commands.matches("list 2026-03-08").count() >= 2);
+    Ok(())
+}
+
+#[test]
+fn public_automatic_run_submits_policy_accepted_proposals_only_with_setup_authorization(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempdir()?;
+    let data_dir = directory.path().join("state");
+    let data = data_dir.to_string_lossy();
+    json_output(tracking()?.args(["--data-dir", &data]).args([
+        "setup",
+        "--mode",
+        "automatic",
+        "--authorize-automatic",
+    ]))?;
+    seed_approved_payload(
+        &data,
+        "proposal-automatic",
+        "DRAG-171",
+        "2026-03-08T15:00:00Z",
+        "2026-03-08T16:00:00Z",
+    )?;
+    seed_general_autonomy_rollout(&data)?;
+    let drag = executable_drag(&directory)?;
+
+    let run = json_output(
+        tracking()?
+            .args(["--data-dir", &data])
+            .args(["--drag-bin", drag.to_string_lossy().as_ref()])
+            .args(["run", "2026-03-08"])
+            .env("DRAG_TRACKING_LIVE_MUTATION_ROLLOUT", "1"),
+    )?;
+
+    assert_eq!(run["configuredMode"], "automatic");
+    assert_eq!(run["effectivePermission"], true);
+    assert_eq!(run["submitted"], 1);
+    assert_eq!(run["skipped"], 0);
+    assert_eq!(run["blocked"], 0);
+    assert_eq!(run["uncertain"], false);
     Ok(())
 }
 

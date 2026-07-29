@@ -343,6 +343,12 @@ pub(crate) fn run_tracking_for_date(
             progress.skipped = execution.skipped;
             progress.network_access |= execution.network_access;
             progress.live_mutation_allowed = execution.live_mutation_allowed;
+            progress.blocked = if execution.status == "gated" {
+                progress.counts.accepted as usize
+            } else {
+                0
+            };
+            progress.uncertain = execution.uncertain;
         }
         progress.retention = Some(enforce_retention(data_dir, RetentionTrigger::Lifecycle)?);
         Ok(())
@@ -874,6 +880,7 @@ struct ProposalCounts {
 
 struct TrackingRunProgress {
     date: NaiveDate,
+    configured_mode: SubmissionMode,
     resumed: bool,
     source_health: Vec<Value>,
     collection_failures: Vec<Value>,
@@ -886,6 +893,8 @@ struct TrackingRunProgress {
     counts: ProposalCounts,
     submitted: usize,
     skipped: usize,
+    blocked: usize,
+    uncertain: bool,
     network_access: bool,
     mutation_attempted: bool,
     live_mutation_allowed: bool,
@@ -898,6 +907,7 @@ impl TrackingRunProgress {
     fn new(data_dir: &Path, config: &TrackingConfig, date: NaiveDate) -> Self {
         Self {
             date,
+            configured_mode: config.submission.mode,
             resumed: run_path(data_dir, date).exists(),
             source_health: source_statuses(config),
             collection_failures: Vec::new(),
@@ -910,6 +920,8 @@ impl TrackingRunProgress {
             counts: ProposalCounts::default(),
             submitted: 0,
             skipped: 0,
+            blocked: 0,
+            uncertain: false,
             network_access: false,
             mutation_attempted: false,
             live_mutation_allowed: false,
@@ -924,6 +936,8 @@ impl TrackingRunProgress {
             "schemaVersion": TRACKING_MACHINE_CONTRACT_VERSION,
             "selectedDate": self.date,
             "status": status,
+            "configuredMode": self.configured_mode,
+            "effectivePermission": self.live_mutation_allowed,
             "resumed": self.resumed,
             "resumable": true,
             "sourceHealth": self.source_health,
@@ -940,6 +954,8 @@ impl TrackingRunProgress {
             "rejected": self.counts.rejected,
             "submitted": self.submitted,
             "skipped": self.skipped,
+            "blocked": self.blocked,
+            "uncertain": self.uncertain,
             "networkAccess": self.network_access,
             "liveMutationAllowed": self.live_mutation_allowed,
             "effects": {

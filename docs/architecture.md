@@ -166,8 +166,14 @@ digest. Review output includes proposal payloads, minimized evidence references,
 policy decisions, conflicts, submission state, and an explicit approval-availability
 reason. A changed proposal payload invalidates the stored approval, and approval
 never replaces durable rollout, duplicate, uncertainty, or kill-switch gates.
-Draft mode never offers approval. Automatic execution additionally requires
-explicit authorization and the same runtime gates.
+Draft mode never offers approval. Approved review runs and explicitly authorized
+automatic runs submit only policy-accepted proposals and reread the complete
+Tempo day immediately before each mutation. Their results distinguish configured
+mode, effective permission, submitted, skipped, blocked, and uncertain outcomes.
+Operation keys, durable submitting intent, process locks, SQLite leases, rollout
+gates, and both current and legacy kill switches remain mandatory. Ambiguous
+outcomes become uncertain and require reconciliation before another submission
+attempt.
 The public run imports collected evidence, invokes its configured constrained
 proposal adapter, audits the resulting proposals, and only then enters the
 coordinated execution path. Failed enabled sources and missing proposal
