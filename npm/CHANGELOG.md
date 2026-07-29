@@ -1,5 +1,28 @@
 # @treramey/drag
 
+## 0.10.0
+
+### Minor Changes
+
+- 67c7307: Offer privacy-aware automatic tracking onboarding after interactive Drag setup
+  and through `drag tracking setup`, with independently authorized sources,
+  scheduling, hooks, and automatic submission.
+- b527564: Make automatic tracking a first-class Drag resource with resumable consolidated
+  draft runs, setup, status, review, source, schedule, pause, resume, and safe
+  uninstall workflows backed by the separately packaged tracking process.
+- 6deafb3: Enable guarded review-mode and explicitly authorized automatic tracking submissions.
+- eb76764: Report tracking schedule health and validate configuration before resuming automatic tracking.
+- d33db7d: Report immutable tracking proposal reviews with redacted evidence, policy conflicts, approval availability, stale-set invalidation, and preserved runtime submission gates.
+- f37881b: Finish the intent-level automatic tracking command transition, harden guarded submissions against stale approvals, runtime gate races, and uncertain partial progress, safely install Claude hooks, and document the compatibility removal point.
+- b527564: Add validated, redacted, and bounded tracking evidence source management, with
+  date-scoped collection, failure-gated complete runs, and proposal-stage wiring.
+
+### Patch Changes
+
+- 499eb38: Default Claude hook installation and removal to `~/.claude/settings.json` when `--settings` is omitted.
+- ea48c53: Propagate custom tracking data directories into installed Claude Code capture hooks.
+- b527564: Make legacy companion state migration resumable, preserve recovery state, and report explicit environment conflicts and recovery guidance.
+
 ## 0.9.0
 
 ### Minor Changes
