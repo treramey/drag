@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -7,15 +8,45 @@ use crate::cli::{
     TrackingArgs, TrackingCommand, TrackingReviewCommand, TrackingScheduleCommand,
     TrackingSourcesCommand, TrackingSubmissionMode,
 };
+use crate::tracking_setup::{
+    TrackingOnboardingOutcome, TrackingOnboardingSession, TrackingSetupInstallFailure,
+};
+use crate::tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::{CliError, ResolvedOutputMode};
 
 const TRACKING_CONTRACT_VERSION: u64 = 2;
 
 pub(crate) fn run(
-    args: TrackingArgs,
+    mut args: TrackingArgs,
     mode: ResolvedOutputMode,
     config_path: &std::path::Path,
 ) -> Result<u8, CliError> {
+    if let TrackingCommand::Setup(setup) = &args.command {
+        let session = LineTrackingOnboardingSession::terminal();
+        if implicit_interactive_setup(setup) && session.is_terminal() {
+            args.command = match session.run()? {
+                TrackingOnboardingOutcome::Configure(plan) => {
+                    TrackingCommand::Setup(plan.into_args())
+                }
+                TrackingOnboardingOutcome::Declined => {
+                    emit_interactive_setup_outcome(
+                        mode,
+                        "declined",
+                        "Automatic tracking setup declined. Run `drag tracking setup` whenever you are ready.",
+                    )?;
+                    return Ok(0);
+                }
+                TrackingOnboardingOutcome::Cancelled => {
+                    emit_interactive_setup_outcome(
+                        mode,
+                        "cancelled",
+                        "Automatic tracking setup cancelled; no tracking choices were applied.",
+                    )?;
+                    return Ok(0);
+                }
+            };
+        }
+    }
     let executable = tracking_executable();
     verify_contract(&executable)?;
     let drag_executable = std::env::current_exe().map_err(|error| {
@@ -35,31 +66,7 @@ pub(crate) fn run(
         .stderr(Stdio::inherit());
     match args.command {
         TrackingCommand::Setup(args) => {
-            command.args(["setup", "--mode", submission_mode_name(args.mode)]);
-            if args.authorize_automatic {
-                command.arg("--authorize-automatic");
-            }
-            if args.install_scheduler {
-                command.arg("--install-scheduler");
-            }
-            if args.install_hooks {
-                command.arg("--install-hooks");
-            }
-            if let Some(target) = args.scheduler_target {
-                command.args(["--scheduler-target".as_ref(), target.as_os_str()]);
-            }
-            command.args([
-                "--at",
-                &args.at,
-                "--schedule-timezone",
-                &args.schedule_timezone,
-            ]);
-            for repo in args.repos {
-                command.args(["--repo".as_ref(), repo.as_os_str()]);
-            }
-            for file in args.ics_files {
-                command.args(["--ics".as_ref(), file.as_os_str()]);
-            }
+            append_setup_args(&mut command, args);
         }
         TrackingCommand::Status => {
             command.arg("status");
@@ -164,6 +171,165 @@ pub(crate) fn run(
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
+}
+
+fn emit_interactive_setup_outcome(
+    mode: ResolvedOutputMode,
+    status: &str,
+    human: &str,
+) -> Result<(), CliError> {
+    if mode == ResolvedOutputMode::Human {
+        writeln!(std::io::stdout().lock(), "{human}")?;
+    } else {
+        serde_json::to_writer(
+            std::io::stdout().lock(),
+            &serde_json::json!({
+                "ok": true,
+                "data": {
+                    "status": status,
+                    "configured": false,
+                    "nextCommand": "drag tracking setup"
+                }
+            }),
+        )?;
+        writeln!(std::io::stdout().lock())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn run_setup_capture(
+    args: crate::cli::TrackingSetupArgs,
+    config_path: &std::path::Path,
+) -> Result<Value, TrackingSetupInstallFailure> {
+    let executable = tracking_executable();
+    verify_contract(&executable)?;
+    let drag_executable = std::env::current_exe().map_err(|error| {
+        tracking_unavailable(format!(
+            "could not locate the invoking Drag executable: {error}"
+        ))
+    })?;
+    let mut command = Command::new(&executable);
+    command
+        .args(["--output", "json"])
+        .arg("--drag-bin")
+        .arg(drag_executable)
+        .env("DRAG_CONFIG", config_path)
+        .stdin(Stdio::null());
+    append_setup_args(&mut command, args);
+    let output = command.output().map_err(|error| {
+        tracking_unavailable(format!(
+            "could not start `{}`: {error}",
+            executable.display()
+        ))
+    })?;
+    if !output.status.success() {
+        let message = serde_json::from_slice::<Value>(&output.stderr)
+            .ok()
+            .and_then(|value| {
+                value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| {
+                "tracking setup failed; run `drag tracking setup` to inspect and retry".to_owned()
+            });
+        return Err(TrackingSetupInstallFailure {
+            error: CliError::TrackingUnavailable(message),
+            recovery: run_status_capture(config_path).ok(),
+        });
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        CliError::TrackingIncompatible(
+            "drag-tracking returned invalid JSON while completing setup".to_owned(),
+        )
+    })?;
+    envelope.get("data").cloned().ok_or_else(|| {
+        CliError::TrackingIncompatible("drag-tracking setup result did not contain data".to_owned())
+            .into()
+    })
+}
+
+fn run_status_capture(config_path: &std::path::Path) -> Result<Value, CliError> {
+    let executable = tracking_executable();
+    verify_contract(&executable)?;
+    let output = Command::new(&executable)
+        .args(["--output", "json", "status"])
+        .env("DRAG_CONFIG", config_path)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| {
+            tracking_unavailable(format!(
+                "could not query recoverable tracking state from `{}`: {error}",
+                executable.display()
+            ))
+        })?;
+    if !output.status.success() {
+        return Err(tracking_unavailable(
+            "could not query recoverable tracking state after setup failed".to_owned(),
+        ));
+    }
+    let envelope: Value = serde_json::from_slice(&output.stdout).map_err(|_| {
+        CliError::TrackingIncompatible(
+            "drag-tracking returned invalid recovery status JSON".to_owned(),
+        )
+    })?;
+    envelope.get("data").cloned().ok_or_else(|| {
+        CliError::TrackingIncompatible(
+            "drag-tracking recovery status did not contain data".to_owned(),
+        )
+    })
+}
+
+fn append_setup_args(command: &mut Command, args: crate::cli::TrackingSetupArgs) {
+    command.arg("setup");
+    if let Some(mode) = args.mode {
+        command.args(["--mode", submission_mode_name(mode)]);
+    }
+    if args.authorize_automatic {
+        command.arg("--authorize-automatic");
+    }
+    if args.install_scheduler {
+        command.arg("--install-scheduler");
+    }
+    if args.install_hooks {
+        command.arg("--install-hooks");
+    }
+    if let Some(target) = args.scheduler_target {
+        command.args(["--scheduler-target".as_ref(), target.as_os_str()]);
+    }
+    if let Some(at) = args.at {
+        command.args(["--at", &at]);
+    }
+    if let Some(timezone) = args.schedule_timezone {
+        command.args(["--schedule-timezone", &timezone]);
+    }
+    for repo in args.repos {
+        command.args(["--repo".as_ref(), repo.as_os_str()]);
+    }
+    if args.clear_repos {
+        command.arg("--clear-repos");
+    }
+    for file in args.ics_files {
+        command.args(["--ics".as_ref(), file.as_os_str()]);
+    }
+    if args.clear_ics {
+        command.arg("--clear-ics");
+    }
+}
+
+fn implicit_interactive_setup(args: &crate::cli::TrackingSetupArgs) -> bool {
+    args.mode.is_none()
+        && !args.authorize_automatic
+        && !args.install_scheduler
+        && !args.install_hooks
+        && args.scheduler_target.is_none()
+        && args.at.is_none()
+        && args.schedule_timezone.is_none()
+        && args.repos.is_empty()
+        && args.ics_files.is_empty()
+        && !args.clear_repos
+        && !args.clear_ics
 }
 
 fn submission_mode_name(mode: TrackingSubmissionMode) -> &'static str {

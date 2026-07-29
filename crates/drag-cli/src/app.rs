@@ -27,6 +27,11 @@ use crate::setup::{
     RemoteConnectionVerifier, SetupCredentials, SetupCredentialsExt,
 };
 use crate::setup_tui::RatatuiOnboardingSession;
+use crate::tracking_setup::{
+    ProcessTrackingSetupInstaller, TrackingOnboardingOutcome, TrackingOnboardingSession,
+    TrackingSetupInstaller,
+};
+use crate::tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::{CliError, Rendered};
 
 pub struct App {
@@ -37,6 +42,8 @@ pub struct App {
     connection_environment: Box<dyn ConnectionEnvironment>,
     onboarding_session: Box<dyn OnboardingSession>,
     list_report_session: Box<dyn ListReportSession>,
+    tracking_onboarding_session: Box<dyn TrackingOnboardingSession>,
+    tracking_setup_installer: Box<dyn TrackingSetupInstaller>,
 }
 
 pub(crate) trait ConnectionEnvironment: Send + Sync {
@@ -73,13 +80,15 @@ impl ConnectionEnvironment for EmptyConnectionEnvironment {
 impl App {
     pub fn new(path: PathBuf, timezone: Tz, debug: bool) -> Self {
         Self {
-            path,
+            path: path.clone(),
             timezone,
             debug,
             connection_verifier: Box::new(RemoteConnectionVerifier),
             connection_environment: Box::new(ProcessConnectionEnvironment),
             onboarding_session: Box::new(RatatuiOnboardingSession::terminal()),
             list_report_session: Box::new(RatatuiListReportSession::terminal()),
+            tracking_onboarding_session: Box::new(LineTrackingOnboardingSession::terminal()),
+            tracking_setup_installer: Box::new(ProcessTrackingSetupInstaller::new(path)),
         }
     }
 
@@ -89,7 +98,7 @@ impl App {
         connection_verifier: impl ConnectionVerifier + 'static,
     ) -> Self {
         Self {
-            path,
+            path: path.clone(),
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
@@ -99,6 +108,8 @@ impl App {
                 NoopBrowserLauncher,
             )),
             list_report_session: Box::new(RatatuiListReportSession::terminal()),
+            tracking_onboarding_session: Box::new(LineTrackingOnboardingSession::terminal()),
+            tracking_setup_installer: Box::new(ProcessTrackingSetupInstaller::new(path.clone())),
         }
     }
 
@@ -110,7 +121,7 @@ impl App {
         browser_launcher: impl BrowserLauncher + 'static,
     ) -> Self {
         Self {
-            path,
+            path: path.clone(),
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
@@ -120,6 +131,8 @@ impl App {
                 browser_launcher,
             )),
             list_report_session: Box::new(RatatuiListReportSession::terminal()),
+            tracking_onboarding_session: Box::new(LineTrackingOnboardingSession::terminal()),
+            tracking_setup_installer: Box::new(ProcessTrackingSetupInstaller::new(path.clone())),
         }
     }
 
@@ -130,13 +143,15 @@ impl App {
         onboarding_session: impl OnboardingSession + 'static,
     ) -> Self {
         Self {
-            path,
+            path: path.clone(),
             timezone: chrono_tz::UTC,
             debug: false,
             connection_verifier: Box::new(connection_verifier),
             connection_environment: Box::new(EmptyConnectionEnvironment),
             onboarding_session: Box::new(onboarding_session),
             list_report_session: Box::new(RatatuiListReportSession::terminal()),
+            tracking_onboarding_session: Box::new(LineTrackingOnboardingSession::terminal()),
+            tracking_setup_installer: Box::new(ProcessTrackingSetupInstaller::new(path.clone())),
         }
     }
 
@@ -146,6 +161,17 @@ impl App {
         list_report_session: impl ListReportSession + 'static,
     ) -> Self {
         self.list_report_session = Box::new(list_report_session);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_tracking_setup(
+        mut self,
+        session: impl TrackingOnboardingSession + 'static,
+        installer: impl TrackingSetupInstaller + 'static,
+    ) -> Self {
+        self.tracking_onboarding_session = Box::new(session);
+        self.tracking_setup_installer = Box::new(installer);
         self
     }
 
@@ -203,6 +229,11 @@ impl App {
                 "configuration": {
                     "status": "planned",
                     "credentials": "replace"
+                },
+                "automaticTracking": {
+                    "status": "notRequested",
+                    "effects": false,
+                    "nextCommand": "drag tracking setup"
                 }
             }),
             format!(
@@ -244,7 +275,12 @@ impl App {
                 "configured": true,
                 "path": self.path,
                 "source": "environment",
-                "verification": {"jira": "connected", "tempo": "connected"}
+                "verification": {"jira": "connected", "tempo": "connected"},
+                "automaticTracking": {
+                    "status": "notRequested",
+                    "effects": false,
+                    "nextCommand": "drag tracking setup"
+                }
             }),
             format!(
                 "Verified Jira and Tempo using environment credentials. Configuration saved to {}.",
@@ -265,6 +301,59 @@ impl App {
             open_browser,
         );
         let credentials = self.onboarding_session.run(workflow).await?.finish()?;
+        self.save_setup_credentials(credentials.clone())?;
+        let tracking_outcome = if self.tracking_onboarding_session.is_terminal() {
+            self.tracking_onboarding_session.run()
+        } else {
+            Ok(TrackingOnboardingOutcome::Cancelled)
+        };
+        let automatic_tracking = match tracking_outcome {
+            Err(error) => tracking_setup_failure(&error, None),
+            Ok(TrackingOnboardingOutcome::Declined) => json!({
+                "offered": true,
+                "status": "declined",
+                "configured": false,
+                "nextCommand": "drag tracking setup"
+            }),
+            Ok(TrackingOnboardingOutcome::Cancelled) => json!({
+                "offered": true,
+                "status": "cancelled",
+                "configured": false,
+                "nextCommand": "drag tracking setup"
+            }),
+            Ok(TrackingOnboardingOutcome::Configure(plan)) => {
+                match self.tracking_setup_installer.install(&plan) {
+                    Ok(result) => json!({
+                        "offered": true,
+                        "status": "configured",
+                        "configured": true,
+                        "result": result,
+                        "followUpCommands": [
+                            "drag tracking status",
+                            "drag tracking sources test",
+                            "drag tracking schedule show"
+                        ]
+                    }),
+                    Err(failure) => {
+                        tracking_setup_failure(&failure.error, failure.recovery.as_ref())
+                    }
+                }
+            }
+        };
+        let tracking_human = match automatic_tracking["status"].as_str() {
+            Some("configured") => " Automatic tracking is configured; review its activity, next run, sources, mode, and effective mutation permission with `drag tracking status`.".to_owned(),
+            Some("failed") => {
+                let message = automatic_tracking["error"]["message"]
+                    .as_str()
+                    .unwrap_or("tracking setup failed");
+                format!(
+                    " Drag is connected, but automatic tracking setup failed: {}. Recoverable tracking state is included in structured output; retry with `drag tracking setup`.",
+                    crate::output::escape_terminal_data(message)
+                )
+            }
+            Some("cancelled") => " Automatic tracking setup was cancelled without applying tracking choices; run `drag tracking setup` to continue later.".to_owned(),
+            _ => " Automatic tracking was declined without tracking effects; run `drag tracking setup` whenever you are ready.".to_owned(),
+        };
         let data = json!({
             "configured": true,
             "path": self.path,
@@ -273,18 +362,14 @@ impl App {
                 "jira": {"status": "connected", "hostname": credentials.hostname, "email": credentials.atlassian_user_email},
                 "tempo": {"status": "connected"}
             },
-            "automaticTracking": {
-                "configured": false,
-                "optional": true,
-                "nextCommand": "drag tracking setup"
-            }
+            "automaticTracking": automatic_tracking
         });
         let human = format!(
-            "Connected {} to Jira and Tempo. Configuration saved to {}. Next, try `drag list`. Automatic tracking is optional; configure its local sources, schedule, and submission policy with `drag tracking setup`.",
+            "Connected {} to Jira and Tempo. Configuration saved to {}. Next, try `drag list`.{}",
             credentials.atlassian_user_email,
-            self.path.display()
+            self.path.display(),
+            tracking_human
         );
-        self.save_setup_credentials(credentials)?;
         Ok(Rendered::new(data, human))
     }
 
@@ -353,6 +438,23 @@ impl App {
     fn now(&self) -> DateTime<Tz> {
         Utc::now().with_timezone(&self.timezone)
     }
+}
+
+fn tracking_setup_failure(
+    error: &CliError,
+    recovery: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    json!({
+        "offered": true,
+        "status": "failed",
+        "configured": false,
+        "error": {
+            "code": error.code(),
+            "message": error.to_string()
+        },
+        "recovery": recovery,
+        "nextCommand": "drag tracking setup"
+    })
 }
 
 fn required_setup_environment(

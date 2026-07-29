@@ -21,6 +21,7 @@ use expectrl::session::OsSession;
 use expectrl::{ControlCode, Eof, Expect, Session};
 #[cfg(unix)]
 use futures_util::FutureExt;
+use serde_json::Value;
 use tempfile::TempDir;
 
 use super::super::{
@@ -34,6 +35,10 @@ use crate::cli::{DoctorArgs, SetupArgs};
 use crate::list::{
     debounce_list_fetch, take_reusable_report, AbortOnDropTask, CachedListReport, ListReport,
     ListReportAction, ListReportSession,
+};
+use crate::tracking_setup::{
+    TrackingOnboardingOutcome, TrackingOnboardingSession, TrackingSetupInstallFailure,
+    TrackingSetupInstaller, TrackingSetupPlan,
 };
 use crate::CliError;
 #[cfg(unix)]
@@ -234,6 +239,63 @@ struct ScriptedOnboardingSession {
 }
 
 struct IncompleteOnboardingSession;
+
+struct FakeTrackingOnboardingSession {
+    outcome: TrackingOnboardingOutcome,
+}
+
+struct FakeTrackingSetupInstaller {
+    plans: Mutex<Vec<TrackingSetupPlan>>,
+    failure: Option<String>,
+}
+
+impl Default for FakeTrackingSetupInstaller {
+    fn default() -> Self {
+        Self {
+            plans: Mutex::new(Vec::new()),
+            failure: None,
+        }
+    }
+}
+
+impl TrackingOnboardingSession for FakeTrackingOnboardingSession {
+    fn is_terminal(&self) -> bool {
+        true
+    }
+
+    fn run(&self) -> Result<TrackingOnboardingOutcome, CliError> {
+        Ok(self.outcome.clone())
+    }
+}
+
+impl TrackingSetupInstaller for FakeTrackingSetupInstaller {
+    fn install(&self, plan: &TrackingSetupPlan) -> Result<Value, TrackingSetupInstallFailure> {
+        if let Some(message) = &self.failure {
+            return Err(TrackingSetupInstallFailure {
+                error: CliError::TrackingUnavailable(message.clone()),
+                recovery: Some(serde_json::json!({
+                    "configuration": {"configured": false},
+                    "scheduler": {"healthy": true, "active": false},
+                    "pendingAction": "rerun tracking setup"
+                })),
+            });
+        }
+        self.plans
+            .lock()
+            .map_err(|_| CliError::Api("test tracking plan lock was poisoned".to_owned()))?
+            .push(plan.clone());
+        Ok(serde_json::json!({
+            "status": "configured",
+            "active": false,
+            "nextRun": null,
+            "sources": [{"kind": "git", "health": "healthy"}],
+            "submission": {
+                "mode": "automatic",
+                "effectiveMutationPermission": false
+            }
+        }))
+    }
+}
 
 struct PendingJiraVerifier;
 

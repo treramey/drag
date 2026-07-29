@@ -145,8 +145,12 @@ pub(crate) struct PublicSetupArgs {
     pub(crate) schedule_timezone: Option<String>,
     #[arg(long = "repo", value_name = "DIR")]
     pub(crate) repos: Vec<PathBuf>,
+    #[arg(long, conflicts_with = "repos")]
+    pub(crate) clear_repos: bool,
     #[arg(long = "ics", value_name = "FILE")]
     pub(crate) ics_files: Vec<PathBuf>,
+    #[arg(long, conflicts_with = "ics_files")]
+    pub(crate) clear_ics: bool,
     /// Offline schema-constrained proposal provider used by complete public runs.
     #[arg(long, value_name = "FILE")]
     pub(crate) provider_fixture: Option<PathBuf>,

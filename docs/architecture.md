@@ -87,6 +87,10 @@ several peer submodules rather than a single implementation file.
 - `drag_cli::setup_tui`: translation of Crossterm events into setup actions,
   Ratatui rendering, animation state, browser effects, and the stderr terminal
   lifecycle for interactive setup.
+- `drag_cli::tracking_setup`: shared post-connection and standalone tracking
+  onboarding plan and injected tracking installation boundary.
+- `drag_cli::tracking_setup_tui`: terminal prompts, local source checks, and
+  independent installation/submission consent for tracking onboarding.
 - `drag_cli::app`: dependency composition and thin use-case routing.
 
 ## Safety invariants

@@ -34,8 +34,8 @@ pub(crate) fn setup_tracking(
         ));
     }
 
-    let update_repos = !args.repos.is_empty();
-    let update_calendars = !args.ics_files.is_empty();
+    let update_repos = args.clear_repos || !args.repos.is_empty();
+    let update_calendars = args.clear_ics || !args.ics_files.is_empty();
     let selected = configured_sources(args.repos, args.ics_files)?;
     if update_repos {
         config
@@ -116,6 +116,10 @@ pub(crate) fn setup_tracking(
         "status": "configured",
         "installed": config.installed,
         "active": config.active,
+        "activity": {
+            "active": config.active,
+            "state": if config.active { "scheduled" } else { "paused" }
+        },
         "privacy": {
             "evidenceAccess": "only explicitly configured local sources",
             "rawEvidenceRemainsLocal": true,
@@ -134,6 +138,12 @@ pub(crate) fn setup_tracking(
             "automaticSubmissionAuthorized": config.submission.automatic_submission_authorized
         },
         "scheduler": scheduler,
+        "nextRun": next_run_description(&config),
+        "followUpCommands": [
+            "drag tracking status",
+            "drag tracking sources test",
+            "drag tracking schedule show"
+        ],
         "networkAccess": false,
         "liveMutationAllowed": false,
         "nextSafeAction": if config.active {
