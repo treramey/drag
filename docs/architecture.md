@@ -162,8 +162,12 @@ The public surface owns intent-level setup, status, run, review, source,
 schedule, pause, resume, and uninstall methods. Pipeline stages remain hidden
 under `drag-tracking internal` for diagnostics, tests, replay, and recovery.
 Draft mode cannot mutate. Review approval is bound to an immutable proposal-set
-digest. Automatic execution additionally requires explicit authorization and
-all durable rollout, duplicate, uncertainty, and kill-switch gates.
+digest. Review output includes proposal payloads, minimized evidence references,
+policy decisions, conflicts, submission state, and an explicit approval-availability
+reason. A changed proposal payload invalidates the stored approval, and approval
+never replaces durable rollout, duplicate, uncertainty, or kill-switch gates.
+Draft mode never offers approval. Automatic execution additionally requires
+explicit authorization and the same runtime gates.
 The public run imports collected evidence, invokes its configured constrained
 proposal adapter, audits the resulting proposals, and only then enters the
 coordinated execution path. Failed enabled sources and missing proposal
