@@ -8,8 +8,8 @@ use crate::cli::{
     TrackingArgs, TrackingCommand, TrackingReviewCommand, TrackingScheduleCommand,
     TrackingSourcesCommand, TrackingSubmissionMode,
 };
+use crate::generalized_tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::tracking_setup::{TrackingOnboardingOutcome, TrackingOnboardingSession};
-use crate::tracking_setup_tui::LineTrackingOnboardingSession;
 use crate::{CliError, ResolvedOutputMode};
 
 const TRACKING_CONTRACT_VERSION: u64 = 3;
@@ -63,7 +63,7 @@ pub(crate) fn run(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     match args.command {
-        TrackingCommand::Capture => {
+        TrackingCommand::Capture(_) => {
             return Err(CliError::Invariant(
                 "Claude capture was not handled locally".to_owned(),
             ));

@@ -7,6 +7,7 @@ mod config;
 mod delete;
 mod doctor;
 mod error;
+mod generalized_tracking_setup_tui;
 mod generate_skills;
 mod list;
 mod list_tui;
@@ -91,8 +92,9 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
     }
     let path = cli.config.unwrap_or(config::config_path()?);
     if let Command::Tracking(args) = cli.command {
-        if matches!(&args.command, crate::cli::TrackingCommand::Capture) {
-            return claude_tracking::capture_from_stdin().map(RunResult::Rendered);
+        if let crate::cli::TrackingCommand::Capture(capture) = &args.command {
+            return claude_tracking::capture_from_stdin(capture.state_dir_base64.as_deref())
+                .map(RunResult::Rendered);
         }
         return tracking::run(args, mode, &path).map(RunResult::Delegated);
     }

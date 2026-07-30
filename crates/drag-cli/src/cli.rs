@@ -108,7 +108,7 @@ pub struct TrackingArgs {
 pub enum TrackingCommand {
     /// Record one Claude Code lifecycle event from standard input.
     #[command(hide = true)]
-    Capture,
+    Capture(TrackingCaptureArgs),
     /// Configure sources, schedule, and submission policy.
     Setup(TrackingSetupArgs),
     /// Show tracking configuration, activity, health, and authorization.
@@ -127,6 +127,13 @@ pub enum TrackingCommand {
     Sources(TrackingSourcesArgs),
     /// Inspect or update the tracking schedule.
     Schedule(TrackingScheduleArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TrackingCaptureArgs {
+    /// Encoded local state path installed by Drag setup.
+    #[arg(long, hide = true)]
+    pub state_dir_base64: Option<String>,
 }
 
 #[derive(Debug, Args)]
