@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "drag"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "drag-cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "assert_cmd",
  "atomicwrites",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "drag-companion"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "assert_cmd",
  "chrono",
