@@ -1,5 +1,11 @@
 # @treramey/drag
 
+## 0.11.0
+
+### Minor Changes
+
+- 00963ff: Add explicit Claude Code activity capture consent to `drag setup`, including unattended dry-run planning, idempotent lifecycle hook installation, and local minimized event capture through the primary `drag` executable.
+
 ## 0.10.0
 
 ### Minor Changes
