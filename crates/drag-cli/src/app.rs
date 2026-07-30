@@ -184,9 +184,13 @@ impl App {
             })?;
             let plan = EnvironmentSetupPlan::new(setup_credentials);
             if args.dry_run {
-                return self.plan_environment_setup(plan, args.verify).await;
+                return self
+                    .plan_environment_setup(plan, args.verify, args.claude_code)
+                    .await;
             }
-            return self.verify_and_save_environment_setup(plan).await;
+            return self
+                .verify_and_save_environment_setup(plan, args.claude_code)
+                .await;
         }
 
         let config = Config::load(&self.path)?;
@@ -203,6 +207,7 @@ impl App {
         &self,
         plan: EnvironmentSetupPlan,
         verify: bool,
+        claude_code: bool,
     ) -> Result<Rendered, CliError> {
         let verification = if verify {
             let account_id = self
@@ -230,15 +235,16 @@ impl App {
                     "status": "planned",
                     "credentials": "replace"
                 },
-                "automaticTracking": {
-                    "status": "notRequested",
-                    "effects": false,
-                    "nextCommand": "drag tracking setup"
+                "claudeTracking": if claude_code {
+                    crate::claude_tracking::plan()?
+                } else {
+                    json!({"status": "notRequested", "effects": false})
                 }
             }),
             format!(
-                "Setup inputs are valid. Read-only verification is {} and configuration changes are planned; nothing was saved.",
-                if verify { "complete" } else { "planned" }
+                "Setup inputs are valid. Read-only verification is {} and configuration changes are planned; nothing was saved. Claude Code capture is {}.",
+                if verify { "complete" } else { "planned" },
+                if claude_code { "planned" } else { "not requested" }
             ),
         ))
     }
@@ -258,6 +264,7 @@ impl App {
     async fn verify_and_save_environment_setup(
         &self,
         plan: EnvironmentSetupPlan,
+        claude_code: bool,
     ) -> Result<Rendered, CliError> {
         let account_id = self
             .connection_verifier
@@ -270,21 +277,35 @@ impl App {
 
         self.save_setup_credentials(credentials)?;
 
+        let claude_tracking = if claude_code {
+            match crate::claude_tracking::install_default() {
+                Ok(result) => result,
+                Err(error) => json!({
+                    "status": "failed",
+                    "error": {"code": error.code(), "message": error.to_string()},
+                    "networkAccess": false
+                }),
+            }
+        } else {
+            json!({"status": "notRequested", "effects": false})
+        };
+        let claude_human = match claude_tracking["status"].as_str() {
+            Some("enabled") => " Claude Code activity capture is enabled.",
+            Some("failed") => " Claude Code activity capture could not be enabled; rerun `drag setup --from-env --claude-code` after correcting the local settings error.",
+            _ => " Claude Code activity capture was not requested.",
+        };
+
         Ok(Rendered::new(
             json!({
                 "configured": true,
                 "path": self.path,
                 "source": "environment",
                 "verification": {"jira": "connected", "tempo": "connected"},
-                "automaticTracking": {
-                    "status": "notRequested",
-                    "effects": false,
-                    "nextCommand": "drag tracking setup"
-                }
+                "claudeTracking": claude_tracking
             }),
             format!(
-                "Verified Jira and Tempo using environment credentials. Configuration saved to {}.",
-                self.path.display()
+                "Verified Jira and Tempo using environment credentials. Configuration saved to {}.{claude_human}",
+                self.path.display(),
             ),
         ))
     }
@@ -307,32 +328,29 @@ impl App {
         } else {
             Ok(TrackingOnboardingOutcome::Cancelled)
         };
-        let automatic_tracking = match tracking_outcome {
+        let claude_tracking = match tracking_outcome {
             Err(error) => tracking_setup_failure(&error, None),
             Ok(TrackingOnboardingOutcome::Declined) => json!({
                 "offered": true,
                 "status": "declined",
                 "configured": false,
-                "nextCommand": "drag tracking setup"
+                "effects": false
             }),
             Ok(TrackingOnboardingOutcome::Cancelled) => json!({
                 "offered": true,
                 "status": "cancelled",
                 "configured": false,
-                "nextCommand": "drag tracking setup"
+                "effects": false
             }),
             Ok(TrackingOnboardingOutcome::Configure(plan)) => {
                 match self.tracking_setup_installer.install(&plan) {
                     Ok(result) => json!({
                         "offered": true,
-                        "status": "configured",
+                        "status": "enabled",
                         "configured": true,
                         "result": result,
-                        "followUpCommands": [
-                            "drag tracking status",
-                            "drag tracking sources test",
-                            "drag tracking schedule show"
-                        ]
+                        "networkAccess": false,
+                        "worklogsCreated": false
                     }),
                     Err(failure) => {
                         tracking_setup_failure(&failure.error, failure.recovery.as_ref())
@@ -340,19 +358,19 @@ impl App {
                 }
             }
         };
-        let tracking_human = match automatic_tracking["status"].as_str() {
-            Some("configured") => " Automatic tracking is configured; review its activity, next run, sources, mode, and effective mutation permission with `drag tracking status`.".to_owned(),
+        let tracking_human = match claude_tracking["status"].as_str() {
+            Some("enabled") => " Claude Code activity capture is enabled. Captured metadata remains local and capture never creates worklogs.".to_owned(),
             Some("failed") => {
-                let message = automatic_tracking["error"]["message"]
+                let message = claude_tracking["error"]["message"]
                     .as_str()
                     .unwrap_or("tracking setup failed");
                 format!(
-                    " Drag is connected, but automatic tracking setup failed: {}. Recoverable tracking state is included in structured output; retry with `drag tracking setup`.",
+                    " Drag is connected, but Claude Code capture setup failed: {}. Rerun `drag setup` to retry.",
                     crate::output::escape_terminal_data(message)
                 )
             }
-            Some("cancelled") => " Automatic tracking setup was cancelled without applying tracking choices; run `drag tracking setup` to continue later.".to_owned(),
-            _ => " Automatic tracking was declined without tracking effects; run `drag tracking setup` whenever you are ready.".to_owned(),
+            Some("cancelled") => " Claude Code capture was cancelled without changing Claude settings.".to_owned(),
+            _ => " Claude Code capture was declined without changing Claude settings.".to_owned(),
         };
         let data = json!({
             "configured": true,
@@ -362,7 +380,7 @@ impl App {
                 "jira": {"status": "connected", "hostname": credentials.hostname, "email": credentials.atlassian_user_email},
                 "tempo": {"status": "connected"}
             },
-            "automaticTracking": automatic_tracking
+            "claudeTracking": claude_tracking
         });
         let human = format!(
             "Connected {} to Jira and Tempo. Configuration saved to {}. Next, try `drag list`.{}",

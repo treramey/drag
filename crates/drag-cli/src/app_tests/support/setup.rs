@@ -58,7 +58,7 @@ fn pty_first_run_hides_tokens_and_emits_json_success() -> Result<(), Box<dyn std
     assert!(!String::from_utf8_lossy(tempo_output.before()).contains("pty-tempo-secret"));
     session.send("\r")?;
     expect_terminal_restoration(&mut session)?;
-    session.expect("Set up automatic tracking now?")?;
+    session.expect("Enable Claude Code activity capture?")?;
     session.send("n\r")?;
     session.expect(Eof)?;
 
@@ -102,7 +102,7 @@ fn pty_authentication_retries_reuse_latest_jira_values_and_retry_only_tempo_toke
     session.expect("Save configuration")?;
     session.send("\r")?;
     expect_terminal_restoration(&mut session)?;
-    session.expect("Set up automatic tracking now?")?;
+    session.expect("Enable Claude Code activity capture?")?;
     session.send("n\r")?;
     session.expect(Eof)?;
 
@@ -135,7 +135,7 @@ fn pty_reconfiguration_offers_defaults_and_retains_tokens() -> Result<(), Box<dy
     session.expect("Save configuration")?;
     session.send("\r")?;
     expect_terminal_restoration(&mut session)?;
-    session.expect("Set up automatic tracking now?")?;
+    session.expect("Enable Claude Code activity capture?")?;
     session.send("n\r")?;
     session.expect(Eof)?;
 
@@ -263,6 +263,7 @@ async fn high_level_onboarding_session_drives_verification_and_transactional_sav
         no_open: true,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -332,11 +333,12 @@ async fn interactive_setup_decline_has_no_tracking_effects_after_connections_suc
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
     assert!(path.exists());
-    assert_eq!(result.data["automaticTracking"]["status"], "declined");
+    assert_eq!(result.data["claudeTracking"]["status"], "declined");
     assert!(installer
         .plans
         .lock()
@@ -390,6 +392,7 @@ async fn interactive_setup_applies_each_tracking_authorization_and_reports_compl
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
@@ -401,8 +404,8 @@ async fn interactive_setup_applies_each_tracking_authorization_and_reports_compl
             .as_slice(),
         [plan]
     );
-    let tracking = &result.data["automaticTracking"];
-    assert_eq!(tracking["status"], "configured");
+    let tracking = &result.data["claudeTracking"];
+    assert_eq!(tracking["status"], "enabled");
     assert_eq!(tracking["result"]["active"], false);
     assert!(tracking["result"].get("nextRun").is_some());
     assert_eq!(tracking["result"]["sources"][0]["health"], "healthy");
@@ -411,10 +414,8 @@ async fn interactive_setup_applies_each_tracking_authorization_and_reports_compl
         tracking["result"]["submission"]["effectiveMutationPermission"],
         false
     );
-    assert_eq!(
-        tracking["followUpCommands"].as_array().map(Vec::len),
-        Some(3)
-    );
+    assert_eq!(tracking["networkAccess"], false);
+    assert_eq!(tracking["worklogsCreated"], false);
     Ok(())
 }
 
@@ -449,11 +450,12 @@ async fn cancelling_tracking_onboarding_preserves_connected_drag_without_trackin
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
     assert!(path.exists());
-    assert_eq!(result.data["automaticTracking"]["status"], "cancelled");
+    assert_eq!(result.data["claudeTracking"]["status"], "cancelled");
     assert!(installer
         .plans
         .lock()
@@ -509,24 +511,25 @@ async fn tracking_install_failure_preserves_successful_drag_setup_and_reports_re
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
     assert_eq!(result.data["configured"], true);
-    assert_eq!(result.data["automaticTracking"]["status"], "failed");
+    assert_eq!(result.data["claudeTracking"]["status"], "failed");
     assert_eq!(
-        result.data["automaticTracking"]["error"]["code"],
+        result.data["claudeTracking"]["error"]["code"],
         "tracking_unavailable"
     );
-    assert!(result.data["automaticTracking"]["error"]["message"]
+    assert!(result.data["claudeTracking"]["error"]["message"]
         .as_str()
         .is_some_and(|message| message.contains("scheduler directory is unavailable")));
     assert_eq!(
-        result.data["automaticTracking"]["nextCommand"],
+        result.data["claudeTracking"]["nextCommand"],
         "drag tracking setup"
     );
     assert_eq!(
-        result.data["automaticTracking"]["recovery"]["pendingAction"],
+        result.data["claudeTracking"]["recovery"]["pendingAction"],
         "rerun tracking setup"
     );
     assert!(result.human.contains("scheduler directory is unavailable"));
@@ -565,6 +568,7 @@ async fn ratatui_first_run_masks_secrets_verifies_and_saves_from_scripted_events
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
@@ -671,6 +675,7 @@ async fn ratatui_opens_atlassian_only_after_explicit_token_stage_entry(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -739,6 +744,7 @@ async fn ratatui_back_from_jira_token_discards_only_the_unverified_buffer(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -841,6 +847,7 @@ async fn ratatui_validation_and_authentication_retries_stay_in_the_failed_stage(
         no_open: false,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -959,6 +966,7 @@ async fn ratatui_no_open_keeps_both_links_visible_without_browser_calls(
         no_open: true,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1015,6 +1023,7 @@ async fn ratatui_whitespace_does_not_silently_retain_stored_tokens(
         no_open: true,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1060,6 +1069,7 @@ async fn ratatui_fatal_verification_failure_propagates_without_rendering_secrets
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -1102,6 +1112,7 @@ async fn ratatui_first_run_does_not_write_before_explicit_save(
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -1144,6 +1155,7 @@ async fn ratatui_reconfiguration_retains_replaces_backtracks_and_reverifies(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
@@ -1279,6 +1291,7 @@ async fn ratatui_backtracking_without_edits_does_not_repeat_verification(
         no_open: false,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1345,6 +1358,7 @@ async fn ratatui_backtracking_discards_an_unverified_tempo_token_buffer(
         no_open: true,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1393,6 +1407,7 @@ async fn ratatui_pending_tempo_back_discards_the_unverified_token_buffer(
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -1441,6 +1456,7 @@ async fn ratatui_reconfiguration_cancellation_leaves_config_byte_for_byte_unchan
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -1477,6 +1493,7 @@ async fn ratatui_verification_keeps_terminal_events_responsive(
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -1517,6 +1534,7 @@ async fn incomplete_onboarding_session_cannot_save_credentials(
             no_open: true,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .err()
@@ -1558,6 +1576,7 @@ async fn interactive_setup_connects_both_services_and_saves_once_complete(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
@@ -1648,6 +1667,7 @@ async fn interactive_setup_no_open_prints_links_without_launching_browser(
         no_open: true,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1693,6 +1713,7 @@ async fn browser_launch_failure_warns_and_allows_setup_to_finish(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
@@ -1746,6 +1767,7 @@ async fn environment_setup_never_launches_or_prompts_with_any_no_open_value(
             no_open,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await?;
 
@@ -1784,6 +1806,7 @@ async fn interactive_reconfiguration_offers_defaults_and_retains_hidden_tokens(
         no_open: false,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1857,6 +1880,7 @@ async fn interactive_setup_retries_only_the_failed_connection(
         no_open: false,
         dry_run: false,
         verify: false,
+        claude_code: false,
     })
     .await?;
 
@@ -1925,6 +1949,7 @@ async fn interactive_setup_propagates_non_authentication_verification_errors(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
     {
@@ -1974,6 +1999,7 @@ async fn interactive_setup_does_not_retry_fatal_tempo_errors(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
     {
@@ -2008,6 +2034,7 @@ async fn interactive_cancellation_leaves_existing_config_unchanged(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
     {
@@ -2050,6 +2077,7 @@ async fn cancellation_after_a_failed_connection_check_leaves_config_unchanged(
             no_open: false,
             dry_run: false,
             verify: false,
+            claude_code: false,
         })
         .await
         .is_err());
@@ -2111,7 +2139,7 @@ async fn verified_environment_setup_derives_account_and_preserves_local_state(
     );
 
     let result = app
-        .verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()))
+        .verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()), false)
         .await?;
 
     let saved = Config::load(&path)?;
@@ -2172,6 +2200,7 @@ async fn verified_environment_setup_dry_run_completes_read_only_checks_without_s
             no_open: false,
             dry_run: true,
             verify: true,
+            claude_code: false,
         })
         .await?;
 
@@ -2219,7 +2248,10 @@ async fn failed_verification_leaves_config_byte_for_byte_unchanged(
         );
 
         assert!(app
-            .verify_and_save_environment_setup(EnvironmentSetupPlan::new(setup_credentials()))
+            .verify_and_save_environment_setup(
+                EnvironmentSetupPlan::new(setup_credentials()),
+                false
+            )
             .await
             .is_err());
         assert_eq!(fs::read(path)?, before);
