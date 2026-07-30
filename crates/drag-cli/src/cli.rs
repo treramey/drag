@@ -106,6 +106,9 @@ pub struct TrackingArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum TrackingCommand {
+    /// Record one Claude Code lifecycle event from standard input.
+    #[command(hide = true)]
+    Capture,
     /// Configure sources, schedule, and submission policy.
     Setup(TrackingSetupArgs),
     /// Show tracking configuration, activity, health, and authorization.
@@ -474,6 +477,10 @@ pub struct SetupArgs {
     /// Perform read-only Jira and Tempo checks during an unattended dry-run.
     #[arg(long, requires_all = ["from_env", "dry_run"])]
     pub verify: bool,
+
+    /// Install local Claude Code lifecycle capture hooks.
+    #[arg(long, requires = "from_env")]
+    pub claude_code: bool,
 }
 
 #[derive(Debug, Args)]

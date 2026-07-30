@@ -185,6 +185,7 @@ async fn pty_setup_helper() -> Result<(), Box<dyn std::error::Error>> {
         no_open: true,
         dry_run: false,
         verify: false,
+        claude_code: false,
     });
     if scenario == "ratatui-panic" {
         let outcome = AssertUnwindSafe(setup).catch_unwind().await;

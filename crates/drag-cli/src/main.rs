@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod browser;
+mod claude_tracking;
 mod cli;
 mod config;
 mod delete;
@@ -90,6 +91,9 @@ async fn run(cli: Cli, mode: ResolvedOutputMode) -> Result<RunResult, CliError> 
     }
     let path = cli.config.unwrap_or(config::config_path()?);
     if let Command::Tracking(args) = cli.command {
+        if matches!(&args.command, crate::cli::TrackingCommand::Capture) {
+            return claude_tracking::capture_from_stdin().map(RunResult::Rendered);
+        }
         return tracking::run(args, mode, &path).map(RunResult::Delegated);
     }
     let timezone = default_timezone(cli.timezone.as_deref())?;

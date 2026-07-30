@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::cli::{TrackingSetupArgs, TrackingSubmissionMode};
-use crate::tracking;
 use crate::CliError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,17 +78,20 @@ impl<T: TrackingSetupInstaller + ?Sized> TrackingSetupInstaller for std::sync::A
 }
 
 pub(crate) struct ProcessTrackingSetupInstaller {
-    config_path: PathBuf,
+    _config_path: PathBuf,
 }
 
 impl ProcessTrackingSetupInstaller {
     pub(crate) fn new(config_path: PathBuf) -> Self {
-        Self { config_path }
+        Self {
+            _config_path: config_path,
+        }
     }
 }
 
 impl TrackingSetupInstaller for ProcessTrackingSetupInstaller {
     fn install(&self, plan: &TrackingSetupPlan) -> Result<Value, TrackingSetupInstallFailure> {
-        tracking::run_setup_capture(plan.clone().into_args(), &self.config_path)
+        let _ = plan;
+        crate::claude_tracking::install_default().map_err(TrackingSetupInstallFailure::from)
     }
 }

@@ -2206,8 +2206,8 @@ fn headless_setup_dry_run_emits_a_secret_free_local_plan_without_writing(
     assert_eq!(body["data"]["localValidation"]["status"], "passed");
     assert_eq!(body["data"]["remoteVerification"]["status"], "planned");
     assert_eq!(body["data"]["configuration"]["status"], "planned");
-    assert_eq!(body["data"]["automaticTracking"]["status"], "notRequested");
-    assert_eq!(body["data"]["automaticTracking"]["effects"], false);
+    assert_eq!(body["data"]["claudeTracking"]["status"], "notRequested");
+    assert_eq!(body["data"]["claudeTracking"]["effects"], false);
     assert_eq!(fs::read(&path)?, original);
     let all_output = format!(
         "{}{}",
@@ -2343,5 +2343,87 @@ fn interactive_setup_without_a_terminal_points_automation_to_from_env(
         .as_str()
         .is_some_and(|message| message.contains("setup --from-env")));
     assert!(!path.exists());
+    Ok(())
+}
+
+#[test]
+fn unattended_claude_setup_dry_run_reports_without_writing(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let config = directory.path().join("config.json");
+    let settings = directory.path().join("claude-settings.json");
+    let state = directory.path().join("tracking");
+    fs::write(&settings, r#"{"theme":"dark"}"#)?;
+    let before = fs::read(&settings)?;
+
+    let output = command(&config)?
+        .args(["setup", "--from-env", "--dry-run", "--claude-code"])
+        .env("ATLASSIAN_HOST", "example.atlassian.net")
+        .env("ATLASSIAN_EMAIL", "person@example.com")
+        .env("ATLASSIAN_TOKEN", "jira-secret")
+        .env("TEMPO_TOKEN", "tempo-secret")
+        .env("DRAG_CLAUDE_SETTINGS", &settings)
+        .env("DRAG_TRACKING_DIR", &state)
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(body["data"]["claudeTracking"]["status"], "planned");
+    assert_eq!(fs::read(settings)?, before);
+    assert!(!state.exists());
+    assert!(!config.exists());
+    Ok(())
+}
+
+#[test]
+fn hidden_capture_command_persists_minimized_event_and_deduplicates_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let config = directory.path().join("config.json");
+    let state = directory.path().join("tracking");
+    let payload = r#"{"hook_event_name":"SessionStart","session_id":"private-session","cwd":"/private/customer/repo","timestamp":"2026-03-01T10:00:00Z","transcript_path":"/private/transcript"}"#;
+
+    for expected_duplicate in [false, true] {
+        let output = command(&config)?
+            .args(["tracking", "capture"])
+            .env("DRAG_TRACKING_DIR", &state)
+            .write_stdin(payload)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let body: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(body["data"]["duplicate"], expected_duplicate);
+        assert_eq!(body["data"]["networkAccess"], false);
+    }
+    let persisted = fs::read_to_string(state.join("events.json"))?;
+    assert!(!persisted.contains("private-session"));
+    assert!(!persisted.contains("/private"));
+    let events: Value = serde_json::from_str(&persisted)?;
+    assert_eq!(events.as_object().map(serde_json::Map::len), Some(1));
+    Ok(())
+}
+
+#[test]
+fn hidden_capture_command_rejects_oversized_input_without_state(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let directory = TempDir::new()?;
+    let config = directory.path().join("config.json");
+    let state = directory.path().join("tracking");
+    let output = command(&config)?
+        .args(["tracking", "capture"])
+        .env("DRAG_TRACKING_DIR", &state)
+        .write_stdin("x".repeat(65 * 1024))
+        .output()?;
+    assert_eq!(output.status.code(), Some(2));
+    let body: Value = serde_json::from_slice(&output.stderr)?;
+    assert_eq!(body["error"]["code"], "invalid_input");
+    assert!(!state.exists());
     Ok(())
 }
