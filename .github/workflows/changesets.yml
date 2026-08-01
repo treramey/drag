@@ -17,7 +17,7 @@ jobs:
   release-pr:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
@@ -27,7 +27,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --ignore-scripts --frozen-lockfile
-      - uses: changesets/action@6a0a831ff30acef54f2c6aa1cbbc1096b066edaf # v1
+      - uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
           version: pnpm run version-sync
           publish: pnpm run tag-release
