@@ -21,9 +21,9 @@ chrono-tz.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 thiserror.workspace = true
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 fs2 = "0.4"
 tempfile = "3.20"
 
